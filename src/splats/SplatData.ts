@@ -1,6 +1,7 @@
 import { Vector3 } from "../math/Vector3";
 import { Quaternion } from "../math/Quaternion";
 import { Matrix3 } from "../math/Matrix3";
+import { SphericalHarmonicsData } from "./SphericalHarmonicsData";
 
 class SplatData {
     static RowLength = 3 * 4 + 3 * 4 + 4 + 4;
@@ -14,6 +15,7 @@ class SplatData {
     private _scales: Float32Array;
     private _colors: Uint8Array;
     private _selection: Uint8Array;
+    private _sphericalHarmonics: SphericalHarmonicsData | null;
 
     translate: (translation: Vector3) => void;
     rotate: (rotation: Quaternion) => void;
@@ -33,6 +35,7 @@ class SplatData {
         rotations: Float32Array | null = null,
         scales: Float32Array | null = null,
         colors: Uint8Array | null = null,
+        sphericalHarmonics: SphericalHarmonicsData | null = null,
     ) {
         this._vertexCount = vertexCount;
         this._positions = positions || new Float32Array(0);
@@ -40,6 +43,7 @@ class SplatData {
         this._scales = scales || new Float32Array(0);
         this._colors = colors || new Uint8Array(0);
         this._selection = new Uint8Array(this.vertexCount);
+        this._sphericalHarmonics = sphericalHarmonics;
 
         this.translate = (translation: Vector3) => {
             for (let i = 0; i < this.vertexCount; i++) {
@@ -199,6 +203,18 @@ class SplatData {
         return this._selection;
     }
 
+    get sphericalHarmonics() {
+        return this._sphericalHarmonics;
+    }
+
+    set sphericalHarmonics(value: SphericalHarmonicsData | null) {
+        this._sphericalHarmonics = value;
+    }
+
+    get hasSphericalHarmonics() {
+        return this._sphericalHarmonics !== null;
+    }
+
     clone() {
         return new SplatData(
             this.vertexCount,
@@ -206,6 +222,7 @@ class SplatData {
             new Float32Array(this.rotations),
             new Float32Array(this.scales),
             new Uint8Array(this.colors),
+            this.sphericalHarmonics ? this.sphericalHarmonics.clone() : null,
         );
     }
 }

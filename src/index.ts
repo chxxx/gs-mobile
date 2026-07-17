@@ -1,6 +1,7 @@
 export { Object3D } from "./core/Object3D";
 export { SplatData } from "./splats/SplatData";
 export { SplatvData } from "./splats/SplatvData";
+export { SphericalHarmonicsData } from "./splats/SphericalHarmonicsData";
 export { Splat } from "./splats/Splat";
 export { Splatv } from "./splats/Splatv";
 export { CameraData } from "./cameras/CameraData";

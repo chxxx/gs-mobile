@@ -57,16 +57,41 @@
                 font-size: 16px;
                 display: none;
             }
-            #fps {
+            #stats {
                 position: absolute;
                 top: 16px;
                 right: 16px;
                 z-index: 10;
-                color: #0f0;
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+                padding: 10px 14px;
+                background: rgba(20, 20, 24, 0.72);
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                border-radius: 10px;
+                backdrop-filter: blur(8px);
+                box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+                color: #f0f0f5;
                 font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-                font-size: 14px;
-                text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+                font-size: 13px;
+                line-height: 1.5;
                 pointer-events: none;
+                min-width: 130px;
+            }
+            #stats .row {
+                display: flex;
+                justify-content: space-between;
+                gap: 16px;
+            }
+            #stats .label {
+                color: #a0a0a8;
+            }
+            #stats .value {
+                color: #fff;
+                font-weight: 600;
+            }
+            #stats .value.sh {
+                color: #60a5fa;
             }
         </style>
     </head>
@@ -77,7 +102,10 @@
                 <input id="file-input" type="file" accept=".ply" />
             </label>
         </div>
-        <div id="fps">FPS: --</div>
+        <div id="stats">
+            <div class="row"><span class="label">FPS</span><span class="value" id="fps-value">--</span></div>
+            <div class="row"><span class="label">SH</span><span class="value sh" id="sh-value">--</span></div>
+        </div>
         <div id="progress">Loading...</div>
         <canvas id="canvas"></canvas>
         <script src="./demo.ts" type="module"></script>

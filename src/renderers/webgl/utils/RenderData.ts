@@ -1,5 +1,6 @@
 import { Scene } from "../../../core/Scene";
 import { Splat } from "../../../splats/Splat";
+import { SphericalHarmonicsData } from "../../../splats/SphericalHarmonicsData";
 import DataWorker from "./DataWorker.ts?worker&inline";
 const createDataWorker = () => new DataWorker();
 import createDataModule from "../../../wasm/data.js";
@@ -31,6 +32,7 @@ class RenderData {
     private _rotations: Float32Array;
     private _scales: Float32Array;
     private _vertexCount: number;
+    private _sphericalHarmonics: SphericalHarmonicsData | null;
     private _updating: Set<Splat> = new Set<Splat>();
     private _dirty: Set<Splat> = new Set<Splat>();
     private _worker: Worker;
@@ -55,6 +57,19 @@ class RenderData {
                 vertexCount += object.data.vertexCount;
                 splatIndex++;
             }
+        }
+
+        this._sphericalHarmonics = null;
+
+        const splats = Array.from(this._splatIndices.keys());
+        const splatsWithSH = splats.filter((splat) => splat.data.sphericalHarmonics !== null);
+
+        if (splatsWithSH.length === 1 && splats.length === 1) {
+            this._sphericalHarmonics = splatsWithSH[0].data.sphericalHarmonics;
+        } else if (splatsWithSH.length > 0) {
+            console.warn(
+                "Spherical Harmonics rendering currently supports one SH-enabled Splat per scene. Falling back to base colors.",
+            );
         }
 
         this._vertexCount = vertexCount;
@@ -426,6 +441,10 @@ class RenderData {
 
     get vertexCount() {
         return this._vertexCount;
+    }
+
+    get sphericalHarmonics() {
+        return this._sphericalHarmonics;
     }
 
     get needsRebuild() {

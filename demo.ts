@@ -3,7 +3,8 @@ import * as SPLAT from "./src/index";
 const canvas = document.getElementById("canvas") as HTMLCanvasElement;
 const progressEl = document.getElementById("progress") as HTMLDivElement;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
-const fpsEl = document.getElementById("fps") as HTMLDivElement;
+const fpsValueEl = document.getElementById("fps-value") as HTMLSpanElement;
+const shValueEl = document.getElementById("sh-value") as HTMLSpanElement;
 
 const renderer = new SPLAT.WebGLRenderer(canvas);
 const scene = new SPLAT.Scene();
@@ -26,6 +27,7 @@ async function loadPlyFromUrl(url: string) {
         "",
         false,
     );
+    updateSHInfo();
     setProgress(false);
 }
 
@@ -39,7 +41,19 @@ async function loadPlyFromFile(file: File) {
         },
         "",
     );
+    updateSHInfo();
     setProgress(false);
+}
+
+function updateSHInfo() {
+    let hasSH = false;
+    for (const object of scene.objects) {
+        if (object instanceof SPLAT.Splat && object.data.hasSphericalHarmonics) {
+            hasSH = true;
+            break;
+        }
+    }
+    shValueEl.textContent = hasSH ? "3阶" : "DC (0阶)";
 }
 
 function startRenderLoop() {
@@ -56,7 +70,7 @@ function startRenderLoop() {
 
         if (now - lastFpsTime >= 1000) {
             const fps = Math.round((frameCount * 1000) / (now - lastFpsTime));
-            fpsEl.textContent = `FPS: ${fps}`;
+            fpsValueEl.textContent = String(fps);
             frameCount = 0;
             lastFpsTime = now;
         }
