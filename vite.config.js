@@ -2,7 +2,7 @@ import { defineConfig } from 'vite';
 import { resolve } from 'path';
 import dts from 'vite-plugin-dts';
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [dts()],
   base: './',
   build: {
@@ -37,5 +37,5 @@ export default defineConfig({
       }
     }
   },
-  publicDir: false
-});
+  publicDir: command === 'serve' ? 'public' : false
+}));
