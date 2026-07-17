@@ -7,6 +7,7 @@ import { Converter } from "../utils/Converter";
 import { initiateFetchRequest, loadDataIntoBuffer } from "../utils/LoaderUtils";
 import { SphericalHarmonicsData } from "../splats/SphericalHarmonicsData";
 import { packHalf2x16 } from "../utils/HalfFloat";
+import { IsQPLY, ParseQPLYBuffer } from "./QPLYLoaderUtils";
 
 type PlyProperty = {
     name: string;
@@ -66,7 +67,21 @@ class PLYLoader {
     }
 
     static LoadFromArrayBuffer(arrayBuffer: ArrayBufferLike, scene: Scene, format: string = ""): Splat {
-        const result = this._ParsePLYBufferWithSH(arrayBuffer as ArrayBuffer, format);
+        const inputBuffer = arrayBuffer as ArrayBuffer;
+
+        if (IsQPLY(inputBuffer)) {
+            const result = ParseQPLYBuffer(inputBuffer);
+            const data = SplatData.Deserialize(new Uint8Array(result.splatBuffer));
+
+            data.sphericalHarmonics = result.sphericalHarmonics;
+
+            const splat = new Splat(data);
+            scene.addObject(splat);
+
+            return splat;
+        }
+
+        const result = this._ParsePLYBufferWithSH(inputBuffer, format);
         const data = SplatData.Deserialize(new Uint8Array(result.splatBuffer));
 
         if (result.sphericalHarmonics) {

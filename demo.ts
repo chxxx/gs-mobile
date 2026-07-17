@@ -17,6 +17,7 @@ function setProgress(visible: boolean, text = "Loading...") {
 }
 
 async function loadPlyFromUrl(url: string) {
+    scene.reset();
     setProgress(true, "Loading PLY...");
     await SPLAT.PLYLoader.LoadAsync(
         url,
@@ -32,6 +33,7 @@ async function loadPlyFromUrl(url: string) {
 }
 
 async function loadPlyFromFile(file: File) {
+    scene.reset();
     setProgress(true, `Loading ${file.name}...`);
     await SPLAT.PLYLoader.LoadFromFileAsync(
         file,
@@ -92,12 +94,12 @@ fileInput.addEventListener("change", async (e) => {
 });
 
 async function main() {
-    // 默认尝试加载 public/point_cloud.ply；如果没有，可通过页面左上角按钮选择本地文件。
+    // 默认尝试加载 public/point_cloud_quantised_half.ply；如果没有，可通过页面左上角按钮选择本地文件。
     try {
-        await loadPlyFromUrl("/point_cloud.ply");
+        await loadPlyFromUrl("/point_cloud_quantised_half.ply");
     } catch (e) {
-        console.warn("public/point_cloud.ply 未找到，等待用户选择本地 PLY 文件", e);
-        setProgress(true, "请将 PLY 文件放入 public/point_cloud.ply，或点击左上角选择本地文件");
+        console.warn("public/point_cloud_quantised_half.ply 未找到，等待用户选择本地 PLY 文件", e);
+        setProgress(true, "请将 PLY 文件放入 public/point_cloud_quantised_half.ply，或点击左上角选择本地文件");
     }
 
     startRenderLoop();
