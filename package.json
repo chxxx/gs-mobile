@@ -20,8 +20,8 @@
         "dev": "vite",
         "preview": "vite preview",
         "test": "vitest run",
-        "lint": "eslint \"src/**/*.ts\" \"examples/**/*.ts\"",
-        "format": "prettier --write \"src/**/*.ts\" \"examples/**/*.ts\""
+        "lint": "eslint \"*.ts\" \"src/**/*.ts\" \"examples/**/*.ts\"",
+        "format": "prettier --write \"*.ts\" \"src/**/*.ts\" \"examples/**/*.ts\""
     },
     "repository": {
         "type": "git",
