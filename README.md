@@ -1,52 +1,26 @@
-# gsplat.js
+# splat-shq.js
 
-#### JavaScript Gaussian Splatting library
+A JavaScript/WebGL2 Gaussian Splatting renderer with **3rd-order Spherical Harmonics (SH)** and **QPLY** support.
 
-gsplat.js is an easy-to-use, general-purpose, open-source 3D Gaussian Splatting library, providing functionality similar to [three.js](https://github.com/mrdoob/three.js) but for Gaussian Splatting.
+This project extends the original [gsplat.js](https://github.com/dylanebert/gsplat.js) with view-dependent color rendering for standard 3DGS PLY files and quantized-half PLY (QPLY) files produced by vector-quantized 3DGS pipelines.
 
-### Quick Start
+## Features
 
--   **Live Viewer Demo:** Explore this library in action in the 🤗 [Hugging Face demo](https://huggingface.co/spaces/dylanebert/igf). Note: May not work on all devices; use `Bonsai` for the lowest memory requirements.
--   **Editor Demo:** Try new real-time updates and editing features in the [gsplat.js editor](https://huggingface.co/spaces/dylanebert/gsplat-editor).
--   **Code Example:** Start coding immediately with this [jsfiddle example](https://jsfiddle.net/wdn6vasc/).
+- **Standard 3DGS PLY loading** with full 3rd-order SH (`f_dc_*` + `f_rest_0..44`)
+- **QPLY loading** for quantized-half PLY outputs (`vertex_0..3` + `codebook_centers`)
+- **Single WebGL2 shader pipeline** that handles both standard SH and adaptive-degree QPLY
+- **Half-float packing utilities** for compact SH texture storage
+- **Examples** covering vanilla JS, file loading, PLY conversion, FPS controls, and scene editing
 
-### Installation
+## Quick Start
 
-**Prerequisites**: Ensure your development environment supports ES6 modules.
+```bash
+npm install
+npm run build
+```
 
-1. **Set Up a Project:** (If not already set up)
-
-    Install [Node.js](https://nodejs.org/en/download/) and [NPM](https://www.npmjs.com/get-npm), then initialize a new project using a module bundler like [Vite](https://vitejs.dev/):
-
-    ```bash
-    npm create vite@latest gsplat -- --template vanilla-ts
-    ```
-
-2. **Test Your Environment:**
-
-    ```bash
-    cd gsplat
-    npm install
-    npm run dev
-    ```
-
-3. **Install gsplat.js:**
-
-    ```bash
-    npm install --save gsplat
-    ```
-
-### Usage
-
-#### Creating a Scene
-
--   Import **gsplat.js** components and set up a basic scene.
--   Load Gaussian Splatting data and start a rendering loop.
-
-(in `src/main.ts` if you followed the Vite setup)
-
-```js
-import * as SPLAT from "gsplat";
+```ts
+import * as SPLAT from "splat-shq";
 
 const scene = new SPLAT.Scene();
 const camera = new SPLAT.Camera();
@@ -54,14 +28,15 @@ const renderer = new SPLAT.WebGLRenderer();
 const controls = new SPLAT.OrbitControls(camera, renderer.canvas);
 
 async function main() {
-    const url = "https://huggingface.co/datasets/dylanebert/3dgs/resolve/main/bonsai/bonsai-7k.splat";
-
-    await SPLAT.Loader.LoadAsync(url, scene, () => {});
+    await SPLAT.PLYLoader.LoadAsync(
+        "path/to/baseline_scene.ply",
+        scene,
+        (progress) => console.log(progress),
+    );
 
     const frame = () => {
         controls.update();
         renderer.render(scene, camera);
-
         requestAnimationFrame(frame);
     };
 
@@ -71,36 +46,74 @@ async function main() {
 main();
 ```
 
-This script sets up a basic scene with Gaussian Splatting data loaded from URL and starts a rendering loop.
+For QPLY files, use the same `PLYLoader` API:
 
-### FAQ
+```ts
+await SPLAT.PLYLoader.LoadAsync("path/to/point_cloud_quantised_half.ply", scene);
+```
 
-**Q: Can I use .ply files?**
+The loader auto-detects QPLY headers and routes them through the dedicated QPLY decoder.
 
-A: Yes, gsplat.js supports `.ply` files. See the [ply-converter example](https://github.com/dylanebert/gsplat.js/blob/main/examples/ply-converter/src/main.ts) for details on how to convert `.ply` to `.splat`. Alternatively, convert PLY files from URL in this [jsfiddle example](https://jsfiddle.net/2sq3pvdt/1/).
+## Examples
 
-**Q: What are .splat files?**
+| Example | Description |
+|---|---|
+| [`examples/vanilla-js`](examples/vanilla-js) | Minimal browser usage without a bundler |
+| [`examples/file-loader`](examples/file-loader) | Drag-and-drop PLY viewer |
+| [`examples/ply-converter`](examples/ply-converter) | Convert between `.ply` and `.splat` |
+| [`examples/simple-server`](examples/simple-server) | Vite-based local server setup |
+| [`examples/fps`](examples/fps) | First-person camera controls |
+| [`examples/editor`](examples/editor) | Real-time scene editing |
 
-A: `.splat` files are a compact form of the splat data, offering quicker loading times than `.ply` files. They consist of a raw Uint8Array buffer.
+Run any example with:
 
-> ⚠️ The `.splat` format does not contain SH coefficients, so colors are not view-dependent.
+```bash
+cd examples/<name>
+npm install
+npm run dev
+```
 
-**Q: Can I convert .splat files to .ply?**
+## Build
 
-A: Yes, see the commented code in the [ply-converter example](https://github.com/dylanebert/gsplat.js/blob/main/examples/ply-converter/src/main.ts). Alternatively, convert `.splat` to `.ply` from URL in this [jsfiddle example](https://jsfiddle.net/aL81ds3e/).
+```bash
+# Build WASM utilities and the library
+npm run build
 
-> ⚠️ When converting `.ply` -> `.splat` -> `.ply`, SH coefficients will be lost.
+# Lint and format
+npm run lint
+npm run format
+```
 
-### License
+## Technical Notes
 
-This project is released under the MIT license. It is built upon several other open-source projects:
+### SH Texture Layout
 
--   [three.js](https://github.com/mrdoob/three.js), MIT License (c) 2010-2023 three.js authors
--   [antimatter15/splat](https://github.com/antimatter15/splat), MIT License (c) 2023 Kevin Kwok
--   [UnityGaussianSplatting](https://github.com/aras-p/UnityGaussianSplatting), MIT License (c) 2023 Aras Pranckevičius
+Both standard PLY and QPLY share the same SH texture format:
 
-Please note that the license of the original [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting) research project is non-commercial. While this library provides an open-source rendering implementation, users should consider the source of the splat data separately.
+- Three `RGBA32UI` textures (R, G, B channels)
+- Each texel packs two half-float coefficients via `unpackHalf2x16`
+- A single `ivec3 u_bandIndex` uniform marks degree boundaries for adaptive QPLY rendering
 
-### Contact
+### QPLY Decoder
 
-Feel free to open issues, join the [Hugging Face Discord](https://hf.co/join/discord), or email me directly at [dylan@huggingface.co](mailto:dylan@huggingface.co).
+`src/loaders/QPLYLoaderUtils.ts` implements:
+
+- Multi-element header parsing (`vertex_0..3`, `codebook_centers 256`)
+- Half-float position decoding
+- Codebook lookups for scale, rotation, DC features, opacity, and rest SH coefficients
+- Adaptive degree handling (degree 0 vertices skip SH texture allocation)
+
+## Acknowledgments
+
+This project is based on [gsplat.js](https://github.com/dylanebert/gsplat.js) by Dylan Ebert, released under the MIT license.
+
+Additional references:
+
+- [three.js](https://github.com/mrdoob/three.js), MIT License
+- [antimatter15/splat](https://github.com/antimatter15/splat), MIT License
+- [UnityGaussianSplatting](https://github.com/aras-p/UnityGaussianSplatting), MIT License
+Please note that the license of the original [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting) research project is non-commercial. This library provides an open-source rendering implementation; users should consider the source of their splat data separately.
+
+## License
+
+MIT

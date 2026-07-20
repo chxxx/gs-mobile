@@ -1,4 +1,4 @@
-import * as SPLAT from "gsplat";
+import * as SPLAT from "splat-shq";
 
 const axisVertexShader = /*glsl*/ `#version 300 es
 uniform mat4 projection, view;

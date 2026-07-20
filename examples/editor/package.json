@@ -5,7 +5,7 @@
     "type": "module",
     "scripts": {
         "dev": "vite",
-        "build": "tsc && vite build",
+        "build": "tsc \u0026\u0026 vite build",
         "preview": "vite preview",
         "start": "serve dist"
     },
@@ -15,6 +15,6 @@
         "vite": "^7.0.4"
     },
     "dependencies": {
-        "gsplat": "^1.0.6"
+        "splat-shq": "file:../.."
     }
 }

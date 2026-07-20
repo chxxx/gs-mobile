@@ -1,4 +1,4 @@
-import * as SPLAT from "gsplat";
+import * as SPLAT from "splat-shq";
 import { InputHandler } from "./InputHandler";
 
 class MouseManager implements InputHandler {

@@ -1,4 +1,4 @@
-import * as SPLAT from "gsplat";
+import * as SPLAT from "splat-shq";
 import { UndoManager } from "./UndoManager";
 import { ModeManager } from "./ModeManager";
 import { SelectionManager } from "./SelectionManager";

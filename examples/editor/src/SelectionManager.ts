@@ -1,4 +1,4 @@
-import * as SPLAT from "gsplat";
+import * as SPLAT from "splat-shq";
 
 class SelectionManager {
     private static _instance: SelectionManager;

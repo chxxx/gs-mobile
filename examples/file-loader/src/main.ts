@@ -1,4 +1,4 @@
-import * as SPLAT from "gsplat";
+import * as SPLAT from "splat-shq";
 
 const renderer = new SPLAT.WebGLRenderer();
 const scene = new SPLAT.Scene();

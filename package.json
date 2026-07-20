@@ -1,7 +1,7 @@
 {
-    "name": "gsplat",
+    "name": "splat-shq",
     "version": "1.2.9",
-    "description": "JavaScript Gaussian Splatting library",
+    "description": "JavaScript/WebGL2 Gaussian Splatting renderer with 3rd-order SH and QPLY support",
     "main": "dist/index.es.js",
     "module": "dist/index.es.js",
     "types": "dist/index.d.ts",
@@ -19,27 +19,31 @@
         "build": "npm run build:wasm && vite build && npm run copy:wasm",
         "dev": "vite",
         "preview": "vite preview",
-        "test": "echo \"No tests specified\" && exit 0",
+        "test": "vitest run",
         "lint": "eslint \"src/**/*.ts\" \"examples/**/*.ts\"",
         "format": "prettier --write \"src/**/*.ts\" \"examples/**/*.ts\""
     },
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/dylanebert/splat.js.git"
+        "url": "git+https://github.com/YOUR_USERNAME/splat-shq.js.git"
     },
     "keywords": [
+        "splat-shq",
         "gsplat",
         "gaussian splatting",
+        "spherical harmonics",
+        "qply",
+        "quantized",
         "javascript",
         "3d",
-        "webgl"
+        "webgl2"
     ],
-    "author": "dylanebert",
+    "author": "YOUR_NAME",
     "license": "MIT",
     "bugs": {
-        "url": "https://github.com/dylanebert/splat.js/issues"
+        "url": "https://github.com/YOUR_USERNAME/splat-shq.js/issues"
     },
-    "homepage": "https://github.com/dylanebert/splat.js#readme",
+    "homepage": "https://github.com/YOUR_USERNAME/splat-shq.js#readme",
     "devDependencies": {
         "@types/node": "^24.0.13",
         "@typescript-eslint/eslint-plugin": "^8.36.0",
@@ -54,7 +58,8 @@
         "vite": "^5.0.0",
         "vite-plugin-dts": "^4.3.0",
         "vite-plugin-top-level-await": "^1.5.0",
-        "vite-plugin-wasm": "^3.5.0"
+        "vite-plugin-wasm": "^3.5.0",
+        "vitest": "^4.1.10"
     },
     "files": [
         "dist/**/*"

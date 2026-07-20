@@ -2,7 +2,7 @@ import { defineConfig } from 'vite';
 
 export default defineConfig({
   optimizeDeps: {
-    include: ['gsplat']
+    include: ['splat-shq']
   },
   build: {
     target: 'esnext'

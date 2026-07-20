@@ -134,3 +134,8 @@ dist
 playground/
 .venv/
 .claude/
+
+# Project specific
+vite.config.js.timestamp-*.mjs
+public/*.ply
+public/*.splat

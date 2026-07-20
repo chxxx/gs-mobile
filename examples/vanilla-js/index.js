@@ -1,4 +1,7 @@
-import * as SPLAT from "https://cdn.jsdelivr.net/npm/gsplat@latest";
+// After publishing to npm, you can use the CDN URL:
+// import * as SPLAT from "https://cdn.jsdelivr.net/npm/splat-shq@latest";
+// For local development, build the root package first with `npm run build`.
+import * as SPLAT from "../../dist/index.es.js";
 
 const canvas = document.getElementById("canvas");
 const progressDialog = document.getElementById("progress-dialog");

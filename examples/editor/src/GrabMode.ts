@@ -1,4 +1,4 @@
-import * as SPLAT from "gsplat";
+import * as SPLAT from "splat-shq";
 import { InputMode } from "./InputMode";
 import { Engine } from "./Engine";
 import { ModeManager } from "./ModeManager";

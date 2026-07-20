@@ -1,6 +1,6 @@
-# gsplat.js editor
+# splat-shq.js editor
 
-This simple editor showcases the realtime editing capabilities of gsplat.js.
+This simple editor showcases the realtime editing capabilities of splat-shq.js.
 
 ## Usage
 

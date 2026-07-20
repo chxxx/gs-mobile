@@ -1,4 +1,4 @@
-import * as SPLAT from "gsplat";
+import * as SPLAT from "splat-shq";
 import { OrbitControls } from "./OrbitControls";
 import { GridProgram } from "./programs/GridProgram";
 import { AxisProgram } from "./programs/AxisProgram";

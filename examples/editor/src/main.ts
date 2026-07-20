@@ -1,4 +1,4 @@
-import * as SPLAT from "gsplat";
+import * as SPLAT from "splat-shq";
 import { Engine } from "./Engine";
 import { SelectionManager } from "./SelectionManager";
 

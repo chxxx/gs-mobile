@@ -328,6 +328,13 @@ function ParseQPLYBuffer(inputBuffer: ArrayBuffer): ParsedQPLYResult {
                 coeffG[0] = fdc1;
                 coeffB[0] = fdc2;
 
+                /**
+                 * QPLY stores rest SH indices in channel-major order:
+                 * f_rest_0..14 -> R indices for coeff 1..15
+                 * f_rest_15..29 -> G indices for coeff 1..15
+                 * f_rest_30..44 -> B indices for coeff 1..15
+                 * Each index points into the per-coefficient codebook features_rest_0..14.
+                 */
                 const restPerChannel = restProperties.length === degreeRestCount[group] * 3;
 
                 for (let localRestIndex = 0; localRestIndex < restProperties.length; localRestIndex++) {
@@ -338,6 +345,8 @@ function ParseQPLYBuffer(inputBuffer: ArrayBuffer): ParsedQPLYResult {
                         coeffIndex = localRestIndex % degreeRestCount[group];
                         channel = Math.floor(localRestIndex / degreeRestCount[group]);
                     } else {
+                        // Fallback for non-standard layouts: treat each property as a single coefficient
+                        // and apply the same value to all channels.
                         coeffIndex = localRestIndex;
                         channel = -1;
                     }

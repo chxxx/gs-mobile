@@ -1,4 +1,4 @@
-import * as SPLAT from "gsplat";
+import * as SPLAT from "splat-shq";
 
 const canvas = document.getElementById("canvas") as HTMLCanvasElement;
 const progressDialog = document.getElementById("progress-dialog") as HTMLDialogElement;

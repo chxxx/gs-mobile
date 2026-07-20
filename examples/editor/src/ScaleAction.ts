@@ -1,4 +1,4 @@
-import * as SPLAT from "gsplat";
+import * as SPLAT from "splat-shq";
 import { Action } from "./Action";
 
 class ScaleAction implements Action {
