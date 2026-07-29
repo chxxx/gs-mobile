@@ -113,6 +113,7 @@ const runSort = () => {
         heapU32.set(sortData.transformIndices, transformIndicesPtr / 4);
         heapF32.set(new Float32Array(viewProj), viewProjPtr / 4);
 
+        const sortStart = performance.now();
         wasmModule._sort(
             viewProjPtr,
             transformsPtr,
@@ -124,6 +125,7 @@ const runSort = () => {
             startsPtr,
             countsPtr,
         );
+        console.log(`sort: ${performance.now() - sortStart} ms`);
 
         // Validate depth index buffer size
         if (depthIndexPtr + sortData.vertexCount * 4 > heapU32.buffer.byteLength) {

@@ -44,8 +44,9 @@ export class WebGLRenderer {
         const programs = [this._renderProgram] as ShaderProgram[];
 
         this.resize = () => {
-            const width = canvas.clientWidth;
-            const height = canvas.clientHeight;
+            const dpr = window.devicePixelRatio || 1;
+            const width = Math.floor(canvas.clientWidth * dpr);
+            const height = Math.floor(canvas.clientHeight * dpr);
             if (canvas.width !== width || canvas.height !== height) {
                 this.setSize(width, height);
             }

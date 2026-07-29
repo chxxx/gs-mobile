@@ -226,6 +226,7 @@ class RenderData {
             wasmModule.HEAPU8.set(splat.data.colors, colorsPtr);
             wasmModule.HEAPU8.set(splat.data.selection, selectionPtr);
 
+            const buildStart = performance.now();
             wasmModule._pack(
                 splat.selected,
                 splat.data.vertexCount,
@@ -239,6 +240,7 @@ class RenderData {
                 worldRotationsPtr,
                 worldScalesPtr,
             );
+            console.log(`Build render data: ${performance.now() - buildStart} ms`);
 
             const outData = new Uint32Array(wasmModule.HEAPU32.buffer, dataPtr, splat.data.vertexCount * 8);
             const worldPositions = new Float32Array(

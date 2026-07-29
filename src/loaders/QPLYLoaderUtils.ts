@@ -137,6 +137,7 @@ function IsQPLY(inputBuffer: ArrayBuffer): boolean {
 }
 
 function ParseQPLYBuffer(inputBuffer: ArrayBuffer): ParsedQPLYResult {
+    const decodeStart = performance.now();
     const bytes = new Uint8Array(inputBuffer);
     const headerText = new TextDecoder().decode(bytes.slice(0, 1024 * 10));
 
@@ -215,6 +216,9 @@ function ParseQPLYBuffer(inputBuffer: ArrayBuffer): ParsedQPLYResult {
             codebooks[codebookNames[codebookIndex]][centerIndex] = float16BitsToFloat32(bits);
         }
     }
+
+    console.log(`QPLY header/codebook parse: ${performance.now() - decodeStart} ms`);
+    const vertexStart = performance.now();
 
     const totalVertexCount = counts[0] + counts[1] + counts[2] + counts[3];
 
@@ -389,6 +393,11 @@ function ParseQPLYBuffer(inputBuffer: ArrayBuffer): ParsedQPLYResult {
 
         sourceOffset += count * rowLength;
     }
+
+    const vertexElapsed = performance.now() - vertexStart;
+    const totalElapsed = performance.now() - decodeStart;
+    console.log(`QPLY vertex decode/SH pack: ${vertexElapsed} ms`);
+    console.log(`QPLY decode/dequantize total: ${totalElapsed} ms`);
 
     return {
         splatBuffer,

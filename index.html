@@ -45,6 +45,28 @@
             #drop-zone input {
                 display: none;
             }
+            #scene-selector {
+                position: absolute;
+                top: 12px;
+                right: 12px;
+                z-index: 5;
+                display: flex;
+                gap: 8px;
+                align-items: center;
+                padding: 8px 12px;
+                border-radius: 6px;
+                background: rgba(0, 0, 0, 0.6);
+                color: #fff;
+                font-size: 14px;
+            }
+            #scene-selector select {
+                font-size: 14px;
+                padding: 4px 8px;
+                border-radius: 4px;
+                border: none;
+                background: #fff;
+                color: #000;
+            }
             #fps-counter {
                 position: absolute;
                 top: 12px;
@@ -79,6 +101,13 @@
             <p>Drop a local PLY file here</p>
             <p>or click to browse</p>
             <input id="file-input" type="file" accept=".ply" />
+        </div>
+
+        <div id="scene-selector">
+            <label for="scene-select">Scene:</label>
+            <select id="scene-select">
+                <option value="">-- Select a scene --</option>
+            </select>
         </div>
 
         <div id="fps-counter">FPS: 0</div>

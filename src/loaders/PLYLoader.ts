@@ -28,6 +28,7 @@ class PLYLoader {
         format: string = "",
         useCache: boolean = false,
     ): Promise<Splat> {
+        const loadStart = performance.now();
         const res: Response = await initiateFetchRequest(url, useCache);
         const plyData = await loadDataIntoBuffer(res, onProgress);
 
@@ -35,7 +36,9 @@ class PLYLoader {
             throw new Error("Invalid PLY file");
         }
 
-        return this.LoadFromArrayBuffer(plyData.buffer, scene, format);
+        console.log(`File load: ${plyData.byteLength} B, ${performance.now() - loadStart} ms`);
+
+        return this.LoadFromArrayBuffer(plyData.buffer, scene, format, loadStart);
     }
 
     static async LoadFromFileAsync(
@@ -44,11 +47,13 @@ class PLYLoader {
         onProgress?: (progress: number) => void,
         format: string = "",
     ): Promise<Splat> {
+        const loadStart = performance.now();
         const reader = new FileReader();
         let splat = new Splat();
 
         reader.onload = (e) => {
-            splat = this.LoadFromArrayBuffer(e.target!.result as ArrayBuffer, scene, format);
+            console.log(`File read: ${file.size} B, ${performance.now() - loadStart} ms`);
+            splat = this.LoadFromArrayBuffer(e.target!.result as ArrayBuffer, scene, format, loadStart);
         };
 
         reader.onprogress = (e) => {
@@ -66,17 +71,29 @@ class PLYLoader {
         return splat;
     }
 
-    static LoadFromArrayBuffer(arrayBuffer: ArrayBufferLike, scene: Scene, format: string = ""): Splat {
+    static LoadFromArrayBuffer(
+        arrayBuffer: ArrayBufferLike,
+        scene: Scene,
+        format: string = "",
+        loadStart?: number,
+    ): Splat {
         const inputBuffer = arrayBuffer as ArrayBuffer;
+        const arrayStart = loadStart ?? performance.now();
 
         if (IsQPLY(inputBuffer)) {
             const result = ParseQPLYBuffer(inputBuffer);
+
+            const deserializeStart = performance.now();
             const data = SplatData.Deserialize(new Uint8Array(result.splatBuffer));
+            console.log(`SplatData deserialize: ${performance.now() - deserializeStart} ms`);
 
             data.sphericalHarmonics = result.sphericalHarmonics;
 
             const splat = new Splat(data);
             scene.addObject(splat);
+
+            console.log(`Input size: ${inputBuffer.byteLength} B`);
+            console.log(`PLY/QPLY first frame data ready: ${performance.now() - arrayStart} ms`);
 
             return splat;
         }
@@ -90,6 +107,9 @@ class PLYLoader {
 
         const splat = new Splat(data);
         scene.addObject(splat);
+
+        console.log(`Input size: ${inputBuffer.byteLength} B`);
+        console.log(`PLY/QPLY first frame data ready: ${performance.now() - arrayStart} ms`);
 
         return splat;
     }
