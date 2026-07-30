@@ -39,18 +39,30 @@ export default defineConfig(({ command }) => ({
       async configureServer(server) {
         if (throttleSpeedMbps <= 0) return;
         const bytesPerSecond = (throttleSpeedMbps * 1024 * 1024) / 8;
-        console.log(`[Vite] Throttling .ply downloads to ${throttleSpeedMbps} Mbps (${bytesPerSecond.toFixed(0)} B/s)`);
+        console.log(`[Vite] Throttling .ply downloads to ${throttleSpeedMbps} Mbps (${bytesPerSecond.toFixed(0)} B/s), with gzip`);
         const { default: Throttle } = await import('throttle');
+        const { createGzip } = await import('zlib');
         const fs = await import('fs');
         const path = await import('path');
         server.middlewares.use((req, res, next) => {
           if (!req.url?.endsWith('.ply')) return next();
           const filePath = path.join(process.cwd(), req.url);
           if (!fs.existsSync(filePath)) return next();
-          const stat = fs.statSync(filePath);
+          const acceptEncoding = req.headers['accept-encoding'] || '';
+          const useGzip = acceptEncoding.includes('gzip');
           res.setHeader('Content-Type', 'application/octet-stream');
-          res.setHeader('Content-Length', stat.size);
-          fs.createReadStream(filePath).pipe(new Throttle(bytesPerSecond)).pipe(res);
+          if (useGzip) {
+            res.setHeader('Content-Encoding', 'gzip');
+          }
+          const readStream = fs.createReadStream(filePath);
+          const throttle = new Throttle(bytesPerSecond);
+          if (useGzip) {
+            readStream.pipe(createGzip()).pipe(throttle).pipe(res);
+          } else {
+            const stat = fs.statSync(filePath);
+            res.setHeader('Content-Length', stat.size);
+            readStream.pipe(throttle).pipe(res);
+          }
         });
       },
     },
