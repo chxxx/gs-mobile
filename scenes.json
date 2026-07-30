@@ -2,5 +2,9 @@
     {
         "name": "Truck",
         "file": "scenes/truck.ply"
+    },
+    {
+        "name": "Garden",
+        "file": "scenes/garden.ply"
     }
 ]

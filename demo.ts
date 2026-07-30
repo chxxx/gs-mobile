@@ -45,6 +45,17 @@ function hideProgress() {
     progressContainer.hidden = true;
 }
 
+function adjustPixelRatio() {
+    const splat = scene.objects.find((o) => o instanceof SPLAT.Splat) as SPLAT.Splat | undefined;
+    const vertexCount = splat?.data?.vertexCount ?? 0;
+    // Match Flux-GS mobile viewer: scenes with >500K splats use CSS resolution,
+    // smaller scenes render at physical (DPR) resolution.
+    const pixelRatio = vertexCount > 500000 ? 1 : window.devicePixelRatio || 1;
+    renderer.setPixelRatio(pixelRatio);
+    console.log(`Vertex count: ${vertexCount}, pixel ratio set to: ${pixelRatio.toFixed(2)}`);
+    console.log(`Render resolution: ${renderer.canvas.width} x ${renderer.canvas.height}`);
+}
+
 async function loadFromUrl(url: string) {
     resetScene();
     showProgress();
@@ -55,6 +66,7 @@ async function loadFromUrl(url: string) {
         await SPLAT.PLYLoader.LoadAsync(url, scene, (progress) => {
             progressIndicator.value = progress * 100;
         });
+        adjustPixelRatio();
     } catch (err) {
         console.error("Failed to load scene:", err);
         alert(`Failed to load scene: ${url}`);
@@ -74,6 +86,7 @@ async function loadFile(file: File) {
         progressIndicator.value = progress * 100;
     });
 
+    adjustPixelRatio();
     hideProgress();
     dropZone.style.display = "none";
     sceneSelect.value = "";
@@ -158,5 +171,47 @@ function main() {
     void populateSceneSelector();
     requestAnimationFrame(frame);
 }
+
+function setBenchmarkResolution(width: number, height: number) {
+    renderer.disableAutoResize();
+    renderer.setPixelRatio(1);
+    renderer.setSize(width, height);
+    console.log(`Benchmark resolution set to: ${renderer.canvas.width} x ${renderer.canvas.height}`);
+}
+
+async function benchmarkFPS(frameCount: number = 300, batchSize: number = 60) {
+    if (scene.objects.length === 0) {
+        console.warn("No scene loaded");
+        return;
+    }
+
+    // Warm-up
+    for (let i = 0; i < 30; i++) {
+        controls.update();
+        renderer.render(scene, camera);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const start = performance.now();
+    let rendered = 0;
+    while (rendered < frameCount) {
+        const currentBatch = Math.min(batchSize, frameCount - rendered);
+        for (let i = 0; i < currentBatch; i++) {
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        rendered += currentBatch;
+        if (rendered < frameCount) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+    }
+    const elapsed = (performance.now() - start) / 1000;
+    const fps = frameCount / elapsed;
+    console.log(`Benchmark FPS: ${fps.toFixed(2)} (${frameCount} frames in ${elapsed.toFixed(3)} s)`);
+    console.log(`Render resolution: ${renderer.canvas.width} x ${renderer.canvas.height}`);
+}
+
+(window as unknown as { benchmarkFPS: typeof benchmarkFPS }).benchmarkFPS = benchmarkFPS;
+(window as unknown as { setBenchmarkResolution: typeof setBenchmarkResolution }).setBenchmarkResolution = setBenchmarkResolution;
 
 main();

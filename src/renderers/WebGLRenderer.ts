@@ -11,11 +11,16 @@ export class WebGLRenderer {
     private _gl: WebGL2RenderingContext;
     private _backgroundColor: Color32 = new Color32();
     private _renderProgram: RenderProgram;
+    private _pixelRatio: number = window.devicePixelRatio || 1;
+    private _autoResize = true;
 
     addProgram: (program: ShaderProgram) => void;
     removeProgram: (program: ShaderProgram) => void;
     resize: () => void;
     setSize: (width: number, height: number) => void;
+    setPixelRatio: (pixelRatio: number) => void;
+    disableAutoResize: () => void;
+    enableAutoResize: () => void;
     render: (scene: Scene, camera: Camera) => void;
     dispose: () => void;
 
@@ -44,12 +49,26 @@ export class WebGLRenderer {
         const programs = [this._renderProgram] as ShaderProgram[];
 
         this.resize = () => {
-            const dpr = window.devicePixelRatio || 1;
-            const width = Math.floor(canvas.clientWidth * dpr);
-            const height = Math.floor(canvas.clientHeight * dpr);
+            if (!this._autoResize) return;
+            const width = Math.floor(canvas.clientWidth * this._pixelRatio);
+            const height = Math.floor(canvas.clientHeight * this._pixelRatio);
             if (canvas.width !== width || canvas.height !== height) {
                 this.setSize(width, height);
             }
+        };
+
+        this.disableAutoResize = () => {
+            this._autoResize = false;
+        };
+
+        this.enableAutoResize = () => {
+            this._autoResize = true;
+            this.resize();
+        };
+
+        this.setPixelRatio = (pixelRatio: number) => {
+            this._pixelRatio = pixelRatio;
+            this.resize();
         };
 
         this.setSize = (width: number, height: number) => {

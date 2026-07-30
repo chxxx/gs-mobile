@@ -1,9 +1,60 @@
 import { defineConfig } from 'vite';
 import { resolve } from 'path';
 import dts from 'vite-plugin-dts';
+import compression from 'vite-plugin-compression';
+import { viteStaticCopy } from 'vite-plugin-static-copy';
+import compressionMiddleware from 'compression';
+
+const throttleSpeedMbps = process.env.THROTTLE_SPEED ? parseFloat(process.env.THROTTLE_SPEED) : 0;
 
 export default defineConfig(({ command }) => ({
-  plugins: [dts()],
+  plugins: [
+    dts(),
+    viteStaticCopy({
+      targets: [
+        { src: 'scenes', dest: '.' },
+        { src: 'scenes.json', dest: '.' },
+      ],
+    }),
+    compression({
+      algorithm: 'brotliCompress',
+      ext: '.br',
+      threshold: 1024,
+      filter: /\.(js|css|html|ply|json|wasm)$/,
+    }),
+    compression({
+      algorithm: 'gzip',
+      ext: '.gz',
+      threshold: 1024,
+      filter: /\.(js|css|html|ply|json|wasm)$/,
+    }),
+    {
+      name: 'configure-compression',
+      configureServer(server) {
+        server.middlewares.use(compressionMiddleware());
+      },
+    },
+    {
+      name: 'configure-throttle',
+      async configureServer(server) {
+        if (throttleSpeedMbps <= 0) return;
+        const bytesPerSecond = (throttleSpeedMbps * 1024 * 1024) / 8;
+        console.log(`[Vite] Throttling .ply downloads to ${throttleSpeedMbps} Mbps (${bytesPerSecond.toFixed(0)} B/s)`);
+        const { default: Throttle } = await import('throttle');
+        const fs = await import('fs');
+        const path = await import('path');
+        server.middlewares.use((req, res, next) => {
+          if (!req.url?.endsWith('.ply')) return next();
+          const filePath = path.join(process.cwd(), req.url);
+          if (!fs.existsSync(filePath)) return next();
+          const stat = fs.statSync(filePath);
+          res.setHeader('Content-Type', 'application/octet-stream');
+          res.setHeader('Content-Length', stat.size);
+          fs.createReadStream(filePath).pipe(new Throttle(bytesPerSecond)).pipe(res);
+        });
+      },
+    },
+  ],
   base: './',
   build: {
     lib: {
