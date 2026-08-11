@@ -6,5 +6,9 @@
     {
         "name": "Garden",
         "file": "scenes/garden.ply"
+    },
+    {
+        "name": "BAPQ Quantised (point_cloud_quantised_half)",
+        "file": "scenes/point_cloud_quantised_half.ply"
     }
 ]

@@ -7,7 +7,7 @@ import { Converter } from "../utils/Converter";
 import { initiateFetchRequest, loadDataIntoBuffer } from "../utils/LoaderUtils";
 import { SphericalHarmonicsData } from "../splats/SphericalHarmonicsData";
 import { packHalf2x16 } from "../utils/HalfFloat";
-import { IsQPLY, ParseQPLYBuffer } from "./QPLYLoaderUtils";
+import { IsQPLY, ParseQPLYBuffer, IsLowRankQPLY, ParseLowRankQPLYBuffer } from "./QPLYLoaderUtils";
 
 type PlyProperty = {
     name: string;
@@ -79,6 +79,24 @@ class PLYLoader {
     ): Splat {
         const inputBuffer = arrayBuffer as ArrayBuffer;
         const arrayStart = loadStart ?? performance.now();
+
+        if (IsLowRankQPLY(inputBuffer)) {
+            const result = ParseLowRankQPLYBuffer(inputBuffer);
+
+            const deserializeStart = performance.now();
+            const data = SplatData.Deserialize(new Uint8Array(result.splatBuffer));
+            console.log(`SplatData deserialize: ${performance.now() - deserializeStart} ms`);
+
+            data.sphericalHarmonics = result.sphericalHarmonics;
+
+            const splat = new Splat(data);
+            scene.addObject(splat);
+
+            console.log(`Input size: ${inputBuffer.byteLength} B`);
+            console.log(`PLY/QPLY first frame data ready: ${performance.now() - arrayStart} ms`);
+
+            return splat;
+        }
 
         if (IsQPLY(inputBuffer)) {
             const result = ParseQPLYBuffer(inputBuffer);
