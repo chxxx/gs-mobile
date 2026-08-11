@@ -48,9 +48,8 @@ function hideProgress() {
 function adjustPixelRatio() {
     const splat = scene.objects.find((o) => o instanceof SPLAT.Splat) as SPLAT.Splat | undefined;
     const vertexCount = splat?.data?.vertexCount ?? 0;
-    // Match Flux-GS mobile viewer: scenes with >500K splats use CSS resolution,
-    // smaller scenes render at physical (DPR) resolution.
-    const pixelRatio = vertexCount > 500000 ? 1 : window.devicePixelRatio || 1;
+    // Use physical (DPR) resolution for all scenes.
+    const pixelRatio = window.devicePixelRatio || 1;
     renderer.setPixelRatio(pixelRatio);
     console.log(`Vertex count: ${vertexCount}, pixel ratio set to: ${pixelRatio.toFixed(2)}`);
     console.log(`Render resolution: ${renderer.canvas.width} x ${renderer.canvas.height}`);
