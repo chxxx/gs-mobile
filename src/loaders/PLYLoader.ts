@@ -7,7 +7,17 @@ import { Converter } from "../utils/Converter";
 import { initiateFetchRequest, loadDataIntoBuffer } from "../utils/LoaderUtils";
 import { SphericalHarmonicsData } from "../splats/SphericalHarmonicsData";
 import { packHalf2x16 } from "../utils/HalfFloat";
-import { IsQPLY, ParseQPLYBuffer, IsLowRankQPLY, ParseLowRankQPLYBuffer } from "./QPLYLoaderUtils";
+import {
+    IsQPLY,
+    ParseQPLYBuffer,
+    IsLowRankQPLY,
+    ParseLowRankQPLYBuffer,
+    prepareLowRankQPLY,
+    mergeLowRankChunks,
+} from "./QPLYLoaderUtils";
+import type { LowRankChunkResult } from "./QPLYLoaderUtils";
+import LowRankQPLYWorker from "./LowRankQPLYWorker.ts?worker&inline";
+const createLowRankWorker = () => new LowRankQPLYWorker();
 
 type PlyProperty = {
     name: string;
@@ -38,7 +48,7 @@ class PLYLoader {
 
         console.log(`File load: ${plyData.byteLength} B, ${performance.now() - loadStart} ms`);
 
-        return this.LoadFromArrayBuffer(plyData.buffer, scene, format, loadStart);
+        return await this.LoadFromArrayBuffer(plyData.buffer, scene, format, loadStart);
     }
 
     static async LoadFromFileAsync(
@@ -49,11 +59,11 @@ class PLYLoader {
     ): Promise<Splat> {
         const loadStart = performance.now();
         const reader = new FileReader();
-        let splat = new Splat();
+        let resultBuffer: ArrayBuffer | null = null;
 
         reader.onload = (e) => {
             console.log(`File read: ${file.size} B, ${performance.now() - loadStart} ms`);
-            splat = this.LoadFromArrayBuffer(e.target!.result as ArrayBuffer, scene, format, loadStart);
+            resultBuffer = e.target!.result as ArrayBuffer;
         };
 
         reader.onprogress = (e) => {
@@ -68,34 +78,24 @@ class PLYLoader {
             };
         });
 
-        return splat;
+        if (!resultBuffer) {
+            throw new Error("Failed to read file");
+        }
+
+        return await this.LoadFromArrayBuffer(resultBuffer, scene, format, loadStart);
     }
 
-    static LoadFromArrayBuffer(
+    static async LoadFromArrayBuffer(
         arrayBuffer: ArrayBufferLike,
         scene: Scene,
         format: string = "",
         loadStart?: number,
-    ): Splat {
+    ): Promise<Splat> {
         const inputBuffer = arrayBuffer as ArrayBuffer;
         const arrayStart = loadStart ?? performance.now();
 
         if (IsLowRankQPLY(inputBuffer)) {
-            const result = ParseLowRankQPLYBuffer(inputBuffer);
-
-            const deserializeStart = performance.now();
-            const data = SplatData.Deserialize(new Uint8Array(result.splatBuffer));
-            console.log(`SplatData deserialize: ${performance.now() - deserializeStart} ms`);
-
-            data.sphericalHarmonics = result.sphericalHarmonics;
-
-            const splat = new Splat(data);
-            scene.addObject(splat);
-
-            console.log(`Input size: ${inputBuffer.byteLength} B`);
-            console.log(`PLY/QPLY first frame data ready: ${performance.now() - arrayStart} ms`);
-
-            return splat;
+            return await this._LoadLowRankQPLYFromArrayBuffer(inputBuffer, scene, arrayStart);
         }
 
         if (IsQPLY(inputBuffer)) {
@@ -127,6 +127,163 @@ class PLYLoader {
         scene.addObject(splat);
 
         console.log(`Input size: ${inputBuffer.byteLength} B`);
+        console.log(`PLY/QPLY first frame data ready: ${performance.now() - arrayStart} ms`);
+
+        return splat;
+    }
+
+    private static readonly LOW_RANK_SYNC_THRESHOLD = 50_000;
+
+    private static async _LoadLowRankQPLYFromArrayBuffer(
+        inputBuffer: ArrayBuffer,
+        scene: Scene,
+        arrayStart: number,
+    ): Promise<Splat> {
+        const inputSize = inputBuffer.byteLength;
+        const prepared = prepareLowRankQPLY(inputBuffer);
+        const { vertexCount, rank } = prepared;
+
+        if (vertexCount < this.LOW_RANK_SYNC_THRESHOLD) {
+            console.log(`Low-rank QPLY: ${vertexCount} vertices below sync threshold, decoding on the main thread.`);
+            return this._loadLowRankQPLYSync(inputBuffer, scene, arrayStart, inputSize);
+        }
+
+        const availableWorkers =
+            typeof navigator !== "undefined" && navigator.hardwareConcurrency ? navigator.hardwareConcurrency : 4;
+
+        let workerCount: number;
+        if (vertexCount >= 500_000) {
+            workerCount = Math.min(4, availableWorkers);
+        } else if (vertexCount >= 150_000) {
+            workerCount = Math.min(3, availableWorkers);
+        } else {
+            workerCount = Math.min(2, availableWorkers);
+        }
+        workerCount = Math.max(1, workerCount);
+
+        // 均匀切分顶点区间
+        const chunks: { start: number; end: number }[] = [];
+        for (let i = 0; i < workerCount; i++) {
+            const start = Math.floor((vertexCount * i) / workerCount);
+            const end = Math.floor((vertexCount * (i + 1)) / workerCount);
+            if (end > start) {
+                chunks.push({ start, end });
+            }
+        }
+        workerCount = chunks.length;
+
+        // worker 会 transfer 掉 inputBuffer；保留一份副本用于同步回退
+        const fallbackBuffer = inputBuffer.slice(0);
+        const workerBuffers = chunks.map((_, index) => (index === 0 ? inputBuffer : inputBuffer.slice(0)));
+
+        const decodeStart = performance.now();
+        const workers = chunks.map(() => createLowRankWorker());
+
+        let results: LowRankChunkResult[];
+        try {
+            results = await Promise.all(
+                chunks.map((chunk, index) => {
+                    const worker = workers[index];
+                    return new Promise<LowRankChunkResult>((resolve, reject) => {
+                        worker.onmessage = (event: { data: unknown }) => {
+                            const data = event.data as {
+                                type: string;
+                                start: number;
+                                end: number;
+                                splat?: ArrayBuffer;
+                                shRgb?: ArrayBuffer[];
+                                message?: string;
+                            };
+
+                            if (data.type === "error") {
+                                reject(new Error(data.message || "Low-rank QPLY worker error"));
+                                return;
+                            }
+
+                            resolve({
+                                start: data.start,
+                                end: data.end,
+                                splat: data.splat as ArrayBuffer,
+                                shRgb: [data.shRgb![0], data.shRgb![1], data.shRgb![2]],
+                            });
+                        };
+
+                        worker.onerror = (event) => {
+                            reject(new Error(event.message || "Low-rank QPLY worker crashed"));
+                        };
+
+                        worker.postMessage(
+                            {
+                                type: "decode",
+                                jobId: index,
+                                buffer: workerBuffers[index],
+                                start: chunk.start,
+                                end: chunk.end,
+                            },
+                            [workerBuffers[index]],
+                        );
+                    });
+                }),
+            );
+        } catch (error) {
+            for (const worker of workers) {
+                worker.terminate();
+            }
+            console.warn("Low-rank QPLY worker decode failed, falling back to synchronous decode.", error);
+            return this._loadLowRankQPLYSync(fallbackBuffer, scene, arrayStart, inputSize);
+        }
+
+        for (const worker of workers) {
+            worker.terminate();
+        }
+
+        console.log(
+            `Low-rank QPLY parallel decode (${workerCount} workers, rank ${rank}): ${performance.now() - decodeStart} ms`,
+        );
+
+        const mergeStart = performance.now();
+        const merged = mergeLowRankChunks(results, vertexCount);
+        console.log(`Low-rank QPLY chunk merge: ${performance.now() - mergeStart} ms`);
+
+        const deserializeStart = performance.now();
+        const data = SplatData.Deserialize(new Uint8Array(merged.splatBuffer));
+        console.log(`SplatData deserialize: ${performance.now() - deserializeStart} ms`);
+
+        data.sphericalHarmonics = new SphericalHarmonicsData(
+            merged.shInfo.width,
+            merged.shInfo.height,
+            merged.shRgb,
+            vertexCount,
+            new Int32Array([-1, -1, -1]),
+        );
+
+        const splat = new Splat(data);
+        scene.addObject(splat);
+
+        console.log(`Input size: ${inputSize} B`);
+        console.log(`PLY/QPLY first frame data ready: ${performance.now() - arrayStart} ms`);
+
+        return splat;
+    }
+
+    private static _loadLowRankQPLYSync(
+        inputBuffer: ArrayBuffer,
+        scene: Scene,
+        arrayStart: number,
+        inputSize: number,
+    ): Splat {
+        const result = ParseLowRankQPLYBuffer(inputBuffer);
+
+        const deserializeStart = performance.now();
+        const data = SplatData.Deserialize(new Uint8Array(result.splatBuffer));
+        console.log(`SplatData deserialize: ${performance.now() - deserializeStart} ms`);
+
+        data.sphericalHarmonics = result.sphericalHarmonics;
+
+        const splat = new Splat(data);
+        scene.addObject(splat);
+
+        console.log(`Input size: ${inputSize} B`);
         console.log(`PLY/QPLY first frame data ready: ${performance.now() - arrayStart} ms`);
 
         return splat;

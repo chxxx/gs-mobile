@@ -73,6 +73,10 @@ function readHalfFromDataView(view: DataView, byteOffset: number): number {
     return float16BitsToFloat32(view.getInt16(byteOffset, true) & 0xffff);
 }
 
+function readHalfFromUint8(bytes: Uint8Array, byteOffset: number): number {
+    return float16BitsToFloat32(bytes[byteOffset] | (bytes[byteOffset + 1] << 8));
+}
+
 function readCodebookValue(codebooks: Record<string, Float32Array>, codebookName: string, index: number): number {
     const codebook = codebooks[codebookName];
 
@@ -405,7 +409,17 @@ function ParseQPLYBuffer(inputBuffer: ArrayBuffer): ParsedQPLYResult {
     };
 }
 
-export { IsQPLY, ParseQPLYBuffer, IsLowRankQPLY, ParseLowRankQPLYBuffer };
+export {
+    IsQPLY,
+    ParseQPLYBuffer,
+    IsLowRankQPLY,
+    ParseLowRankQPLYBuffer,
+    prepareLowRankQPLY,
+    decodeLowRankRange,
+    getLowRankSHInfo,
+    mergeLowRankChunks,
+};
+export type { LowRankChunkResult };
 
 type PlyElementInfo = {
     name: string;
@@ -464,9 +478,61 @@ function IsLowRankQPLY(inputBuffer: ArrayBuffer): boolean {
     return isLowRankQPLYHeader(headerText);
 }
 
+// ============================================================================
+// 低秩 QPLY：prepare + decodeRange 分解
+//
+// `prepareLowRankQPLY` 只解析 header / codebook_centers / sh_basis（毫秒级），
+// 产出与顶点解耦的只读状态；`decodeLowRankRange(prepared, start, end)` 解码任意
+// 顶点区间。两者分离后，多个 Web Worker 可各自 prepare 一次（代价可忽略），
+// 再并行解码互不重叠的顶点区间，最后由 `mergeLowRankChunks` 合并。
+// `ParseLowRankQPLYBuffer` 保留为同步全量解码的兼容入口。
+// ============================================================================
+
+type LowRankPrepared = {
+    inputBuffer: ArrayBuffer;
+    vertexCount: number;
+    rowLength: number;
+    vertexDataOffset: number;
+    rank: number;
+    restCoefficientCount: number;
+    basis: Float32Array;
+    propX: PlyProperty;
+    propY: PlyProperty;
+    propZ: PlyProperty;
+    propScale: [PlyProperty, PlyProperty, PlyProperty];
+    propRot: [PlyProperty, PlyProperty, PlyProperty, PlyProperty];
+    propFdc: [PlyProperty, PlyProperty, PlyProperty];
+    propOpacity: PlyProperty;
+    rankProperties: PlyProperty[];
+    scalingCodebook: Float32Array;
+    rotationReCodebook: Float32Array;
+    rotationImCodebook: Float32Array;
+    featuresDcCodebook: Float32Array;
+    opacityCodebook: Float32Array;
+    rankCodebooks: Float32Array[];
+};
+
+type LowRankSHInfo = {
+    width: number;
+    height: number;
+    size: number;
+};
+
+type LowRankChunkResult = {
+    start: number;
+    end: number;
+    splat: ArrayBuffer;
+    shRgb: [ArrayBuffer, ArrayBuffer, ArrayBuffer];
+};
+
+function getLowRankSHInfo(vertexCount: number): LowRankSHInfo {
+    const width = 2048;
+    const height = Math.ceil((2 * vertexCount) / width);
+    return { width, height, size: width * height * 4 };
+}
+
 /**
- * Parses a low-rank quantised PLY file (single `vertex` element + `codebook_centers`
- * + embedded `sh_basis`), e.g. `point_cloud_quantised_half.ply`.
+ * Parses the shared (per-file) state of a low-rank quantised PLY file.
  *
  * Layout:
  *   element vertex N
@@ -483,7 +549,7 @@ function IsLowRankQPLY(inputBuffer: ArrayBuffer): boolean {
  * (C = rank shared coefficients, B = embedded basis) in coeff-major layout:
  * rest45 = [R1, G1, B1, R2, G2, B2, ..., R15, G15, B15].
  */
-function ParseLowRankQPLYBuffer(inputBuffer: ArrayBuffer): ParsedQPLYResult {
+function prepareLowRankQPLY(inputBuffer: ArrayBuffer): LowRankPrepared {
     const decodeStart = performance.now();
     const bytes = new Uint8Array(inputBuffer);
     const headerText = new TextDecoder().decode(bytes.slice(0, 1024 * 10));
@@ -536,7 +602,8 @@ function ParseLowRankQPLYBuffer(inputBuffer: ArrayBuffer): ParsedQPLYResult {
 
     for (let centerIndex = 0; centerIndex < 256; centerIndex++) {
         for (let propertyIndex = 0; propertyIndex < codebookElement.properties.length; propertyIndex++) {
-            const byteOffset = centerIndex * codebookElement.rowLength + codebookElement.properties[propertyIndex].offset;
+            const byteOffset =
+                centerIndex * codebookElement.rowLength + codebookElement.properties[propertyIndex].offset;
             const bits = codebookView.getInt16(byteOffset, true) & 0xffff;
             codebooks[codebookNames[propertyIndex]][centerIndex] = float16BitsToFloat32(bits);
         }
@@ -558,7 +625,6 @@ function ParseLowRankQPLYBuffer(inputBuffer: ArrayBuffer): ParsedQPLYResult {
     }
 
     console.log(`Low-rank QPLY header/codebook/basis parse: ${performance.now() - decodeStart} ms`);
-    const vertexStart = performance.now();
 
     const vertexCount = vertexElement.count;
     const rowLength = vertexElement.rowLength;
@@ -594,80 +660,129 @@ function ParseLowRankQPLYBuffer(inputBuffer: ArrayBuffer): ParsedQPLYResult {
         rankProperties.push(property);
     }
 
-    const splatBuffer = new ArrayBuffer(SplatData.RowLength * vertexCount);
+    const rankCodebooks: Float32Array[] = [];
+
+    for (let i = 0; i < rank; i++) {
+        rankCodebooks.push(codebooks[`features_rank_${i}`]);
+    }
+
+    return {
+        inputBuffer,
+        vertexCount,
+        rowLength,
+        vertexDataOffset,
+        rank,
+        restCoefficientCount,
+        basis,
+        propX,
+        propY,
+        propZ,
+        propScale: [propScale0, propScale1, propScale2],
+        propRot: [propRot0, propRot1, propRot2, propRot3],
+        propFdc: [propFdc0, propFdc1, propFdc2],
+        propOpacity,
+        rankProperties,
+        scalingCodebook: codebooks["scaling"],
+        rotationReCodebook: codebooks["rotation_re"],
+        rotationImCodebook: codebooks["rotation_im"],
+        featuresDcCodebook: codebooks["features_dc"],
+        opacityCodebook: codebooks["opacity"],
+        rankCodebooks,
+    };
+}
+
+/**
+ * Decodes vertex range `[start, end)` of a low-rank QPLY file into a contiguous
+ * chunk of `SplatData` rows plus the packed SH texture payload for that range
+ * (linear u32 layout: channel[c] holds `8 * count` uint32s, one SH row per vertex).
+ */
+function decodeLowRankRange(
+    prepared: LowRankPrepared,
+    start: number,
+    end: number,
+): { splat: ArrayBuffer; shRgb: [Uint32Array, Uint32Array, Uint32Array] } {
+    const count = end - start;
+
+    const splatBuffer = new ArrayBuffer(SplatData.RowLength * count);
     const splatFloat = new Float32Array(splatBuffer);
     const splatUint8 = new Uint8ClampedArray(splatBuffer);
 
-    const shWidth = 2048;
-    const shHeight = Math.ceil((2 * vertexCount) / shWidth);
-
     const shRgb: [Uint32Array, Uint32Array, Uint32Array] = [
-        new Uint32Array(shWidth * shHeight * 4),
-        new Uint32Array(shWidth * shHeight * 4),
-        new Uint32Array(shWidth * shHeight * 4),
+        new Uint32Array(8 * count),
+        new Uint32Array(8 * count),
+        new Uint32Array(8 * count),
     ];
 
-    const vertexView = new DataView(inputBuffer, vertexDataOffset, vertexCount * rowLength);
+    const { rank, restCoefficientCount, basis, rowLength, vertexDataOffset, vertexCount } = prepared;
+
+    const vertexBytes = new Uint8Array(prepared.inputBuffer, vertexDataOffset, vertexCount * rowLength);
+
+    const scaling = prepared.scalingCodebook;
+    const rotationRe = prepared.rotationReCodebook;
+    const rotationIm = prepared.rotationImCodebook;
+    const featuresDc = prepared.featuresDcCodebook;
+    const opacityCodebook = prepared.opacityCodebook;
+    const rankCodebooks = prepared.rankCodebooks;
+
+    const [propScale0, propScale1, propScale2] = prepared.propScale;
+    const [propRot0, propRot1, propRot2, propRot3] = prepared.propRot;
+    const [propFdc0, propFdc1, propFdc2] = prepared.propFdc;
+
+    const rankOffsets = new Uint16Array(rank);
+
+    for (let j = 0; j < rank; j++) {
+        rankOffsets[j] = prepared.rankProperties[j].offset;
+    }
 
     const coeffR = new Array<number>(16).fill(0);
     const coeffG = new Array<number>(16).fill(0);
     const coeffB = new Array<number>(16).fill(0);
 
-    const rankCoeffs: number[] = [];
+    const rankCoeffs = new Float32Array(rank);
 
-    for (let i = 0; i < vertexCount; i++) {
+    for (let i = start; i < end; i++) {
+        const local = i - start;
         const base = i * rowLength;
+        const out8 = 8 * local;
+        const out32 = 32 * local;
 
-        splatFloat[8 * i + 0] = readHalfFromDataView(vertexView, base + propX.offset);
-        splatFloat[8 * i + 1] = readHalfFromDataView(vertexView, base + propY.offset);
-        splatFloat[8 * i + 2] = readHalfFromDataView(vertexView, base + propZ.offset);
+        splatFloat[out8 + 0] = readHalfFromUint8(vertexBytes, base + prepared.propX.offset);
+        splatFloat[out8 + 1] = readHalfFromUint8(vertexBytes, base + prepared.propY.offset);
+        splatFloat[out8 + 2] = readHalfFromUint8(vertexBytes, base + prepared.propZ.offset);
 
-        const scale0 = Math.exp(
-            readCodebookValue(codebooks, "scaling", vertexView.getUint8(base + propScale0.offset)),
-        );
-        const scale1 = Math.exp(
-            readCodebookValue(codebooks, "scaling", vertexView.getUint8(base + propScale1.offset)),
-        );
-        const scale2 = Math.exp(
-            readCodebookValue(codebooks, "scaling", vertexView.getUint8(base + propScale2.offset)),
-        );
+        const scale0 = Math.exp(scaling[vertexBytes[base + propScale0.offset]]);
+        const scale1 = Math.exp(scaling[vertexBytes[base + propScale1.offset]]);
+        const scale2 = Math.exp(scaling[vertexBytes[base + propScale2.offset]]);
 
-        splatFloat[8 * i + 3] = scale0;
-        splatFloat[8 * i + 4] = scale1;
-        splatFloat[8 * i + 5] = scale2;
+        splatFloat[out8 + 3] = scale0;
+        splatFloat[out8 + 4] = scale1;
+        splatFloat[out8 + 5] = scale2;
 
-        const qw = readCodebookValue(codebooks, "rotation_re", vertexView.getUint8(base + propRot0.offset));
-        const qx = readCodebookValue(codebooks, "rotation_im", vertexView.getUint8(base + propRot1.offset));
-        const qy = readCodebookValue(codebooks, "rotation_im", vertexView.getUint8(base + propRot2.offset));
-        const qz = readCodebookValue(codebooks, "rotation_im", vertexView.getUint8(base + propRot3.offset));
+        const qw = rotationRe[vertexBytes[base + propRot0.offset]];
+        const qx = rotationIm[vertexBytes[base + propRot1.offset]];
+        const qy = rotationIm[vertexBytes[base + propRot2.offset]];
+        const qz = rotationIm[vertexBytes[base + propRot3.offset]];
 
         const q = normalizeQuaternion(qw, qx, qy, qz);
 
-        splatUint8[32 * i + 28 + 0] = q.w * 128 + 128;
-        splatUint8[32 * i + 28 + 1] = q.x * 128 + 128;
-        splatUint8[32 * i + 28 + 2] = q.y * 128 + 128;
-        splatUint8[32 * i + 28 + 3] = q.z * 128 + 128;
+        splatUint8[out32 + 28 + 0] = q.w * 128 + 128;
+        splatUint8[out32 + 28 + 1] = q.x * 128 + 128;
+        splatUint8[out32 + 28 + 2] = q.y * 128 + 128;
+        splatUint8[out32 + 28 + 3] = q.z * 128 + 128;
 
-        const fdc0 = readCodebookValue(codebooks, "features_dc", vertexView.getUint8(base + propFdc0.offset));
-        const fdc1 = readCodebookValue(codebooks, "features_dc", vertexView.getUint8(base + propFdc1.offset));
-        const fdc2 = readCodebookValue(codebooks, "features_dc", vertexView.getUint8(base + propFdc2.offset));
+        const fdc0 = featuresDc[vertexBytes[base + propFdc0.offset]];
+        const fdc1 = featuresDc[vertexBytes[base + propFdc1.offset]];
+        const fdc2 = featuresDc[vertexBytes[base + propFdc2.offset]];
 
-        const opacity = readCodebookValue(codebooks, "opacity", vertexView.getUint8(base + propOpacity.offset));
+        const op = opacityCodebook[vertexBytes[base + prepared.propOpacity.offset]];
 
-        splatUint8[32 * i + 24 + 0] = (0.5 + Converter.SH_C0 * fdc0) * 255;
-        splatUint8[32 * i + 24 + 1] = (0.5 + Converter.SH_C0 * fdc1) * 255;
-        splatUint8[32 * i + 24 + 2] = (0.5 + Converter.SH_C0 * fdc2) * 255;
-        splatUint8[32 * i + 24 + 3] = sigmoid(opacity) * 255;
+        splatUint8[out32 + 24 + 0] = (0.5 + Converter.SH_C0 * fdc0) * 255;
+        splatUint8[out32 + 24 + 1] = (0.5 + Converter.SH_C0 * fdc1) * 255;
+        splatUint8[out32 + 24 + 2] = (0.5 + Converter.SH_C0 * fdc2) * 255;
+        splatUint8[out32 + 24 + 3] = sigmoid(op) * 255;
 
-        rankCoeffs.length = 0;
         for (let j = 0; j < rank; j++) {
-            rankCoeffs.push(
-                readCodebookValue(
-                    codebooks,
-                    `features_rank_${j}`,
-                    vertexView.getUint8(base + rankProperties[j].offset),
-                ),
-            );
+            rankCoeffs[j] = rankCodebooks[j][vertexBytes[base + rankOffsets[j]]];
         }
 
         coeffR[0] = fdc0;
@@ -679,15 +794,18 @@ function ParseLowRankQPLYBuffer(inputBuffer: ArrayBuffer): ParsedQPLYResult {
                 break;
             }
 
+            const baseIndex = (k - 1) * 3;
+
             let r = 0;
             let g = 0;
             let b = 0;
 
             for (let j = 0; j < rank; j++) {
                 const coefficient = rankCoeffs[j];
-                r += coefficient * basis[j * restCoefficientCount + (k - 1) * 3 + 0];
-                g += coefficient * basis[j * restCoefficientCount + (k - 1) * 3 + 1];
-                b += coefficient * basis[j * restCoefficientCount + (k - 1) * 3 + 2];
+                const basisOffset = j * restCoefficientCount + baseIndex;
+                r += coefficient * basis[basisOffset + 0];
+                g += coefficient * basis[basisOffset + 1];
+                b += coefficient * basis[basisOffset + 2];
             }
 
             coeffR[k] = r;
@@ -696,23 +814,78 @@ function ParseLowRankQPLYBuffer(inputBuffer: ArrayBuffer): ParsedQPLYResult {
         }
 
         for (let packed = 0; packed < 8; packed++) {
-            shRgb[0][8 * i + packed] = packHalf2x16(coeffR[2 * packed], coeffR[2 * packed + 1]);
-            shRgb[1][8 * i + packed] = packHalf2x16(coeffG[2 * packed], coeffG[2 * packed + 1]);
-            shRgb[2][8 * i + packed] = packHalf2x16(coeffB[2 * packed], coeffB[2 * packed + 1]);
+            shRgb[0][8 * local + packed] = packHalf2x16(coeffR[2 * packed], coeffR[2 * packed + 1]);
+            shRgb[1][8 * local + packed] = packHalf2x16(coeffG[2 * packed], coeffG[2 * packed + 1]);
+            shRgb[2][8 * local + packed] = packHalf2x16(coeffB[2 * packed], coeffB[2 * packed + 1]);
         }
     }
 
+    return { splat: splatBuffer, shRgb };
+}
+
+/**
+ * Merges per-chunk decode results back into the full `SplatData` buffer and the
+ * global SH texture payload (including per-row tail padding of the 2048-wide texture).
+ */
+function mergeLowRankChunks(
+    results: LowRankChunkResult[],
+    vertexCount: number,
+): { splatBuffer: ArrayBuffer; shRgb: [Uint32Array, Uint32Array, Uint32Array]; shInfo: LowRankSHInfo } {
+    const shInfo = getLowRankSHInfo(vertexCount);
+    const splatBuffer = new ArrayBuffer(SplatData.RowLength * vertexCount);
+    const splatBytes = new Uint8Array(splatBuffer);
+
+    const shRgb: [Uint32Array, Uint32Array, Uint32Array] = [
+        new Uint32Array(shInfo.size),
+        new Uint32Array(shInfo.size),
+        new Uint32Array(shInfo.size),
+    ];
+
+    for (const result of results) {
+        splatBytes.set(new Uint8Array(result.splat), result.start * SplatData.RowLength);
+        shRgb[0].set(new Uint32Array(result.shRgb[0]), 8 * result.start);
+        shRgb[1].set(new Uint32Array(result.shRgb[1]), 8 * result.start);
+        shRgb[2].set(new Uint32Array(result.shRgb[2]), 8 * result.start);
+    }
+
+    return { splatBuffer, shRgb, shInfo };
+}
+
+/**
+ * Synchronous full-decode entry point (single-threaded). Used as the compatible
+ * fallback and for small files where worker startup would not pay off.
+ */
+function ParseLowRankQPLYBuffer(inputBuffer: ArrayBuffer): ParsedQPLYResult {
+    const decodeStart = performance.now();
+    const prepared = prepareLowRankQPLY(inputBuffer);
+    const vertexCount = prepared.vertexCount;
+
+    const vertexStart = performance.now();
+    const { splat, shRgb } = decodeLowRankRange(prepared, 0, vertexCount);
     const vertexElapsed = performance.now() - vertexStart;
     const totalElapsed = performance.now() - decodeStart;
     console.log(`Low-rank QPLY vertex decode/SH pack: ${vertexElapsed} ms`);
     console.log(`Low-rank QPLY decode/dequantize total: ${totalElapsed} ms`);
 
+    // Expand the linear `8 * vertexCount` chunk to the full 2048-wide texture
+    // payload (tail rows contain zero padding).
+    const shInfo = getLowRankSHInfo(vertexCount);
+    const fullShRgb: [Uint32Array, Uint32Array, Uint32Array] = [
+        new Uint32Array(shInfo.size),
+        new Uint32Array(shInfo.size),
+        new Uint32Array(shInfo.size),
+    ];
+
+    fullShRgb[0].set(shRgb[0], 0);
+    fullShRgb[1].set(shRgb[1], 0);
+    fullShRgb[2].set(shRgb[2], 0);
+
     return {
-        splatBuffer,
+        splatBuffer: splat,
         sphericalHarmonics: new SphericalHarmonicsData(
-            shWidth,
-            shHeight,
-            shRgb,
+            shInfo.width,
+            shInfo.height,
+            fullShRgb,
             vertexCount,
             new Int32Array([-1, -1, -1]),
         ),
