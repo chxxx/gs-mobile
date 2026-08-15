@@ -740,15 +740,20 @@ function decodeLowRankRange(
 
     const rankCoeffs = new Float32Array(rank);
 
+    const propXOffset = prepared.propX.offset;
+    const propYOffset = prepared.propY.offset;
+    const propZOffset = prepared.propZ.offset;
+    const opacityOffset = prepared.propOpacity.offset;
+
     for (let i = start; i < end; i++) {
         const local = i - start;
         const base = i * rowLength;
         const out8 = 8 * local;
         const out32 = 32 * local;
 
-        splatFloat[out8 + 0] = readHalfFromUint8(vertexBytes, base + prepared.propX.offset);
-        splatFloat[out8 + 1] = readHalfFromUint8(vertexBytes, base + prepared.propY.offset);
-        splatFloat[out8 + 2] = readHalfFromUint8(vertexBytes, base + prepared.propZ.offset);
+        splatFloat[out8 + 0] = readHalfFromUint8(vertexBytes, base + propXOffset);
+        splatFloat[out8 + 1] = readHalfFromUint8(vertexBytes, base + propYOffset);
+        splatFloat[out8 + 2] = readHalfFromUint8(vertexBytes, base + propZOffset);
 
         const scale0 = Math.exp(scaling[vertexBytes[base + propScale0.offset]]);
         const scale1 = Math.exp(scaling[vertexBytes[base + propScale1.offset]]);
@@ -763,18 +768,18 @@ function decodeLowRankRange(
         const qy = rotationIm[vertexBytes[base + propRot2.offset]];
         const qz = rotationIm[vertexBytes[base + propRot3.offset]];
 
-        const q = normalizeQuaternion(qw, qx, qy, qz);
+        const rotLen = Math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
 
-        splatUint8[out32 + 28 + 0] = q.w * 128 + 128;
-        splatUint8[out32 + 28 + 1] = q.x * 128 + 128;
-        splatUint8[out32 + 28 + 2] = q.y * 128 + 128;
-        splatUint8[out32 + 28 + 3] = q.z * 128 + 128;
+        splatUint8[out32 + 28 + 0] = (qw / rotLen) * 128 + 128;
+        splatUint8[out32 + 28 + 1] = (qx / rotLen) * 128 + 128;
+        splatUint8[out32 + 28 + 2] = (qy / rotLen) * 128 + 128;
+        splatUint8[out32 + 28 + 3] = (qz / rotLen) * 128 + 128;
 
         const fdc0 = featuresDc[vertexBytes[base + propFdc0.offset]];
         const fdc1 = featuresDc[vertexBytes[base + propFdc1.offset]];
         const fdc2 = featuresDc[vertexBytes[base + propFdc2.offset]];
 
-        const op = opacityCodebook[vertexBytes[base + prepared.propOpacity.offset]];
+        const op = opacityCodebook[vertexBytes[base + opacityOffset]];
 
         splatUint8[out32 + 24 + 0] = (0.5 + Converter.SH_C0 * fdc0) * 255;
         splatUint8[out32 + 24 + 1] = (0.5 + Converter.SH_C0 * fdc1) * 255;
