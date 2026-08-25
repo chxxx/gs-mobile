@@ -4,6 +4,10 @@ A JavaScript/WebGL2 Gaussian Splatting renderer with **3rd-order Spherical Harmo
 
 This project extends the original [gsplat.js](https://github.com/dylanebert/gsplat.js) with view-dependent color rendering for standard 3DGS PLY files and quantized-half PLY (QPLY) files produced by vector-quantized 3DGS pipelines.
 
+> **Part of the [BAPQ](https://gitee.com/chxxx/Plasticity-Pruning-GS) project** — this renderer is the WebGL 2.0 deployment end of the BAPQ compression pipeline (budget-aware pruning + low-rank SH + QPLY). It renders the quantized models produced by the BAPQ training pipeline directly in the browser, including **low-rank QPLY** files (shared-basis low-rank SH decomposition, decoded once at load time). See the [BAPQ main repository](https://gitee.com/chxxx/Plasticity-Pruning-GS) for the training/compression side and the thesis.
+
+**[中文文档](README_CN.md)**
+
 ## Features
 
 - **Standard 3DGS PLY loading** with full 3rd-order SH (`f_dc_*` + `f_rest_0..44`)
