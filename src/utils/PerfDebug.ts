@@ -136,8 +136,6 @@ export class GpuFrameTimer {
     private _gl: WebGL2RenderingContext;
     private _ext: {
         TIME_ELAPSED_EXT: number;
-        QUERY_RESULT: number;
-        QUERY_RESULT_AVAILABLE: number;
     } | null;
     private _active: WebGLQuery | null = null;
     private _activeKey = "";
@@ -147,11 +145,7 @@ export class GpuFrameTimer {
 
     constructor(gl: WebGL2RenderingContext) {
         this._gl = gl;
-        this._ext = gl.getExtension("EXT_disjoint_timer_query_webgl2") as {
-            TIME_ELAPSED_EXT: number;
-            QUERY_RESULT: number;
-            QUERY_RESULT_AVAILABLE: number;
-        } | null;
+        this._ext = gl.getExtension("EXT_disjoint_timer_query_webgl2") as { TIME_ELAPSED_EXT: number } | null;
     }
 
     get supported(): boolean {
@@ -200,9 +194,9 @@ export class GpuFrameTimer {
                 this._gl.deleteQuery(entry.query);
                 continue;
             }
-            const available = this._gl.getQueryParameter(entry.query, this._ext.QUERY_RESULT_AVAILABLE);
+            const available = this._gl.getQueryParameter(entry.query, this._gl.QUERY_RESULT_AVAILABLE);
             if (available) {
-                const ns = this._gl.getQueryParameter(entry.query, this._ext.QUERY_RESULT) as number;
+                const ns = this._gl.getQueryParameter(entry.query, this._gl.QUERY_RESULT) as number;
                 const gpuMs = Number(ns) / 1e6; // 64-bit ns -> float ms
                 if (Number.isFinite(gpuMs) && gpuMs >= 0 && gpuMs < 1000) {
                     perf.sample(entry.key, gpuMs);
