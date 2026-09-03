@@ -315,6 +315,10 @@ class RenderProgram extends ShaderProgram {
     private _shTextures: [WebGLTexture | null, WebGLTexture | null, WebGLTexture | null] = [null, null, null];
     private _worker: Worker | null = null;
     private _lastSortRequestAt: number = -1;
+    private _cullEnabled = true;
+    private _lastCullKept = 0;
+    private _lastCullTotal = 0;
+    private _cullSampleCount = 0;
 
     protected _initialize: () => void;
     protected _resize: () => void;
@@ -362,6 +366,16 @@ class RenderProgram extends ShaderProgram {
         const indexBuffers: WebGLBuffer[] = [];
         let activeDepthBuffer = 0;
 
+        try {
+            // Frustum culling inside the sort worker can be disabled with ?cull=0
+            // for a clean A/B measurement (defaults to ON).
+            this._cullEnabled = !(
+                typeof location !== "undefined" && new URLSearchParams(location.search).get("cull") === "0"
+            );
+        } catch {
+            this._cullEnabled = true;
+        }
+
         this._resize = () => {
             if (!this._camera) return;
 
@@ -379,7 +393,18 @@ class RenderProgram extends ShaderProgram {
             this._worker = createSortWorker();
             this._worker!.onmessage = (e) => {
                 if (e.data.depthIndex) {
-                    const { depthIndex, workerMs } = e.data as { depthIndex: Uint32Array; workerMs?: number };
+                    const { depthIndex, workerMs, keptCount, totalCount } = e.data as {
+                        depthIndex: Uint32Array;
+                        workerMs?: number;
+                        keptCount?: number;
+                        totalCount?: number;
+                    };
+
+                    if (typeof keptCount === "number" && typeof totalCount === "number" && totalCount > 0) {
+                        this._lastCullKept = keptCount;
+                        this._lastCullTotal = totalCount;
+                        this._cullSampleCount++;
+                    }
 
                     if (perf.enabled) {
                         if (typeof workerMs === "number") {
@@ -720,7 +745,7 @@ class RenderProgram extends ShaderProgram {
             if (perf.enabled) {
                 this._lastSortRequestAt = performance.now();
             }
-            this._worker?.postMessage({ viewProj: this._camera.data.viewProj.buffer });
+            this._worker?.postMessage({ viewProj: this._camera.data.viewProj.buffer, cullEnabled: this._cullEnabled });
 
             const drawSetupStart = performance.now();
             gl.viewport(0, 0, canvas.width, canvas.height);
@@ -829,6 +854,23 @@ class RenderProgram extends ShaderProgram {
 
     get worker() {
         return this._worker;
+    }
+
+    get cullEnabled(): boolean {
+        return this._cullEnabled;
+    }
+
+    /** Latest frustum-culling outcome reported by the sort worker. */
+    get cullStats(): { keptRatio: number; total: number; samples: number } {
+        return {
+            keptRatio: this._lastCullTotal > 0 ? this._lastCullKept / this._lastCullTotal : 1,
+            total: this._lastCullTotal,
+            samples: this._cullSampleCount,
+        };
+    }
+
+    resetCullStats(): void {
+        this._cullSampleCount = 0;
     }
 
     protected _getVertexSource() {

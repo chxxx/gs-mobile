@@ -25,6 +25,7 @@ let dirty = true;
 let lock = false;
 let allocationPending = false;
 let sorting = false;
+let cullEnabled = true;
 
 async function initWasm() {
     if (!wasmModule) {
@@ -87,6 +88,73 @@ const allocateBuffers = async () => {
     }
 };
 
+/**
+ * Frustum culling that exactly mirrors the vertex shader's early-out test
+ * (RenderProgram.ts lines ~170-174):
+ *
+ *   clip = 1.2 * pos2d.w;
+ *   if (pos2d.z < -pos2d.w || pos2d.z > pos2d.w ||
+ *       pos2d.x < -clip || pos2d.x > clip ||
+ *       pos2d.y < -clip || pos2d.y > clip) -> splat draws nothing
+ *
+ * Points that fail this test never produce pixels, so dropping them from the
+ * index buffer is visually lossless. We evaluate
+ *   clipPos = (proj*view) * (objectTransform) * position
+ * using exactly the same matrices the shader composes (viewProj * transform).
+ */
+const cullFrustum = (order: Uint32Array): Uint32Array => {
+    if (!sortData || viewProj.length !== 16) {
+        return order;
+    }
+
+    const positions = sortData.positions;
+    const transforms = sortData.transforms;
+    const transformIndices = sortData.transformIndices;
+    const objectCount = Math.floor(transforms.length / 16);
+    const vp = viewProj;
+
+    // Pre-multiply proj*view with each object transform once per sort pass.
+    const combined = new Float64Array(objectCount * 16);
+    for (let o = 0; o < objectCount; o++) {
+        const base = o * 16;
+        for (let c = 0; c < 4; c++) {
+            const b0 = transforms[base + c * 4];
+            const b1 = transforms[base + c * 4 + 1];
+            const b2 = transforms[base + c * 4 + 2];
+            const b3 = transforms[base + c * 4 + 3];
+            const col = c * 4;
+            combined[base + col] = vp[0] * b0 + vp[4] * b1 + vp[8] * b2 + vp[12] * b3;
+            combined[base + col + 1] = vp[1] * b0 + vp[5] * b1 + vp[9] * b2 + vp[13] * b3;
+            combined[base + col + 2] = vp[2] * b0 + vp[6] * b1 + vp[10] * b2 + vp[14] * b3;
+            combined[base + col + 3] = vp[3] * b0 + vp[7] * b1 + vp[11] * b2 + vp[15] * b3;
+        }
+    }
+
+    const kept = new Uint32Array(order.length);
+    let k = 0;
+    for (let i = 0; i < order.length; i++) {
+        const id = order[i];
+        const mBase = transformIndices[id] * 16;
+        const pBase = id * 3;
+        const x = positions[pBase];
+        const y = positions[pBase + 1];
+        const z = positions[pBase + 2];
+
+        const w = combined[mBase + 3] * x + combined[mBase + 7] * y + combined[mBase + 11] * z + combined[mBase + 15];
+        const cx = combined[mBase] * x + combined[mBase + 4] * y + combined[mBase + 8] * z + combined[mBase + 12];
+        const cy = combined[mBase + 1] * x + combined[mBase + 5] * y + combined[mBase + 9] * z + combined[mBase + 13];
+        const cz = combined[mBase + 2] * x + combined[mBase + 6] * y + combined[mBase + 10] * z + combined[mBase + 14];
+
+        const clip = 1.2 * w;
+        if (cz < -w || cz > w || cx < -clip || cx > clip || cy < -clip || cy > clip) {
+            continue; // vertex shader would discard this splat anyway
+        }
+        kept[k++] = id;
+    }
+
+    return k === order.length ? kept : kept.slice(0, k);
+};
+
 const runSort = () => {
     if (lock || allocationPending || !wasmModule || !sortData) {
         return;
@@ -134,11 +202,21 @@ const runSort = () => {
         }
 
         const depthIndex = new Uint32Array(heapU32.buffer, depthIndexPtr, sortData.vertexCount);
-        const detachedDepthIndex = new Uint32Array(depthIndex.slice().buffer);
+        let detachedDepthIndex = new Uint32Array(depthIndex.slice().buffer);
 
-        self.postMessage({ depthIndex: detachedDepthIndex, workerMs: performance.now() - workerStart }, [
-            detachedDepthIndex.buffer,
-        ]);
+        if (cullEnabled) {
+            detachedDepthIndex = cullFrustum(detachedDepthIndex);
+        }
+
+        self.postMessage(
+            {
+                depthIndex: detachedDepthIndex,
+                workerMs: performance.now() - workerStart,
+                keptCount: detachedDepthIndex.length,
+                totalCount: sortData.vertexCount,
+            },
+            [detachedDepthIndex.buffer],
+        );
     } catch {
         self.postMessage({ depthIndex: new Uint32Array(0) }, []);
     }
@@ -160,6 +238,9 @@ const throttledSort = () => {
 };
 
 self.onmessage = (e) => {
+    if (typeof e.data.cullEnabled === "boolean") {
+        cullEnabled = e.data.cullEnabled;
+    }
     if (e.data.sortData) {
         if (!sortData) {
             sortData = {

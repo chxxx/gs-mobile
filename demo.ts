@@ -28,6 +28,9 @@ let prevViewProj: Float32Array | null = null;
 
 if (perf.enabled) {
     console.info("[Perf] instrumentation ENABLED (?perf=1). Summary is printed to the console every ~1 s.");
+    console.info(
+        `[Perf] frustum culling in sort worker: ${renderer.renderProgram.cullEnabled ? "ON" : "OFF"} (?cull=0 disables for A/B).`,
+    );
     if (!gpuTimer.supported) {
         console.warn("[Perf] EXT_disjoint_timer_query_webgl2 unavailable: real GPU timing will be missing.");
     }
@@ -57,6 +60,24 @@ function getSplatVertexCount(): number {
         }
     }
     return total;
+}
+
+/**
+ * Render-resolution clamp for mobile profiling: renders at scale × the CSS
+ * canvas size (scale is meant to be the pixel ratio you want to test, e.g.
+ * 4 = current physical DPR on the phone, 2 = half physical resolution).
+ */
+function setResolutionScale(scale: number) {
+    renderer.disableAutoResize();
+    const width = Math.max(1, Math.floor(canvas.clientWidth * scale));
+    const height = Math.max(1, Math.floor(canvas.clientHeight * scale));
+    renderer.setSize(width, height);
+    console.log(`[res] scale=${scale.toFixed(2)} -> canvas ${width} x ${height}`);
+}
+
+function restoreResolutionAutoScale() {
+    renderer.enableAutoResize();
+    renderer.resize();
 }
 
 /** True if the view-projection matrix changed since the previous frame. */
@@ -108,6 +129,12 @@ function flushPerfSummary() {
     header += `  |  CPU: still≈${stillCpu ? stillCpu.toFixed(2) : "-"}ms moving≈${movingCpu ? movingCpu.toFixed(2) : "-"}ms`;
     header += `  |  GPU: still≈${fpsOf("gpu.render.still.ms")} moving≈${fpsOf("gpu.render.moving.ms")}`;
     if (!gpuTimer.supported) header += "  |  GPU timing unsupported";
+
+    const cull = renderer.renderProgram.cullStats;
+    if (cull.samples > 0) {
+        header += `  |  cull kept≈${(cull.keptRatio * 100).toFixed(0)}% of ${cull.total} (${cull.samples} sorts)`;
+        renderer.renderProgram.resetCullStats();
+    }
 
     console.groupCollapsed(`%c${header}`, "color:#7c3aed;font-weight:bold;");
     console.table(tableRows);
@@ -353,12 +380,24 @@ async function benchmarkFPS(frameCount: number = 300, batchSize: number = 60) {
 (window as unknown as { setBenchmarkResolution: typeof setBenchmarkResolution }).setBenchmarkResolution =
     setBenchmarkResolution;
 // Console helpers for profiling sessions:
-//   __PERF__.flush()  -> print accumulated samples and reset
-//   __PERF__.reset()  -> discard accumulated samples
-//   __PERF__.perf     -> the underlying profiler (perf.enableWindowDebug())
-(window as unknown as { __PERF__: { flush: () => void; reset: () => void } }).__PERF__ = {
+//   __PERF__.flush()                    -> print accumulated samples and reset
+//   __PERF__.reset()                    -> discard accumulated samples
+//   __PERF__.setResolutionScale(2)      -> clamp render resolution (mobile)
+//   __PERF__.restoreResolutionAutoScale()-> back to automatic DPR sizing
+(
+    window as unknown as {
+        __PERF__: {
+            flush: () => void;
+            reset: () => void;
+            setResolutionScale: (scale: number) => void;
+            restoreResolutionAutoScale: () => void;
+        };
+    }
+).__PERF__ = {
     flush: flushPerfSummary,
     reset: () => perf.reset(),
+    setResolutionScale,
+    restoreResolutionAutoScale,
 };
 
 main();
