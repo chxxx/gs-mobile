@@ -359,7 +359,8 @@ class RenderProgram extends ShaderProgram {
         let colorTransformIndicesTexture: WebGLTexture;
 
         let vertexBuffer: WebGLBuffer;
-        let indexBuffer: WebGLBuffer;
+        const indexBuffers: WebGLBuffer[] = [];
+        let activeDepthBuffer = 0;
 
         this._resize = () => {
             if (!this._camera) return;
@@ -391,8 +392,15 @@ class RenderProgram extends ShaderProgram {
 
                     this._depthIndex = depthIndex;
                     const uploadStart = performance.now();
-                    gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
-                    gl.bufferData(gl.ARRAY_BUFFER, depthIndex, gl.STATIC_DRAW);
+                    // Upload into a buffer that the just-submitted frame is NOT
+                    // reading, then make it the buffer drawn from next frame.
+                    // Depth order only changes when a sort result arrives, so we
+                    // never re-upload on frames that reuse the previous order.
+                    const target = (activeDepthBuffer + 1) % indexBuffers.length;
+                    gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffers[target]);
+                    gl.bufferData(gl.ARRAY_BUFFER, depthIndex, gl.DYNAMIC_DRAW);
+                    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+                    activeDepthBuffer = target;
                     if (perf.enabled) {
                         perf.sample("gl.depthIndexUpload.ms", performance.now() - uploadStart);
                     }
@@ -481,10 +489,15 @@ class RenderProgram extends ShaderProgram {
             gl.enableVertexAttribArray(positionAttribute);
             gl.vertexAttribPointer(positionAttribute, 2, gl.FLOAT, false, 0, 0);
 
-            indexBuffer = gl.createBuffer() as WebGLBuffer;
+            if (indexBuffers.length === 0) {
+                for (let i = 0; i < 3; i++) {
+                    indexBuffers.push(gl.createBuffer() as WebGLBuffer);
+                }
+            }
+            activeDepthBuffer = 0;
             indexAttribute = gl.getAttribLocation(this.program, "index");
             gl.enableVertexAttribArray(indexAttribute);
-            gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
+            gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffers[activeDepthBuffer]);
 
             createWorker();
         };
@@ -725,12 +738,7 @@ class RenderProgram extends ShaderProgram {
             gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
             gl.vertexAttribPointer(positionAttribute, 2, gl.FLOAT, false, 0, 0);
 
-            gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
-            const depthRebindStart = performance.now();
-            gl.bufferData(gl.ARRAY_BUFFER, this.depthIndex, gl.STATIC_DRAW);
-            if (perf.enabled) {
-                perf.sample("gl.depthIndexRebind.ms", performance.now() - depthRebindStart);
-            }
+            gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffers[activeDepthBuffer]);
             gl.vertexAttribIPointer(indexAttribute, 1, gl.INT, 0, 0);
             gl.vertexAttribDivisor(indexAttribute, 1);
 
@@ -769,7 +777,10 @@ class RenderProgram extends ShaderProgram {
                 }
             }
 
-            gl.deleteBuffer(indexBuffer);
+            for (const buffer of indexBuffers) {
+                gl.deleteBuffer(buffer);
+            }
+            indexBuffers.length = 0;
             gl.deleteBuffer(vertexBuffer);
         };
 
