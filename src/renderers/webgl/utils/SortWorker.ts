@@ -92,6 +92,7 @@ const runSort = () => {
         return;
     }
     lock = true;
+    const workerStart = performance.now();
 
     try {
         // Validate buffer sizes before setting
@@ -135,7 +136,9 @@ const runSort = () => {
         const depthIndex = new Uint32Array(heapU32.buffer, depthIndexPtr, sortData.vertexCount);
         const detachedDepthIndex = new Uint32Array(depthIndex.slice().buffer);
 
-        self.postMessage({ depthIndex: detachedDepthIndex }, [detachedDepthIndex.buffer]);
+        self.postMessage({ depthIndex: detachedDepthIndex, workerMs: performance.now() - workerStart }, [
+            detachedDepthIndex.buffer,
+        ]);
     } catch {
         self.postMessage({ depthIndex: new Uint32Array(0) }, []);
     }

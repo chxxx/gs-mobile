@@ -9,6 +9,7 @@ import { ObjectAddedEvent, ObjectChangedEvent, ObjectRemovedEvent } from "../../
 import { Splat } from "../../../splats/Splat";
 import { WebGLRenderer } from "../../WebGLRenderer";
 import { Scene } from "../../../core/Scene";
+import { perf } from "../../../utils/PerfDebug";
 
 const vertexShaderSource = /* glsl */ `#version 300 es
 precision highp float;
@@ -313,6 +314,7 @@ class RenderProgram extends ShaderProgram {
     private _splatTexture: WebGLTexture | null = null;
     private _shTextures: [WebGLTexture | null, WebGLTexture | null, WebGLTexture | null] = [null, null, null];
     private _worker: Worker | null = null;
+    private _lastSortRequestAt: number = -1;
 
     protected _initialize: () => void;
     protected _resize: () => void;
@@ -376,10 +378,24 @@ class RenderProgram extends ShaderProgram {
             this._worker = createSortWorker();
             this._worker!.onmessage = (e) => {
                 if (e.data.depthIndex) {
-                    const { depthIndex } = e.data;
+                    const { depthIndex, workerMs } = e.data as { depthIndex: Uint32Array; workerMs?: number };
+
+                    if (perf.enabled) {
+                        if (typeof workerMs === "number") {
+                            perf.sample("sort.worker.ms", workerMs);
+                        }
+                        if (this._lastSortRequestAt >= 0) {
+                            perf.sample("sort.latency.ms", performance.now() - this._lastSortRequestAt);
+                        }
+                    }
+
                     this._depthIndex = depthIndex;
+                    const uploadStart = performance.now();
                     gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
                     gl.bufferData(gl.ARRAY_BUFFER, depthIndex, gl.STATIC_DRAW);
+                    if (perf.enabled) {
+                        perf.sample("gl.depthIndexUpload.ms", performance.now() - uploadStart);
+                    }
                 }
             };
         };
@@ -555,6 +571,7 @@ class RenderProgram extends ShaderProgram {
                 this.renderData.rebuild();
             }
 
+            const splatDataUploadStart = performance.now();
             if (
                 this.renderData.dataChanged ||
                 this.renderData.transformsChanged ||
@@ -677,10 +694,22 @@ class RenderProgram extends ShaderProgram {
                 this.renderData.transformsChanged = false;
                 this.renderData.colorTransformsChanged = false;
             }
+            if (perf.enabled) {
+                perf.sample("gl.splatDataUpload.ms", performance.now() - splatDataUploadStart);
+            }
 
+            const cameraStart = performance.now();
             this._camera.update();
+            if (perf.enabled) {
+                perf.sample("cpu.camera.update.ms", performance.now() - cameraStart);
+            }
+
+            if (perf.enabled) {
+                this._lastSortRequestAt = performance.now();
+            }
             this._worker?.postMessage({ viewProj: this._camera.data.viewProj.buffer });
 
+            const drawSetupStart = performance.now();
             gl.viewport(0, 0, canvas.width, canvas.height);
             gl.clearColor(0, 0, 0, 0);
             gl.clear(gl.COLOR_BUFFER_BIT);
@@ -697,11 +726,20 @@ class RenderProgram extends ShaderProgram {
             gl.vertexAttribPointer(positionAttribute, 2, gl.FLOAT, false, 0, 0);
 
             gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
+            const depthRebindStart = performance.now();
             gl.bufferData(gl.ARRAY_BUFFER, this.depthIndex, gl.STATIC_DRAW);
+            if (perf.enabled) {
+                perf.sample("gl.depthIndexRebind.ms", performance.now() - depthRebindStart);
+            }
             gl.vertexAttribIPointer(indexAttribute, 1, gl.INT, 0, 0);
             gl.vertexAttribDivisor(indexAttribute, 1);
 
+            const drawSubmitStart = performance.now();
             gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, this.depthIndex.length);
+            if (perf.enabled) {
+                perf.sample("gl.drawSubmit.ms", performance.now() - drawSubmitStart);
+                perf.sample("cpu.drawSetup.ms", performance.now() - drawSetupStart);
+            }
         };
 
         this._dispose = () => {

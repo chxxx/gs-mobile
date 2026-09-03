@@ -1,4 +1,5 @@
 import * as SPLAT from "./src/index";
+import { perf, GpuFrameTimer } from "./src/utils/PerfDebug";
 
 const canvas = document.getElementById("canvas") as HTMLCanvasElement;
 const progressDialog = document.getElementById("progress-dialog") as HTMLDialogElement;
@@ -13,11 +14,28 @@ const renderer = new SPLAT.WebGLRenderer(canvas);
 const scene = new SPLAT.Scene();
 const camera = new SPLAT.Camera();
 const controls = new SPLAT.OrbitControls(camera, canvas);
+const gpuTimer = new GpuFrameTimer(renderer.gl);
 
 let lastTime = performance.now();
 let frameCount = 0;
 let firstFrameStart: number | null = null;
 let firstFrameLogged = false;
+let lastFrameAt = 0;
+let lastSummaryAt = 0;
+let windowFrames = 0;
+let cameraMovingFrames = 0;
+let prevViewProj: Float32Array | null = null;
+
+if (perf.enabled) {
+    console.info("[Perf] instrumentation ENABLED (?perf=1). Summary is printed to the console every ~1 s.");
+    if (!gpuTimer.supported) {
+        console.warn("[Perf] EXT_disjoint_timer_query_webgl2 unavailable: real GPU timing will be missing.");
+    }
+} else {
+    console.info(
+        "[Perf] disabled. Append ?perf=1 to the URL, or run window.__PERF_DEBUG__ = true to enable at runtime.",
+    );
+}
 
 function updateFps() {
     const now = performance.now();
@@ -27,6 +45,90 @@ function updateFps() {
         frameCount = 0;
         lastTime = now;
     }
+}
+
+const fmtMs = (v: number | undefined) => (v === undefined || !Number.isFinite(v) ? "-" : v.toFixed(2));
+
+function getSplatVertexCount(): number {
+    let total = 0;
+    for (const obj of scene.objects) {
+        if (obj instanceof SPLAT.Splat && obj.data) {
+            total += obj.data.vertexCount;
+        }
+    }
+    return total;
+}
+
+/** True if the view-projection matrix changed since the previous frame. */
+function isCameraMoving(): boolean {
+    const vp = camera.data.viewProj.buffer;
+    const arr = vp instanceof Float32Array ? vp : new Float32Array(vp);
+    if (prevViewProj && arr.length === prevViewProj.length) {
+        let same = true;
+        for (let i = 0; i < arr.length; i++) {
+            if (arr[i] !== prevViewProj[i]) {
+                same = false;
+                break;
+            }
+        }
+        if (same) return false;
+    }
+    prevViewProj = new Float32Array(arr);
+    return true;
+}
+
+function flushPerfSummary() {
+    if (!perf.enabled) return;
+    const rows = perf.summarize(true);
+    if (rows.length === 0) return;
+
+    const tableRows = rows.map((r) => ({
+        phase: r.phase,
+        "avg ms": fmtMs(r.avgMs),
+        "p95 ms": fmtMs(r.p95Ms),
+        "max ms": fmtMs(r.maxMs),
+        "events/s": r.count,
+    }));
+
+    const avgOf = (phase: string) => {
+        const row = rows.find((r) => r.phase === phase);
+        return row && Number.isFinite(row.avgMs) ? row.avgMs : null;
+    };
+    const fpsOf = (phase: string) => {
+        const avg = avgOf(phase);
+        return avg ? (1000 / avg).toFixed(1) : "-";
+    };
+
+    const motionLabel = `${cameraMovingFrames}/${windowFrames} frames moving`;
+    const stillCpu = avgOf("cpu.render.still.ms");
+    const movingCpu = avgOf("cpu.render.moving.ms");
+
+    let header = `[Perf] splats=${getSplatVertexCount()}  res=${renderer.canvas.width}x${renderer.canvas.height}`;
+    header += `  |  rAF≈${fpsOf("frame.interval.ms")} fps  (${motionLabel})`;
+    header += `  |  CPU: still≈${stillCpu ? stillCpu.toFixed(2) : "-"}ms moving≈${movingCpu ? movingCpu.toFixed(2) : "-"}ms`;
+    header += `  |  GPU: still≈${fpsOf("gpu.render.still.ms")} moving≈${fpsOf("gpu.render.moving.ms")}`;
+    if (!gpuTimer.supported) header += "  |  GPU timing unsupported";
+
+    console.groupCollapsed(`%c${header}`, "color:#7c3aed;font-weight:bold;");
+    console.table(tableRows);
+    if (gpuTimer.supported) {
+        console.info(
+            `[Perf] GPU timer: collected=${gpuTimer.collected}, missed=${gpuTimer.misses}` +
+                ` (misses mean the GPU had not finished the previous frame's query in time).`,
+        );
+    }
+    console.info(
+        "[Perf] Read like this:\n" +
+            "  * cpu.render.*  — all JS + GL commands issued on the main thread;\n" +
+            "  * gpu.render.*  — real GPU execution (needs EXT_disjoint_timer_query_webgl2);\n" +
+            "  * If cpu.render.still.ms ≈ rAF budget (16.7@60 / 8.3@120), CPU/GL submission is the limit;\n" +
+            "  * If gpu.render.still.ms is large while cpu is small, the shader/fill-rate is the limit;\n" +
+            "  * sort.* and gl.depthIndex* appear only while the camera moves.",
+    );
+    console.groupEnd();
+
+    cameraMovingFrames = 0;
+    windowFrames = 0;
 }
 
 function resetScene() {
@@ -153,15 +255,46 @@ function main() {
         renderer.resize();
     };
 
-    const frame = () => {
+    const frame = (now: number) => {
+        const nowMs = now || performance.now();
+
+        if (lastFrameAt > 0) {
+            perf.sample("frame.interval.ms", nowMs - lastFrameAt);
+        }
+        lastFrameAt = nowMs;
+
+        const tControls = performance.now();
         controls.update();
+        perf.sample("cpu.controls.update.ms", performance.now() - tControls);
+
+        if (perf.enabled) windowFrames++;
+        const moving = perf.enabled && isCameraMoving();
+        if (moving) cameraMovingFrames++;
+        const renderCpuKey = moving ? "cpu.render.moving.ms" : "cpu.render.still.ms";
+        const renderGpuKey = moving ? "gpu.render.moving.ms" : "gpu.render.still.ms";
+
+        if (perf.enabled) {
+            gpuTimer.begin(renderGpuKey);
+        }
+        const tRender = performance.now();
         renderer.render(scene, camera);
+        perf.sample(renderCpuKey, performance.now() - tRender);
+        if (perf.enabled) {
+            gpuTimer.end();
+        }
+
         if (firstFrameStart !== null && !firstFrameLogged && scene.objects.length > 0) {
             const elapsedSeconds = (performance.now() - firstFrameStart) / 1000;
             console.log(`First Frame: ${elapsedSeconds.toFixed(3)} s`);
             firstFrameLogged = true;
         }
         updateFps();
+
+        if (perf.enabled && nowMs - lastSummaryAt >= 1000) {
+            flushPerfSummary();
+            lastSummaryAt = nowMs;
+        }
+
         requestAnimationFrame(frame);
     };
 
@@ -196,8 +329,13 @@ async function benchmarkFPS(frameCount: number = 300, batchSize: number = 60) {
     while (rendered < frameCount) {
         const currentBatch = Math.min(batchSize, frameCount - rendered);
         for (let i = 0; i < currentBatch; i++) {
+            const tControls = performance.now();
             controls.update();
+            perf.sample("bench.controls.update.ms", performance.now() - tControls);
+
+            const tRender = performance.now();
             renderer.render(scene, camera);
+            perf.sample("bench.renderer.render.ms", performance.now() - tRender);
         }
         rendered += currentBatch;
         if (rendered < frameCount) {
@@ -208,9 +346,19 @@ async function benchmarkFPS(frameCount: number = 300, batchSize: number = 60) {
     const fps = frameCount / elapsed;
     console.log(`Benchmark FPS: ${fps.toFixed(2)} (${frameCount} frames in ${elapsed.toFixed(3)} s)`);
     console.log(`Render resolution: ${renderer.canvas.width} x ${renderer.canvas.height}`);
+    flushPerfSummary();
 }
 
 (window as unknown as { benchmarkFPS: typeof benchmarkFPS }).benchmarkFPS = benchmarkFPS;
-(window as unknown as { setBenchmarkResolution: typeof setBenchmarkResolution }).setBenchmarkResolution = setBenchmarkResolution;
+(window as unknown as { setBenchmarkResolution: typeof setBenchmarkResolution }).setBenchmarkResolution =
+    setBenchmarkResolution;
+// Console helpers for profiling sessions:
+//   __PERF__.flush()  -> print accumulated samples and reset
+//   __PERF__.reset()  -> discard accumulated samples
+//   __PERF__.perf     -> the underlying profiler (perf.enableWindowDebug())
+(window as unknown as { __PERF__: { flush: () => void; reset: () => void } }).__PERF__ = {
+    flush: flushPerfSummary,
+    reset: () => perf.reset(),
+};
 
 main();
