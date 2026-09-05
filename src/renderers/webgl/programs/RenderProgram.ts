@@ -32,6 +32,8 @@ uniform vec2 viewport;
 uniform bool useDepthFade;
 uniform float depthFade;
 
+uniform float u_maxSplatSize;
+
 const float SH_C0 = 0.28209479177387814;
 const float SH_C1 = 0.4886025119029199;
 
@@ -196,8 +198,8 @@ void main () {
 
     if (lambda2 < 0.0) return;
     vec2 diagonalVector = normalize(vec2(cov2d[0][1], lambda1 - cov2d[0][0]));
-    vec2 majorAxis = min(sqrt(2.0 * lambda1), 1024.0) * diagonalVector;
-    vec2 minorAxis = min(sqrt(2.0 * lambda2), 1024.0) * vec2(diagonalVector.y, -diagonalVector.x);
+    vec2 majorAxis = min(sqrt(2.0 * lambda1), u_maxSplatSize) * diagonalVector;
+    vec2 minorAxis = min(sqrt(2.0 * lambda2), u_maxSplatSize) * vec2(diagonalVector.y, -diagonalVector.x);
 
     uint colorTransformIndex = texelFetch(u_colorTransformIndices, ivec2(uint(index) & 0x3ffu, uint(index) >> 10), 0).x;
     mat4 colorTransform = mat4(
@@ -308,6 +310,7 @@ void main () {
 
 class RenderProgram extends ShaderProgram {
     private _outlineThickness: number = 10.0;
+    private _maxSplatSize: number = 1024;
     private _outlineColor: Color32 = new Color32(255, 165, 0, 255);
     private _renderData: RenderData | null = null;
     private _depthIndex: Uint32Array = new Uint32Array();
@@ -326,6 +329,7 @@ class RenderProgram extends ShaderProgram {
     protected _dispose: () => void;
 
     private _setOutlineThickness: (value: number) => void;
+    private _setMaxSplatSize: (value: number) => void;
     private _setOutlineColor: (value: Color32) => void;
 
     constructor(renderer: WebGLRenderer, passes: ShaderPass[]) {
@@ -352,6 +356,7 @@ class RenderProgram extends ShaderProgram {
 
         let u_outlineThickness: WebGLUniformLocation;
         let u_outlineColor: WebGLUniformLocation;
+        let u_maxSplatSize: WebGLUniformLocation;
 
         let positionAttribute: number;
         let indexAttribute: number;
@@ -464,6 +469,9 @@ class RenderProgram extends ShaderProgram {
 
             u_outlineColor = gl.getUniformLocation(this.program, "outlineColor") as WebGLUniformLocation;
             gl.uniform4fv(u_outlineColor, new Float32Array(this.outlineColor.flatNorm()));
+
+            u_maxSplatSize = gl.getUniformLocation(this.program, "u_maxSplatSize") as WebGLUniformLocation;
+            gl.uniform1f(u_maxSplatSize, this.maxSplatSize);
 
             this._splatTexture = gl.createTexture() as WebGLTexture;
             u_texture = gl.getUniformLocation(this.program, "u_texture") as WebGLUniformLocation;
@@ -824,6 +832,14 @@ class RenderProgram extends ShaderProgram {
                 gl.uniform4fv(u_outlineColor, new Float32Array(value.flatNorm()));
             }
         };
+
+        this._setMaxSplatSize = (value: number) => {
+            this._maxSplatSize = value;
+            if (this._initialized) {
+                gl.useProgram(this.program);
+                gl.uniform1f(u_maxSplatSize, value);
+            }
+        };
     }
 
     get renderData() {
@@ -852,6 +868,14 @@ class RenderProgram extends ShaderProgram {
 
     set outlineColor(value: Color32) {
         this._setOutlineColor(value);
+    }
+
+    get maxSplatSize() {
+        return this._maxSplatSize;
+    }
+
+    set maxSplatSize(value: number) {
+        this._setMaxSplatSize(value);
     }
 
     get worker() {

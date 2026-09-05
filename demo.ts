@@ -159,6 +159,22 @@ function tickResolutionScan(nowMs: number, frameMs: number) {
     }
 }
 
+/**
+ * Apply per-scene render tweaks that come from URL parameters:
+ *   ?splatPx=256   caps the maximum on-screen splat footprint (default 1024)
+ */
+function applySceneTweaks() {
+    try {
+        const splatPx = parseFloat(new URLSearchParams(location.search).get("splatPx") || "");
+        if (Number.isFinite(splatPx) && splatPx > 0) {
+            renderer.renderProgram.maxSplatSize = splatPx;
+            console.log(`[tweak] maxSplatSize=${splatPx}  (override at runtime with __PERF__.setMaxSplatSize(n))`);
+        }
+    } catch {
+        /* ignore */
+    }
+}
+
 /** True if the view-projection matrix changed since the previous frame. */
 function isCameraMoving(): boolean {
     const vp = camera.data.viewProj.buffer;
@@ -284,6 +300,7 @@ async function loadFromUrl(url: string) {
             progressIndicator.value = progress * 100;
         });
         adjustPixelRatio();
+        applySceneTweaks();
     } catch (err) {
         console.error("Failed to load scene:", err);
         alert(`Failed to load scene: ${url}`);
@@ -304,6 +321,7 @@ async function loadFile(file: File) {
     });
 
     adjustPixelRatio();
+    applySceneTweaks();
     hideProgress();
     dropZone.style.display = "none";
     sceneSelect.value = "";
@@ -476,6 +494,7 @@ async function benchmarkFPS(frameCount: number = 300, batchSize: number = 60) {
 //   __PERF__.setResolutionScale(2)      -> clamp render resolution (mobile)
 //   __PERF__.restoreResolutionAutoScale()-> back to automatic DPR sizing
 //   __PERF__.scanResolution([1,2,4])    -> auto A/B several resolutions (hold still)
+//   __PERF__.setMaxSplatSize(512)       -> cap max splat footprint (overdraw A/B)
 (
     window as unknown as {
         __PERF__: {
@@ -484,6 +503,7 @@ async function benchmarkFPS(frameCount: number = 300, batchSize: number = 60) {
             setResolutionScale: (scale: number) => void;
             restoreResolutionAutoScale: () => void;
             scanResolution: (scales?: number[], secondsPerStage?: number) => void;
+            setMaxSplatSize: (size: number) => void;
         };
     }
 ).__PERF__ = {
@@ -492,6 +512,10 @@ async function benchmarkFPS(frameCount: number = 300, batchSize: number = 60) {
     setResolutionScale,
     restoreResolutionAutoScale,
     scanResolution,
+    setMaxSplatSize: (size: number) => {
+        renderer.renderProgram.maxSplatSize = size;
+        console.log(`[tweak] maxSplatSize=${size}`);
+    },
 };
 
 main();
