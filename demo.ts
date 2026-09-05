@@ -29,7 +29,7 @@ let prevViewProj: Float32Array | null = null;
 if (perf.enabled) {
     console.info("[Perf] instrumentation ENABLED (?perf=1). Summary is printed to the console every ~1 s.");
     console.info(
-        `[Perf] frustum culling in sort worker: ${renderer.renderProgram.cullEnabled ? "ON" : "OFF"} (?cull=0 disables for A/B).`,
+        `[Perf] frustum-culling prototype: ${renderer.renderProgram.cullEnabled ? "ON" : "OFF"} (?cull=1 enables for A/B).`,
     );
     if (!gpuTimer.supported) {
         console.warn("[Perf] EXT_disjoint_timer_query_webgl2 unavailable: real GPU timing will be missing.");

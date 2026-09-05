@@ -367,13 +367,15 @@ class RenderProgram extends ShaderProgram {
         let activeDepthBuffer = 0;
 
         try {
-            // Frustum culling inside the sort worker can be disabled with ?cull=0
-            // for a clean A/B measurement (defaults to ON).
-            this._cullEnabled = !(
-                typeof location !== "undefined" && new URLSearchParams(location.search).get("cull") === "0"
-            );
+            // Opt-in frustum-culling prototype inside the sort worker.
+            // Disabled by default: screen-edge correctness depends on
+            // sortData.positions matching the shader's packed centers, which is
+            // NOT guaranteed for all scenes (it caused visible black edges).
+            // Enable explicitly with ?cull=1 for A/B measurement.
+            this._cullEnabled =
+                typeof location !== "undefined" && new URLSearchParams(location.search).get("cull") === "1";
         } catch {
-            this._cullEnabled = true;
+            this._cullEnabled = false;
         }
 
         this._resize = () => {
