@@ -26,6 +26,17 @@ let windowFrames = 0;
 let cameraMovingFrames = 0;
 let prevViewProj: Float32Array | null = null;
 
+interface ResolutionScanState {
+    scales: number[];
+    idx: number;
+    stageStart: number;
+    stageDur: number;
+    fpsSum: number;
+    fpsCount: number;
+    rows: { scale: number; fps: number }[];
+}
+let resolutionScan: ResolutionScanState | null = null;
+
 if (perf.enabled) {
     console.info("[Perf] instrumentation ENABLED (?perf=1). Summary is printed to the console every ~1 s.");
     console.info(
@@ -78,6 +89,74 @@ function setResolutionScale(scale: number) {
 function restoreResolutionAutoScale() {
     renderer.enableAutoResize();
     renderer.resize();
+}
+
+/**
+ * Automated 3-resolution scan for stable on-device FPS comparison.
+ * Keep the camera still while it runs. Example:
+ *   __PERF__.scanResolution()            // scales 1, 2, 4, 4s each
+ *   __PERF__.scanResolution([1, 2], 3)   // custom
+ */
+function scanResolution(scales: number[] = [1, 2, 4], secondsPerStage = 4) {
+    if (resolutionScan) {
+        console.warn("[scan] already running; wait for it to finish.");
+        return;
+    }
+    renderer.disableAutoResize();
+    resolutionScan = {
+        scales,
+        idx: 0,
+        stageStart: 0,
+        stageDur: secondsPerStage * 1000,
+        fpsSum: 0,
+        fpsCount: 0,
+        rows: [],
+    };
+    applyResolutionScanStage();
+}
+
+function applyResolutionScanStage() {
+    if (!resolutionScan) return;
+    const scan = resolutionScan;
+    const scale = scan.scales[scan.idx];
+    const width = Math.max(1, Math.floor(canvas.clientWidth * scale));
+    const height = Math.max(1, Math.floor(canvas.clientHeight * scale));
+    renderer.setSize(width, height);
+    scan.fpsSum = 0;
+    scan.fpsCount = 0;
+    scan.stageStart = performance.now();
+    console.log(
+        `[scan] stage ${scan.idx + 1}/${scan.scales.length}: scale=${scale} -> ${width}x${height} ` +
+            `(hold the camera still…)`,
+    );
+}
+
+function tickResolutionScan(nowMs: number, frameMs: number) {
+    if (!resolutionScan) return;
+    const scan = resolutionScan;
+
+    if (nowMs - scan.stageStart >= scan.stageDur) {
+        const fps = scan.fpsCount > 0 ? (scan.fpsCount * 1000) / scan.fpsSum : NaN;
+        scan.rows.push({ scale: scan.scales[scan.idx], fps: Math.round(fps) });
+        console.log(`[scan] stage ${scan.idx + 1}: scale=${scan.scales[scan.idx]} -> ~${Math.round(fps)} fps`);
+
+        scan.idx++;
+        if (scan.idx >= scan.scales.length) {
+            console.log("[scan] done:", scan.rows);
+            console.table(scan.rows.map((r) => ({ scale: r.scale, "avg fps": r.fps })));
+            renderer.enableAutoResize();
+            renderer.resize();
+            resolutionScan = null;
+            return;
+        }
+        applyResolutionScanStage();
+        return;
+    }
+
+    if (nowMs >= scan.stageStart) {
+        scan.fpsCount++;
+        scan.fpsSum += frameMs;
+    }
 }
 
 /** True if the view-projection matrix changed since the previous frame. */
@@ -285,8 +364,10 @@ function main() {
     const frame = (now: number) => {
         const nowMs = now || performance.now();
 
-        if (lastFrameAt > 0) {
-            perf.sample("frame.interval.ms", nowMs - lastFrameAt);
+        const frameMs = lastFrameAt > 0 ? nowMs - lastFrameAt : 0;
+        if (frameMs > 0) {
+            perf.sample("frame.interval.ms", frameMs);
+            tickResolutionScan(nowMs, frameMs);
         }
         lastFrameAt = nowMs;
 
@@ -384,6 +465,7 @@ async function benchmarkFPS(frameCount: number = 300, batchSize: number = 60) {
 //   __PERF__.reset()                    -> discard accumulated samples
 //   __PERF__.setResolutionScale(2)      -> clamp render resolution (mobile)
 //   __PERF__.restoreResolutionAutoScale()-> back to automatic DPR sizing
+//   __PERF__.scanResolution([1,2,4])    -> auto A/B several resolutions (hold still)
 (
     window as unknown as {
         __PERF__: {
@@ -391,6 +473,7 @@ async function benchmarkFPS(frameCount: number = 300, batchSize: number = 60) {
             reset: () => void;
             setResolutionScale: (scale: number) => void;
             restoreResolutionAutoScale: () => void;
+            scanResolution: (scales?: number[], secondsPerStage?: number) => void;
         };
     }
 ).__PERF__ = {
@@ -398,6 +481,7 @@ async function benchmarkFPS(frameCount: number = 300, batchSize: number = 60) {
     reset: () => perf.reset(),
     setResolutionScale,
     restoreResolutionAutoScale,
+    scanResolution,
 };
 
 main();
