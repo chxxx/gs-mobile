@@ -310,7 +310,11 @@ void main () {
 
 class RenderProgram extends ShaderProgram {
     private _outlineThickness: number = 10.0;
-    private _maxSplatSize: number = 1024;
+    // Max on-screen splat footprint in px. Measured on a mobile GPU at 280K
+    // splats: capping 1024->256 keeps scale-6 overdraw in check with negligible
+    // visual impact (only >256px giant splats lose their outer tail). Runtime
+    // override: ?splatPx=n  or  __PERF__.setMaxSplatSize(n).
+    private _maxSplatSize: number = 256;
     private _outlineColor: Color32 = new Color32(255, 165, 0, 255);
     private _renderData: RenderData | null = null;
     private _depthIndex: Uint32Array = new Uint32Array();

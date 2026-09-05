@@ -36,6 +36,7 @@ interface ResolutionScanState {
     rows: { scale: number; fps: number }[];
 }
 let resolutionScan: ResolutionScanState | null = null;
+let pendingCaptureLabel: string | null = null;
 
 if (perf.enabled) {
     console.info("[Perf] instrumentation ENABLED (?perf=1). Summary is printed to the console every ~1 s.");
@@ -172,6 +173,34 @@ function applySceneTweaks() {
         }
     } catch {
         /* ignore */
+    }
+}
+
+/**
+ * Capture the current frame as a PNG at the end of the next rendered frame
+ * (i.e. right after render() in the same rAF callback, before the compositor
+ * clears the drawing buffer). Download is triggered automatically.
+ */
+function captureFrame(label: string) {
+    pendingCaptureLabel = label;
+    console.log(`[capture] will save "${label}" after the next frame…`);
+}
+
+function tickCapture(): void {
+    if (!pendingCaptureLabel) return;
+    const label = pendingCaptureLabel;
+    pendingCaptureLabel = null;
+    try {
+        const url = renderer.canvas.toDataURL("image/png");
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${label}_${Date.now()}.png`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        console.log(`[capture] saved ${a.download}`);
+    } catch (e) {
+        console.error("[capture] failed:", e);
     }
 }
 
@@ -419,6 +448,8 @@ function main() {
             gpuTimer.end();
         }
 
+        tickCapture();
+
         if (firstFrameStart !== null && !firstFrameLogged && scene.objects.length > 0) {
             const elapsedSeconds = (performance.now() - firstFrameStart) / 1000;
             console.log(`First Frame: ${elapsedSeconds.toFixed(3)} s`);
@@ -495,6 +526,7 @@ async function benchmarkFPS(frameCount: number = 300, batchSize: number = 60) {
 //   __PERF__.restoreResolutionAutoScale()-> back to automatic DPR sizing
 //   __PERF__.scanResolution([1,2,4])    -> auto A/B several resolutions (hold still)
 //   __PERF__.setMaxSplatSize(512)       -> cap max splat footprint (overdraw A/B)
+//   __PERF__.captureFrame("name")       -> save current view as PNG (A/B quality)
 (
     window as unknown as {
         __PERF__: {
@@ -504,6 +536,7 @@ async function benchmarkFPS(frameCount: number = 300, batchSize: number = 60) {
             restoreResolutionAutoScale: () => void;
             scanResolution: (scales?: number[], secondsPerStage?: number) => void;
             setMaxSplatSize: (size: number) => void;
+            captureFrame: (label: string) => void;
         };
     }
 ).__PERF__ = {
@@ -516,6 +549,7 @@ async function benchmarkFPS(frameCount: number = 300, batchSize: number = 60) {
         renderer.renderProgram.maxSplatSize = size;
         console.log(`[tweak] maxSplatSize=${size}`);
     },
+    captureFrame,
 };
 
 main();
