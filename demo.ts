@@ -256,8 +256,18 @@ function hideProgress() {
 function adjustPixelRatio() {
     const splat = scene.objects.find((o) => o instanceof SPLAT.Splat) as SPLAT.Splat | undefined;
     const vertexCount = splat?.data?.vertexCount ?? 0;
-    // Use physical (DPR) resolution for all scenes.
-    const pixelRatio = window.devicePixelRatio || 1;
+    // Render at physical (DPR) resolution by default, or override with ?dpr=<n>
+    // (e.g. ?dpr=2 caps a phone's DPR-4 canvas to 720x1504, usually enough for
+    // 60 fps with no visible difference on 3DGS).
+    let pixelRatio = window.devicePixelRatio || 1;
+    try {
+        const dprOverride = parseFloat(new URLSearchParams(location.search).get("dpr") || "");
+        if (Number.isFinite(dprOverride) && dprOverride > 0) {
+            pixelRatio = dprOverride;
+        }
+    } catch {
+        /* ignore */
+    }
     renderer.setPixelRatio(pixelRatio);
     console.log(`Vertex count: ${vertexCount}, pixel ratio set to: ${pixelRatio.toFixed(2)}`);
     console.log(`Render resolution: ${renderer.canvas.width} x ${renderer.canvas.height}`);
