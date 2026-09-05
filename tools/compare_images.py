@@ -1,8 +1,13 @@
 """Compare two screenshots (PNG) for the splat-cap A/B quality check.
 
-Usage (run from the gsplat.js directory after capturing cap256/cap1024 PNGs):
+Usage (Windows cmd does NOT auto-expand globs):
 
-    python tools/compare_images.py cap256.png cap1024.png
+    python tools/compare_images.py cap256.png cap1024.png        # explicit files
+    python tools/compare_images.py .                            # scan this folder
+    python tools/compare_images.py C:/Users/<you>/Downloads      # scan a folder
+
+When no arguments are given the current folder is scanned for the newest
+cap256_*.png / cap1024_*.png pair.
 
 Outputs per-channel & overall PSNR. If scikit-image is installed it also
 reports SSIM. If only numpy/Pillow are present it falls back to PSNR only.
@@ -12,6 +17,8 @@ Guideline (screenshots at identical camera & resolution):
     - 35 ~ 45 dB     : tiny difference, decide by eyeballing diff regions
     - < 35 dB        : visible difference, inspect before adopting cap 256
 """
+import glob
+import os
 import sys
 
 import numpy as np
@@ -26,6 +33,21 @@ def load_rgb(path: str) -> np.ndarray:
     return np.asarray(img, dtype=np.float64)
 
 
+def find_pair(folder: str) -> tuple[str, str]:
+    c256 = glob.glob(os.path.join(folder, "cap256_*.png"))
+    c1024 = glob.glob(os.path.join(folder, "cap1024_*.png"))
+    if not c256 or not c1024:
+        raise SystemExit(
+            "Could not find cap256_*/cap1024_* screenshots in:\n"
+            f"    {os.path.abspath(folder)}\n"
+            "Screenshots are usually saved to your browser download folder. "
+            "Either cd there, pass the folder, or pass the two file paths explicitly."
+        )
+    a = max(c256, key=os.path.getmtime)
+    b = max(c1024, key=os.path.getmtime)
+    return a, b
+
+
 def psnr(a: np.ndarray, b: np.ndarray) -> float:
     mse = np.mean((a - b) ** 2)
     if mse <= 1e-12:
@@ -34,9 +56,13 @@ def psnr(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def main() -> None:
-    if len(sys.argv) != 3:
+    args = sys.argv[1:]
+    if len(args) == 2:
+        path_a, path_b = args[0], args[1]
+    elif len(args) <= 1:
+        path_a, path_b = find_pair(args[0] if args else ".")
+    else:
         raise SystemExit(__doc__)
-    path_a, path_b = sys.argv[1], sys.argv[2]
 
     a = load_rgb(path_a)
     b = load_rgb(path_b)
