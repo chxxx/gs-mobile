@@ -283,8 +283,8 @@ function tickCapProbe(): void {
     }
 
     capProbe = null;
-    renderer.renderProgram.maxSplatSize = 256; // back to the default preset
-    console.log("[probe] done (cap restored to default 256). Capture PNGs now if a view matters.");
+    renderer.renderProgram.maxSplatSize = 1024; // back to default (cap disabled)
+    console.log("[probe] done (cap restored to default 1024). Capture PNGs now if a view matters.");
 }
 
 /** True if the view-projection matrix changed since the previous frame. */
@@ -381,23 +381,47 @@ function hideProgress() {
     progressContainer.hidden = true;
 }
 
-function adjustPixelRatio() {
-    const splat = scene.objects.find((o) => o instanceof SPLAT.Splat) as SPLAT.Splat | undefined;
-    const vertexCount = splat?.data?.vertexCount ?? 0;
-    // Render at physical (DPR) resolution by default, or override with ?dpr=<n>
-    // (e.g. ?dpr=2 caps a phone's DPR-4 canvas to 720x1504, usually enough for
-    // 60 fps with no visible difference on 3DGS).
-    let pixelRatio = window.devicePixelRatio || 1;
+const SPLAT_COUNT_RES_THRESHOLD = 500000; // flux-gs / MEGS-2 style split
+
+/** Decide the render pixelRatio (= canvas CSS-size multiplier). */
+function resolutionPolicyPixelRatio(vertexCount: number): { pixelRatio: number; reason: string } {
+    // 1) Explicit manual override wins: ?dpr=<n>
     try {
         const dprOverride = parseFloat(new URLSearchParams(location.search).get("dpr") || "");
         if (Number.isFinite(dprOverride) && dprOverride > 0) {
-            pixelRatio = dprOverride;
+            return { pixelRatio: dprOverride, reason: `?dpr=${dprOverride} (manual override)` };
         }
     } catch {
         /* ignore */
     }
-    renderer.setPixelRatio(pixelRatio);
-    console.log(`Vertex count: ${vertexCount}, pixel ratio set to: ${pixelRatio.toFixed(2)}`);
+
+    // 2) Splat-count resolution policy, mirroring flux-gs / MEGS-2:
+    //      splats > threshold  -> render at 1x CSS resolution (canvas = CSS px)
+    //      splats <= threshold -> render at physical (devicePixelRatio) resolution
+    //    Threshold overridable: ?nthresh=<count>
+    let threshold = SPLAT_COUNT_RES_THRESHOLD;
+    try {
+        const t = parseFloat(new URLSearchParams(location.search).get("nthresh") || "");
+        if (Number.isFinite(t) && t > 0) threshold = t;
+    } catch {
+        /* ignore */
+    }
+
+    if (vertexCount > threshold) {
+        return { pixelRatio: 1, reason: `splat-count policy: ${vertexCount} > ${threshold} -> 1x CSS` };
+    }
+    return {
+        pixelRatio: window.devicePixelRatio || 1,
+        reason: `splat-count policy: ${vertexCount} <= ${threshold} -> physical DPR`,
+    };
+}
+
+function adjustPixelRatio() {
+    const splat = scene.objects.find((o) => o instanceof SPLAT.Splat) as SPLAT.Splat | undefined;
+    const vertexCount = splat?.data?.vertexCount ?? 0;
+    const policy = resolutionPolicyPixelRatio(vertexCount);
+    renderer.setPixelRatio(policy.pixelRatio);
+    console.log(`Vertex count: ${vertexCount}, pixel ratio set to: ${policy.pixelRatio.toFixed(2)} (${policy.reason})`);
     console.log(`Render resolution: ${renderer.canvas.width} x ${renderer.canvas.height}`);
 }
 

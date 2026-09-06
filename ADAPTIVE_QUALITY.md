@@ -159,10 +159,9 @@ onCameraMoveIntensityChange(intensity):
 ## 5. 默认参数建议
 
 ```
-defaultPreset  = { cap: 256, dprFactor: 1.0 }     // 与你的"中等档"一致
-goodPreset     = { cap: 1024, dprFactor: 1.0 }    // 需要全画质时 ?quality=good
-savePreset     = { cap: 160, dprFactor: 0.55 }    // ≈你的"差档"（256+dpr2）
-min            = { cap: 96, dprFactor: 0.5 }      // 兜底
+// 现状（cap 默认不启用）：
+base = { cap: 1024(不裁剪), dprFactor: 1.0 }
+启用 cap 需显式 ?splatPx=n / __PERF__.setMaxSplatSize(n)，用于 A/B 与未来自适应控制器。
 评估窗 500ms；降档锁 2s；升级试探默认关闭
 ```
 
@@ -208,4 +207,41 @@ min            = { cap: 96, dprFactor: 0.5 }      // 兜底
 - 采纳"默认 cap=256、物理 DPR"作为新默认档（与实测一致，视觉代价最小）；
 - 在你三档基础上**加闭环微调与连续阶梯**，避免"档间 4 倍像素跳变"和"60fps 满帧误判余量"两个坑；
 - 实现优先级：① QualityController（cap+按帧回落，默认 adaptive=off）→ ② dprFactor 小步降 → ③ 运动瞬态；点数轴 C 待 LOD 需求出现再做。
+
+## 9. 与主流一致：按 splat 数量切换渲染倍率（flux-gs / MEGS-2 对照）
+
+主流移动端渲染（flux-gs `render_shared/main.js`、MEGS-2）的做法不是"按设备档位"，而是**按场景点数切换画布分辨率**：
+
+```js
+// flux-gs / MEGS-2 原文语义：
+const downsample = splatData.length / rowLength > 500000 ? 1 : 1 / devicePixelRatio;
+canvas.width  = Math.round(innerWidth  / downsample);   // 点数>500k → CSS 1x
+canvas.height = Math.round(innerHeight / downsample);   // 点数≤500k → 物理 DPR
+```
+
+等价映射到本项目（canvas = CSS × pixelRatio）：
+
+| 场景点数 N | flux/MEGS-2 画布 | 本项目 pixelRatio |
+|---|---|---|
+| N ≤ 500,000 | 物理分辨率（×DPR） | `window.devicePixelRatio` |
+| N > 500,000 | CSS 1x（不乘 DPR） | `1` |
+
+### 本项目落点（已实现，`demo.ts`）
+
+```ts
+const SPLAT_COUNT_RES_THRESHOLD = 500000;      // 可被 ?nthresh=<n> 覆盖
+function resolutionPolicyPixelRatio(vertexCount) {
+    // ?dpr=<n> 手动覆盖优先级最高；
+    // 否则 vertexCount > 500000 ? 1 : devicePixelRatio
+}
+// 加载完成后由 adjustPixelRatio() 调用，等价于 flux 在解析完数据后设 canvas 尺寸
+```
+
+### 与 flux 的差异 / 注意
+
+1. **触发时机**：flux 在数据解析后一次性设 canvas；本项目 `adjustPixelRatio()` 在每个场景加载后调用一次，语义一致。动态改点数（编辑器）需重新触发。
+2. **阈值写死 500k 是他们的设备结论**：我们的实测表明"低端手机 280K @ DPR4 已掉到 47fps"——同样的 500k 一刀切在更弱的设备上并不够。因此：
+   - 完全复刻：直接使用 500k 默认；
+   - 保守做法：部署时用 `?nthresh=` 或设备自适应控制器把阈值下调（例如 250k 起步），即让"点数阈值"成为可配置的轴，与 §4 的分层降级（先 cap → 后倍率）一起参与决策。
+3. **它与 cap 的关系**：flux 只做分辨率一刀切，没有 cap。我们的实测说明：近景大高斯（cap 不可用）与点数规模（适合用此阈值策略）是两个独立维度——**点数阈值管"人多时整体降采样"，cap 管"个别巨型高斯的 fill 尾"**，两者可叠加但都默认关闭、按需启用。
 
