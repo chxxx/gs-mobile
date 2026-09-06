@@ -37,6 +37,11 @@ interface ResolutionScanState {
 }
 let resolutionScan: ResolutionScanState | null = null;
 let pendingCaptureLabel: string | null = null;
+interface CapProbeState {
+    stage: number;
+    bufA: Uint8Array | null;
+}
+let capProbe: CapProbeState | null = null;
 
 if (perf.enabled) {
     console.info("[Perf] instrumentation ENABLED (?perf=1). Summary is printed to the console every ~1 s.");
@@ -201,6 +206,73 @@ function tickCapture(): void {
         console.log(`[capture] saved ${a.download}`);
     } catch (e) {
         console.error("[capture] failed:", e);
+    }
+}
+
+/**
+ * One-click in-browser cap A/B: renders the current view with cap=1024, reads
+ * the framebuffer, switches to cap=256, reads the next frame, then reports how
+ * many pixels differ and the max channel difference. Perfectly identical
+ * frames report "no pixels differ". Keep the camera still while it runs.
+ */
+function startCapProbe() {
+    capProbe = { stage: 0, bufA: null };
+    renderer.renderProgram.maxSplatSize = 1024;
+    console.log("[probe] capturing cap=1024 frame… (will auto-switch to 256)");
+}
+
+function tickCapProbe(): void {
+    if (!capProbe) return;
+    const gl = renderer.gl;
+    const w = renderer.canvas.width;
+    const h = renderer.canvas.height;
+    if (w < 1 || h < 1) return;
+
+    const px = new Uint8Array(w * h * 4);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+
+    if (capProbe.stage === 0) {
+        capProbe.bufA = px;
+        capProbe.stage = 1;
+        renderer.renderProgram.maxSplatSize = 256;
+        console.log("[probe] captured cap=1024; switched to cap=256, capturing…");
+        return;
+    }
+
+    const a = capProbe.bufA as Uint8Array;
+    capProbe = null;
+
+    let diffPixels = 0;
+    let maxDiff = 0;
+    let sumDiff = 0;
+    const n = w * h * 4;
+    for (let i = 0; i < n; i += 4) {
+        // compare RGB only; ignore alpha channel (background is transparent on both)
+        const dr = Math.abs(a[i] - px[i]);
+        const dg = Math.abs(a[i + 1] - px[i + 1]);
+        const db = Math.abs(a[i + 2] - px[i + 2]);
+        const d = Math.max(dr, dg, db);
+        if (d > 0) {
+            diffPixels++;
+            sumDiff += d;
+            if (d > maxDiff) maxDiff = d;
+        }
+    }
+    const total = w * h;
+    const pct = ((diffPixels / total) * 100).toFixed(3);
+    const meanOnDiff = diffPixels ? (sumDiff / diffPixels).toFixed(2) : "0";
+    console.log(`[probe] cap1024 vs cap256 @ ${w}x${h}:`);
+    console.log(
+        `   differing pixels: ${diffPixels} / ${total} (${pct}%)   maxΔ=${maxDiff}   meanΔ(over diffs)=${meanOnDiff}`,
+    );
+    if (diffPixels === 0) {
+        console.log(
+            "   → identical at this view. No splat exceeded 256px; zoom/navigate closer to a large splat to see the cap in action.",
+        );
+    } else {
+        console.log(
+            "   → cap is active at this view (some splat footprint >256px). Capture both PNGs with __PERF__.captureFrame() for offline PSNR.",
+        );
     }
 }
 
@@ -449,6 +521,7 @@ function main() {
         }
 
         tickCapture();
+        tickCapProbe();
 
         if (firstFrameStart !== null && !firstFrameLogged && scene.objects.length > 0) {
             const elapsedSeconds = (performance.now() - firstFrameStart) / 1000;
@@ -537,6 +610,7 @@ async function benchmarkFPS(frameCount: number = 300, batchSize: number = 60) {
             scanResolution: (scales?: number[], secondsPerStage?: number) => void;
             setMaxSplatSize: (size: number) => void;
             captureFrame: (label: string) => void;
+            probeCap: () => void;
         };
     }
 ).__PERF__ = {
@@ -550,6 +624,7 @@ async function benchmarkFPS(frameCount: number = 300, batchSize: number = 60) {
         console.log(`[tweak] maxSplatSize=${size}`);
     },
     captureFrame,
+    probeCap: startCapProbe,
 };
 
 main();
