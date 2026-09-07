@@ -477,6 +477,11 @@ async function populateSceneSelector() {
             option.textContent = scene.name;
             sceneSelect.appendChild(option);
         }
+
+        // 默认预选（高亮）第一个场景；渲染仍由下方 change 事件手动触发，不自动加载。
+        if (scenes.length > 0) {
+            sceneSelect.value = scenes[0].file;
+        }
     } catch (err) {
         console.warn("Failed to load scenes.json:", err);
     }

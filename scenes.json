@@ -1,14 +1,14 @@
 [
     {
-        "name": "Truck",
-        "file": "scenes/truck.ply"
+        "name": "DrJohnson (r7 QPLY)",
+        "file": "scenes/point_cloud_quantised_half_r7-drjohnson.ply"
     },
     {
-        "name": "Garden",
-        "file": "scenes/garden.ply"
+        "name": "Garden (r7 QPLY)",
+        "file": "scenes/point_cloud_quantised_half_r7-garden.ply"
     },
     {
-        "name": "BAPQ Quantised (point_cloud_quantised_half)",
-        "file": "scenes/point_cloud_quantised_half.ply"
+        "name": "Truck (r7 QPLY)",
+        "file": "scenes/point_cloud_quantised_half_r7-truck.ply"
     }
 ]
