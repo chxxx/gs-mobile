@@ -137,5 +137,7 @@ playground/
 
 # Project specific
 vite.config.js.timestamp-*.mjs
+vite.site.config.js.timestamp-*.mjs
 public/*.ply
 public/*.splat
+site-dist
