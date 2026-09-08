@@ -1,5 +1,5 @@
 import { readFileSync, existsSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { IsLowRankQPLY, ParseLowRankQPLYBuffer } from "./QPLYLoaderUtils";
 import { float16BitsToFloat32 } from "../utils/HalfFloat";
 import { SplatData } from "../splats/SplatData";
@@ -42,13 +42,21 @@ function unpackChannel(packed: Uint32Array, index: number, coeffs: number[]): vo
 }
 
 describe.skipIf(!fixturesPresent)("low-rank QPLY loader", () => {
-    const { input, expected } = loadFixture();
+    // 文件读取必须在 beforeAll（仅测试实际运行时执行）内完成，
+    // 不能放在 describe 回调顶层 —— vitest 收集阶段即使 suite 被 skip 也会执行该回调。
+    let loaded: ReturnType<typeof loadFixture> | undefined;
+
+    beforeAll(() => {
+        loaded = loadFixture();
+    });
 
     it("detects the low-rank QPLY header", () => {
+        const { input } = loaded!;
         expect(IsLowRankQPLY(input)).toBe(true);
     });
 
     it("parses positions, scales, rotations and base colors", () => {
+        const { input, expected } = loaded!;
         const { splatBuffer } = ParseLowRankQPLYBuffer(input);
         const data = SplatData.Deserialize(new Uint8Array(splatBuffer));
 
@@ -79,6 +87,7 @@ describe.skipIf(!fixturesPresent)("low-rank QPLY loader", () => {
     });
 
     it("reconstructs 3rd-order SH rest coefficients from C@B (embedded sh_basis)", () => {
+        const { input, expected } = loaded!;
         const { sphericalHarmonics } = ParseLowRankQPLYBuffer(input);
 
         expect(sphericalHarmonics.count).toBe(expected.N);
