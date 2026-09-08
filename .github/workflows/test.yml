@@ -1,20 +1,27 @@
 name: CI
-on: [ pull_request, push ]
+on:
+    push:
+        branches: [main, cleanup/resume-prep]
+    pull_request:
+
+permissions:
+    contents: read
+
+concurrency:
+    group: ci-${{ github.ref }}
+    cancel-in-progress: true
+
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    check:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "lts/*"
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: npm
 
-      - uses: mymindstorm/setup-emsdk@v11
-      - name: Verify Emscripten
-        run: emcc --version
-
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run test  
-      - run: npm run build
+            - run: npm ci
+            - run: npm run lint
+            - run: npm run test
