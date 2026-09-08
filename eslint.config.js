@@ -113,7 +113,9 @@ export default [
       'no-console': 'off',
       'no-debugger': 'warn',
       'no-unused-vars': 'off', // Use TypeScript version instead
-      'no-undef': 'error',
+      // TypeScript files are type-checked by tsc; no-undef cannot understand
+      // lib.dom types (e.g. WebGLQuery) or TS type references, so keep it off.
+      'no-undef': 'off',
       
       // Allow worker imports with special syntax
       'import/no-unresolved': 'off'
