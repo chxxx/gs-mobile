@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <title>3DGS 渲染性能测试</title>
+    <style>
+        :root { --bg:#0d1117; --panel:#161b22; --panel-2:#1c2330; --line:#2b3340; --text:#e6edf3; --muted:#8b98a8; --accent:#e3b341; --ok:#3fb950; --err:#f85149; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { height: 100%; }
+        body { background: var(--bg); color: var(--text); font: 15px/1.55 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; display: flex; flex-direction: column; }
+        #topbar { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+        #topbar .brand { font-weight: 700; }
+        #topbar a { color: var(--muted); text-decoration: none; font-size: 13px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; }
+        #topbar a.active { color: var(--accent); border-color: var(--accent); }
+        #topbar .spacer { flex: 1; }
+        #topbar .hint { font-size: 12px; color: var(--muted); }
+        #statusline { padding: 6px 14px; font-size: 13px; color: var(--muted); border-bottom: 1px solid var(--line); display: flex; gap: 16px; flex-wrap: wrap; }
+        #statusline b { color: var(--text); font-weight: 600; }
+        main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+        .panel { padding: 12px 14px; }
+        #controls { border-bottom: 1px solid var(--line); background: var(--panel); }
+        #controls .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 4px 0; }
+        #controls label { font-size: 13px; color: var(--muted); }
+        #controls select, #controls input { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font-size: 14px; }
+        button { background: var(--accent); color: #0d1117; border: 0; border-radius: 8px; padding: 9px 18px; font-size: 15px; font-weight: 700; cursor: pointer; }
+        button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); font-weight: 500; }
+        button:disabled { opacity: .45; cursor: not-allowed; }
+        #view-area { position: relative; flex: 1; min-height: 0; background: #000; }
+        #view { width: 100%; height: 100%; display: block; touch-action: none; outline: none; }
+        #fps-overlay { position: absolute; top: 10px; left: 10px; color: #fff; font-weight: 800; text-shadow: 0 0 6px rgba(0,0,0,.9), 0 0 2px #000; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: rgba(0,0,0,.35); padding: 4px 10px; border-radius: 8px; line-height: 1.3; }
+        #info-overlay { position: absolute; right: 10px; top: 10px; font-size: 12px; color: #fff; text-align: right; text-shadow: 0 1px 3px #000; white-space: pre-line; }
+        #bench-progress { display: none; }
+        #bench-progress .bar { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; margin: 8px 0; }
+        #bench-progress .bar > div { height: 100%; width: 0%; background: var(--accent); transition: width .3s; }
+        #result-card { display: none; position: fixed; inset: 0; z-index: 50; background: rgba(0,0,0,.55); align-items: center; justify-content: center; padding: 16px; }
+        #result-card .box { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; max-width: 760px; width: 100%; padding: 18px; max-height: 92vh; overflow: auto; }
+        #result-card h2 { margin-bottom: 8px; font-size: 18px; }
+        #result-card textarea { width: 100%; min-height: 220px; background: #0b0f14; color: #d0f0c0; border: 1px solid var(--line); border-radius: 8px; font: 12px/1.5 ui-monospace, Consolas, monospace; padding: 10px; white-space: pre; resize: vertical; }
+        #result-card .actions { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+        #result-card .note { font-size: 12px; color: var(--muted); margin-top: 8px; }
+        #view-ui { display: none; }
+        #welcome { text-align: center; color: var(--muted); font-size: 14px; padding: 40px 20px; }
+        #status-big { position: absolute; left: 0; right: 0; top: 40%; text-align: center; font-size: 18px; color: #fff; text-shadow: 0 1px 8px #000; pointer-events: none; }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+    <div id="topbar">
+        <span class="brand">3DGS 性能测试</span>
+        <a href="./" id="lnk-demo">返回演示</a>
+        <a href="./bench.html?mode=bench" id="lnk-bench" class="active">自动测试</a>
+        <a href="./bench.html?mode=view" id="lnk-view">展示浏览</a>
+        <span class="spacer"></span>
+        <span class="hint" id="mode-hint"></span>
+    </div>
+
+    <div id="statusline">
+        <span>设备：<b id="st-device">检测中…</b></span>
+        <span>渲染分辨率：<b id="st-res">-</b></span>
+        <span>当前场景：<b id="st-scene">-</b></span>
+        <span>进度：<b id="st-progress">-</b></span>
+    </div>
+
+    <main>
+        <section class="panel" id="controls">
+            <div class="row" id="bench-controls">
+                <label>测试范围
+                    <select id="sel-profile">
+                        <option value="quick">快速：garden / truck / drjohnson（约 3–6 分钟）</option>
+                        <option value="full">完整：全部 13 个场景（约 15–25 分钟）</option>
+                        <option value="mip360">仅 Mip-NeRF 360（9 场景）</option>
+                        <option value="tnt">仅 Tanks and Temples（2 场景）</option>
+                        <option value="db">仅 Deep Blending（2 场景）</option>
+                    </select>
+                </label>
+                <label>轮数 <input type="number" id="inp-rounds" min="1" max="9" value="3" style="width:64px" /></label>
+                <label>冷启动刷新
+                    <select id="sel-cold">
+                        <option value="1">是（更接近真实首开，推荐）</option>
+                        <option value="0">否（更快）</option>
+                    </select>
+                </label>
+                <button id="btn-start">开始测试</button>
+                <button id="btn-export" class="ghost" disabled>导出记录</button>
+            </div>
+            <div class="row hidden" id="view-controls">
+                <label>场景
+                    <select id="sel-view-scene"></select>
+                </label>
+                <button id="btn-load-view" class="ghost">加载 / 重新加载</button>
+                <label><input type="checkbox" id="ck-overlay" checked /> 帧率叠加</label>
+                <label><input type="checkbox" id="ck-info" checked /> 显示信息</label>
+                <button id="btn-reset-view" class="ghost">重置视角</button>
+            </div>
+            <div class="row hidden" id="bench-progress">
+                <span>测试进行中，请保持屏幕常亮、不要切换页面。页面会自动刷新若干次，属正常现象。</span>
+                <div class="bar" style="flex:1"><div id="bar-fill"></div></div>
+            </div>
+        </section>
+
+        <section id="view-area">
+            <canvas id="view"></canvas>
+            <div id="fps-overlay" class="hidden"></div>
+            <div id="info-overlay" class="hidden"></div>
+            <div id="status-big" class="hidden"></div>
+        </section>
+
+        <div id="welcome">选择上方测试范围并点击“开始测试”。测试过程中无需任何操作，完成后结果会自动显示，可一键复制发送。</div>
+    </main>
+
+    <div id="result-card">
+        <div class="box">
+            <h2>测试完成</h2>
+            <p id="rc-summary" style="font-size:13px;color:var(--muted);margin-bottom:8px"></p>
+            <textarea id="rc-text" readonly spellcheck="false"></textarea>
+            <div class="actions">
+                <button id="btn-copy">复制结果</button>
+                <button id="btn-done" class="ghost">返回测试页</button>
+            </div>
+            <div class="note">提示：复制后粘贴发给测试发起人即可。若“复制”按钮无效，请长按文本框手动全选复制。</div>
+        </div>
+    </div>
+
+    <script type="module" src="./bench.ts"></script>
+</body>
+</html>
+

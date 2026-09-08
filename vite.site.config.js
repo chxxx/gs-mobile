@@ -26,6 +26,8 @@ export default defineConfig(() => ({
                 // 场景数据在构建时静态复制，保持与根目录同源（场景 .ply 不入 site-dist 的版本管理）
                 { src: "scenes", dest: "." },
                 { src: "scenes.json", dest: "." },
+                // 测试页专用场景清单（bench.html 读取，与演示页 scenes.json 相互独立）
+                { src: "bench-scenes.json", dest: "." },
             ],
         }),
     ],
@@ -36,7 +38,10 @@ export default defineConfig(() => ({
         sourcemap: false,
         chunkSizeWarningLimit: 6000,
         rollupOptions: {
-            input: resolve(dirname, "index.html"),
+            input: {
+                index: resolve(dirname, "index.html"),
+                bench: resolve(dirname, "bench.html"),
+            },
         },
     },
 }));
