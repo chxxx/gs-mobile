@@ -74,15 +74,25 @@ function showFatalGpuError(reason: string): void {
     statusBig.textContent = "WebGL2 不可用";
     statusBig.classList.remove("hidden");
     resultCard.style.display = "flex";
-    rcSummary.textContent = "请在浏览器中开启硬件加速，或改用 Chrome/Edge（微信里可点右上角“在浏览器打开”）。";
+    rcSummary.textContent =
+        "请在浏览器中开启硬件加速，或改用 Chrome/Edge（微信里可点右上角“在浏览器打开”）。也可以点下方“重试”再试一次。";
     rcText.value =
         [
             "== bench 环境自检失败 ==",
             "webgl2=0",
             `reason=${reason}`,
+            `ctx_retry=${ctxTryCount()}`,
             `ua=${navigator.userAgent}`,
             `screen=${window.screen.width}x${window.screen.height} dpr=${window.devicePixelRatio}`,
         ].join("\n") + "\n";
+    // 手动兜底：走到这里说明"页内重试 + 3 次换页重试"都没成功，给一个可点的重试入口
+    try {
+        btnStart.textContent = "重试（重新加载页面）";
+        btnStart.disabled = false;
+        btnStart.addEventListener("click", () => hardNavigate());
+    } catch {
+        /* ignore */
+    }
 }
 
 /**
@@ -91,7 +101,7 @@ function showFatalGpuError(reason: string): void {
  * 因此做有限次退避重试；全部失败才给出自检信息并中止。
  * 注意：这里**不再**额外创建"探测用"上下文——探测本身也占一个上下文名额，反而会加剧该问题。
  */
-// ------------------------------------------------------------------ 上下文存活监测
+// ------------------------------------------------------------------ 上下文/重试基建
 /** 本页建渲染器时的重试次数（>0 说明该设备在第 N 轮出现过 GPU 上下文不可用）。 */
 let gpuRetries = 0;
 let ctxLostCount = 0;
@@ -102,24 +112,32 @@ async function createRenderer(maxTries = 5): Promise<SPLAT.WebGLRenderer> {
     for (let attempt = 1; attempt <= maxTries; attempt++) {
         try {
             gpuRetries = attempt - 1;
-            return new SPLAT.WebGLRenderer(canvas);
+            const created = new SPLAT.WebGLRenderer(canvas);
+            setCtxTryCount(0); // 建成功即清零「换页重试」计数
+            return created;
         } catch (err) {
             last = err instanceof Error ? err.message : String(err);
         }
         if (attempt < maxTries) {
             statusBig.textContent = `WebGL2 暂时不可用，等待 GPU 恢复（${attempt}/${maxTries - 1}）…`;
             statusBig.classList.remove("hidden");
-            await new Promise((resolve) => setTimeout(resolve, 800 * attempt));
+            await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
         }
+    }
+    // 同页内重试仍失败：换一次导航再试（新文档才有机会拿到刚被释放的上下文名额）
+    if (ctxTryCount() < 3) {
+        setCtxTryCount(ctxTryCount() + 1);
+        statusBig.textContent = `GPU 上下文暂不可用，正在重新加载页面重试（第 ${ctxTryCount()}/3 次）…`;
+        statusBig.classList.remove("hidden");
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        hardNavigate();
+        throw new Error("页面即将重新加载以重试 WebGL2 上下文");
     }
     const probe = probeWebGL2(); // 仅用于生成自检文本（此时已确认建不出渲染器）
     const reason = probe.reason || last;
     showFatalGpuError(reason);
     throw new Error(`WebGL2 不可用：${reason}`);
 }
-
-const renderer = await createRenderer();
-statusBig.classList.add("hidden");
 
 // ------------------------------------------------------------------ 上下文存活监测
 canvas.addEventListener("webglcontextlost", (e) => {
@@ -135,7 +153,8 @@ function contextLostDuring(t0: number): boolean {
     return ctxLostAt >= t0;
 }
 
-/** 主动释放本页 GL 资源并丢弃上下文：每轮冷启动都是整页刷新，上一页若仍持有上下文会与下一页争抢 GPU 内存。 */
+/** 主动释放本页 GL 资源并丢弃上下文：每轮冷启动都是整页刷新，上一页若仍持有上下文会与下一页争抢 GPU 内存。
+ *  除 dispose + WEBGL_lose_context 外，还把 canvas 尺寸归零并摘除——让浏览器立刻回收后备存储，而不是等 GC。 */
 function releaseGpu(): void {
     try {
         renderer.dispose();
@@ -147,11 +166,58 @@ function releaseGpu(): void {
     } catch {
         /* ignore */
     }
+    try {
+        renderer.gl?.finish();
+    } catch {
+        /* ignore */
+    }
+    try {
+        canvas.width = 0;
+        canvas.height = 0;
+        canvas.remove();
+    } catch {
+        /* ignore */
+    }
 }
+
+/** 换一个全新 URL 重新加载本页：`replace` 不留历史记录，`rt=` 保证不复用缓存/bfcache。 */
+function hardNavigate(): void {
+    try {
+        const url = new URL(location.href);
+        url.searchParams.set("rt", String(Date.now()));
+        location.replace(url.href);
+    } catch {
+        location.reload();
+    }
+}
+
+// 「换页重试」计数：同页内重试仍建不出上下文时，换一次导航再试（新文档才有机会拿到被释放的名额）
+const CTX_TRY_KEY = "gsm-bench-ctxtry";
+function ctxTryCount(): number {
+    try {
+        return parseInt(sessionStorage.getItem(CTX_TRY_KEY) || "0", 10) || 0;
+    } catch {
+        return 0;
+    }
+}
+function setCtxTryCount(n: number): void {
+    try {
+        sessionStorage.setItem(CTX_TRY_KEY, String(n));
+    } catch {
+        /* ignore */
+    }
+}
+
 // 页面真正卸载（非进入 bfcache）时释放上下文；进入 bfcache 不释放，避免返回时页面已死
 window.addEventListener("pagehide", (e) => {
     if (!e.persisted) releaseGpu();
 });
+// 注册 unload 会让 Chrome/Firefox 放弃把本页放进 bfcache —— 这正是冷启动链路要的：
+// 每轮都必须是"上一页彻底销毁 → 下一页新建上下文"，否则旧页会一直占着 GPU 上下文与显存
+window.addEventListener("unload", () => releaseGpu());
+
+const renderer = await createRenderer();
+statusBig.classList.add("hidden");
 const scene = new SPLAT.Scene();
 const camera = new SPLAT.Camera();
 let controls: SPLAT.OrbitControls | null = null;
@@ -958,6 +1024,7 @@ function buildResultText(st: BenchState): string {
     lines.push(`vendor=${env.vendor}`);
     lines.push(`webgl2_retry=${gpuRetries}`);
     lines.push(`ctx_lost=${ctxLostCount}`);
+    lines.push(`ctx_retry=${ctxTryCount()}`);
     lines.push(`mode=bench`);
     lines.push(`profile=${st.sceneIds.join(",")}`);
     lines.push(`rounds=${st.rounds}`);
@@ -1074,10 +1141,11 @@ async function runBench(st: BenchState): Promise<void> {
     if (st.cold) {
         // 整页冷启动：新页面重建 WebGL 上下文与 shader，更接近真实首开
         await new Promise((resolve) => setTimeout(resolve, 600));
-        // 先主动释放本页的 GL 资源与上下文再刷新：否则上一页仍占着上下文名额/显存，
-        // 手机端连续冷启动时会表现为"第 3 轮整页刷新后拿不到 WebGL2 上下文"
+        // 先主动释放本页的 GL 资源与上下文，再等一小会儿让浏览器/GPU 进程真正回收，
+        // 最后用新 URL 重新导航：手机端连续冷启动最常见的失败就是"上一页还占着上下文名额/显存"
         releaseGpu();
-        location.reload();
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        hardNavigate();
         return;
     }
     await new Promise((resolve) => setTimeout(resolve, 150));

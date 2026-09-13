@@ -42,6 +42,9 @@ export default defineConfig(() => ({
                 { src: "bench-cameras.json", dest: "." },
                 { src: "bench-flux-camera.json", dest: "." },
                 { src: "bench-resolutions.json", dest: "." },
+                // 机位注入表（`pose=ours` / `pose=aligned` 用）；本地没生成时自动跳过
+                ...optionalAsset("bench-camviews.json", "."),
+                ...optionalAsset("bench-camviews-flux.json", "."),
                 // ---- 第7章对比方法实测所需的"同源资产"（互联网实测必须同源，不能跨域直链）----
                 // Flux-GS：渲染器页面 + 压缩模型 + tmc3 解码器（约 50MB，已入库）
                 { src: "flux-gs-project-gh-pages", dest: "." },
