@@ -547,6 +547,13 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
         base.err = err instanceof Error ? err.message : String(err);
         return base;
     } finally {
+        // 先让 iframe 卸载页面以释放它的 WebGL 上下文，再移除节点：
+        // 手机端 13 个场景连续新建 iframe 会累积上下文名额/显存，导致后面的场景拿不到上下文
+        try {
+            iframe.src = "about:blank";
+        } catch {
+            /* ignore */
+        }
         iframe.remove();
     }
 }

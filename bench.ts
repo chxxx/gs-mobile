@@ -85,18 +85,72 @@ function showFatalGpuError(reason: string): void {
         ].join("\n") + "\n";
 }
 
-const gpuProbe = probeWebGL2();
-if (!gpuProbe.ok) {
-    showFatalGpuError(gpuProbe.reason);
-    // 终止本模块后续初始化：否则 new SPLAT.WebGLRenderer 会在 gl=null 上继续创建 program 并抛出难读的错误
-    throw new Error(`WebGL2 不可用：${gpuProbe.reason}`);
+/**
+ * 建渲染器：手机端在高负载/连续冷启动后，GPU 进程可能被系统回收，`getContext('webgl2')` 会短暂返回 null
+ * （典型现象：同一台机器前两轮正常，第 3 轮整页刷新后拿不到上下文）。
+ * 因此做有限次退避重试；全部失败才给出自检信息并中止。
+ * 注意：这里**不再**额外创建"探测用"上下文——探测本身也占一个上下文名额，反而会加剧该问题。
+ */
+// ------------------------------------------------------------------ 上下文存活监测
+/** 本页建渲染器时的重试次数（>0 说明该设备在第 N 轮出现过 GPU 上下文不可用）。 */
+let gpuRetries = 0;
+let ctxLostCount = 0;
+let ctxLostAt = 0;
+
+async function createRenderer(maxTries = 5): Promise<SPLAT.WebGLRenderer> {
+    let last = "";
+    for (let attempt = 1; attempt <= maxTries; attempt++) {
+        try {
+            gpuRetries = attempt - 1;
+            return new SPLAT.WebGLRenderer(canvas);
+        } catch (err) {
+            last = err instanceof Error ? err.message : String(err);
+        }
+        if (attempt < maxTries) {
+            statusBig.textContent = `WebGL2 暂时不可用，等待 GPU 恢复（${attempt}/${maxTries - 1}）…`;
+            statusBig.classList.remove("hidden");
+            await new Promise((resolve) => setTimeout(resolve, 800 * attempt));
+        }
+    }
+    const probe = probeWebGL2(); // 仅用于生成自检文本（此时已确认建不出渲染器）
+    const reason = probe.reason || last;
+    showFatalGpuError(reason);
+    throw new Error(`WebGL2 不可用：${reason}`);
 }
 
-const renderer = new SPLAT.WebGLRenderer(canvas);
-// 手机端切后台/内存不足会导致上下文丢失：给出提示而不是静默白屏
+const renderer = await createRenderer();
+statusBig.classList.add("hidden");
+
+// ------------------------------------------------------------------ 上下文存活监测
 canvas.addEventListener("webglcontextlost", (e) => {
     e.preventDefault();
-    flashStatusBig("WebGL 上下文丢失（切后台或内存不足常见），请刷新页面重测");
+    ctxLostCount++;
+    ctxLostAt = performance.now();
+    flashStatusBig("WebGL 上下文丢失（GPU 内存不足或切后台），本轮作废，请刷新页面重测");
+});
+/** 本轮测帧期间（或此刻）上下文是否已丢失——丢失后 GL 调用被忽略，setTimeout 计时会得到虚高 FPS。 */
+function contextLostDuring(t0: number): boolean {
+    const gl = renderer.gl as WebGL2RenderingContext | undefined;
+    if (gl && gl.isContextLost()) return true;
+    return ctxLostAt >= t0;
+}
+
+/** 主动释放本页 GL 资源并丢弃上下文：每轮冷启动都是整页刷新，上一页若仍持有上下文会与下一页争抢 GPU 内存。 */
+function releaseGpu(): void {
+    try {
+        renderer.dispose();
+    } catch {
+        /* ignore */
+    }
+    try {
+        (renderer.gl as WebGL2RenderingContext | undefined)?.getExtension("WEBGL_lose_context")?.loseContext();
+    } catch {
+        /* ignore */
+    }
+}
+// 页面真正卸载（非进入 bfcache）时释放上下文；进入 bfcache 不释放，避免返回时页面已死
+window.addEventListener("pagehide", (e) => {
+    if (!e.persisted) releaseGpu();
 });
 const scene = new SPLAT.Scene();
 const camera = new SPLAT.Camera();
@@ -580,6 +634,11 @@ async function runThroughputFrames(frames: number, warmup = 10): Promise<{ fps: 
         const step = (): void => {
             frameRender();
             rendered++;
+            if ((renderer.gl as WebGL2RenderingContext).isContextLost()) {
+                // 上下文丢失后 GL 调用被忽略，继续计时会得到虚高 FPS：立即结束，由调用方判定本轮作废
+                resolve();
+                return;
+            }
             if (rendered >= frames) {
                 resolve();
                 return;
@@ -868,6 +927,12 @@ async function measureRound(meta: SceneMeta, round: number, st: BenchState): Pro
         base.resFallback = res.fallback;
         base.view = currentViewMatrix().join(",");
         const perf = await runThroughputFrames(st.benchFrames, st.warmup ?? 10);
+        if (contextLostDuring(tStart)) {
+            // 上下文丢失后 GL 调用被忽略，而 setTimeout 计时仍在走 → 会得到虚高 FPS，必须作废本轮
+            throw new Error(
+                `WebGL 上下文在测帧中丢失（累计 ${ctxLostCount} 次；常见于 GPU 内存不足或切后台）——本轮 FPS 不可用`,
+            );
+        }
         base.fps = perf.fps;
         base.cpuMs = perf.cpuMs;
         const probe = probeFrameCoverage();
@@ -891,6 +956,8 @@ function buildResultText(st: BenchState): string {
     lines.push(`u=${st.u}`);
     lines.push(`chip=${env.chip}`);
     lines.push(`vendor=${env.vendor}`);
+    lines.push(`webgl2_retry=${gpuRetries}`);
+    lines.push(`ctx_lost=${ctxLostCount}`);
     lines.push(`mode=bench`);
     lines.push(`profile=${st.sceneIds.join(",")}`);
     lines.push(`rounds=${st.rounds}`);
@@ -1007,6 +1074,9 @@ async function runBench(st: BenchState): Promise<void> {
     if (st.cold) {
         // 整页冷启动：新页面重建 WebGL 上下文与 shader，更接近真实首开
         await new Promise((resolve) => setTimeout(resolve, 600));
+        // 先主动释放本页的 GL 资源与上下文再刷新：否则上一页仍占着上下文名额/显存，
+        // 手机端连续冷启动时会表现为"第 3 轮整页刷新后拿不到 WebGL2 上下文"
+        releaseGpu();
         location.reload();
         return;
     }
