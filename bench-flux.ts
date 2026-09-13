@@ -188,17 +188,46 @@ function expandProfile(profile: string): string[] {
 }
 
 // ------------------------------------------------------------------ device info
-function glRendererName(): string {
+/** WebGL2 能力探测：手机端拿不到上下文时（内核不支持/硬件加速被关闭）给出可操作提示与可回传信息。 */
+interface GpuProbe {
+    ok: boolean;
+    reason: string;
+    renderer: string;
+}
+
+function probeWebGL2(): GpuProbe {
     try {
         const c = document.createElement("canvas");
         const gl = c.getContext("webgl2") as WebGL2RenderingContext | null;
-        if (!gl) return "";
+        if (!gl) return { ok: false, reason: "canvas.getContext('webgl2') 返回 null", renderer: "" };
         const dbg = gl.getExtension("WEBGL_debug_renderer_info");
         const name = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
-        return String(name || "");
-    } catch {
-        return "";
+        gl.getExtension("WEBGL_lose_context")?.loseContext(); // 立即释放探测用上下文
+        return { ok: true, reason: "", renderer: String(name || "") };
+    } catch (err) {
+        return { ok: false, reason: err instanceof Error ? err.message : String(err), renderer: "" };
     }
+}
+
+function glRendererName(): string {
+    return probeWebGL2().renderer;
+}
+
+/** WebGL2 不可用时的收尾：显示自检信息（可长按复制回传），并停止测试流程。 */
+function showFatalGpuError(reason: string): void {
+    stDevice.textContent = "WebGL2 不可用";
+    statusBig.textContent = "WebGL2 不可用";
+    statusBig.classList.remove("hidden");
+    resultCard.style.display = "flex";
+    rcSummary.textContent = "请在浏览器中开启硬件加速，或改用 Chrome/Edge（微信里可点右上角“在浏览器打开”）。";
+    rcText.value =
+        [
+            "== bench-flux 环境自检失败 ==",
+            "webgl2=0",
+            `reason=${reason}`,
+            `ua=${navigator.userAgent}`,
+            `screen=${window.screen.width}x${window.screen.height} dpr=${window.devicePixelRatio}`,
+        ].join("\n") + "\n";
 }
 function guessChip(): string {
     const g = glRendererName();
@@ -764,6 +793,12 @@ function applyParamToControls(): void {
 }
 
 async function main(): Promise<void> {
+    const gpu = probeWebGL2();
+    if (!gpu.ok) {
+        // 手机端常见：内核不支持 WebGL2 / 硬件加速关闭 → 若继续跑，13 个场景只会逐个在结果里写 err=
+        showFatalGpuError(gpu.reason);
+        return;
+    }
     stDevice.textContent = "读取场景清单…";
     try {
         await loadManifest();

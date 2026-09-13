@@ -38,7 +38,17 @@ export class WebGLRenderer {
         canvas.style.background = this._backgroundColor.toHexString();
         this._canvas = canvas;
 
-        this._gl = canvas.getContext("webgl2", { antialias: false }) as WebGL2RenderingContext;
+        // 取不到上下文时若继续，会在 gl.createProgram() 处抛
+        // "Cannot read properties of null (reading 'createProgram')"，对手机端（内核不支持 WebGL2
+        // 或硬件加速被关闭）极难排查；这里直接给出可操作的错误信息。
+        const gl = canvas.getContext("webgl2", { antialias: false }) as WebGL2RenderingContext | null;
+        if (!gl) {
+            throw new Error(
+                "WebGL2 不可用：canvas.getContext('webgl2') 返回 null。" +
+                    "请在浏览器设置中开启硬件加速，或改用支持 WebGL2 的浏览器/内核（Chrome、Edge、微信 XWEB）。",
+            );
+        }
+        this._gl = gl;
 
         const renderPasses = optionalRenderPasses || [];
         if (!optionalRenderPasses) {

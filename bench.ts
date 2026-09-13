@@ -44,7 +44,60 @@ const inpWarmup = $<HTMLInputElement>("inp-warmup");
 const ckOverlay = $<HTMLInputElement>("ck-overlay");
 const ckInfo = $<HTMLInputElement>("ck-info");
 
+// ------------------------------------------------------------------ WebGL2 能力自检
+// 手机端已知失败模式：内核不支持 WebGL2 / 硬件加速被关闭 / 在微信等内嵌浏览器里 WebGL 被禁用。
+// 这类设备此前会白屏，且控制台只抛 "Cannot read properties of null (reading 'createProgram')"，
+// 无法判断是设备问题还是部署问题；现在提前探测并给出一段可复制回传的自检信息。
+interface GpuProbe {
+    ok: boolean;
+    reason: string;
+    renderer: string;
+}
+
+function probeWebGL2(): GpuProbe {
+    try {
+        const probe = document.createElement("canvas");
+        const gl = probe.getContext("webgl2") as WebGL2RenderingContext | null;
+        if (!gl) return { ok: false, reason: "canvas.getContext('webgl2') 返回 null", renderer: "" };
+        const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+        const name = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+        gl.getExtension("WEBGL_lose_context")?.loseContext(); // 立即释放探测用上下文
+        return { ok: true, reason: "", renderer: String(name || "") };
+    } catch (err) {
+        return { ok: false, reason: err instanceof Error ? err.message : String(err), renderer: "" };
+    }
+}
+
+/** WebGL2 不可用时的收尾：把自检文本放进结果卡（可长按复制回传），不再继续初始化渲染器。 */
+function showFatalGpuError(reason: string): void {
+    welcome.textContent = "此设备/内核创建不出 WebGL2 上下文，无法运行测帧。自检信息见下方弹窗，可长按复制发回。";
+    statusBig.textContent = "WebGL2 不可用";
+    statusBig.classList.remove("hidden");
+    resultCard.style.display = "flex";
+    rcSummary.textContent = "请在浏览器中开启硬件加速，或改用 Chrome/Edge（微信里可点右上角“在浏览器打开”）。";
+    rcText.value =
+        [
+            "== bench 环境自检失败 ==",
+            "webgl2=0",
+            `reason=${reason}`,
+            `ua=${navigator.userAgent}`,
+            `screen=${window.screen.width}x${window.screen.height} dpr=${window.devicePixelRatio}`,
+        ].join("\n") + "\n";
+}
+
+const gpuProbe = probeWebGL2();
+if (!gpuProbe.ok) {
+    showFatalGpuError(gpuProbe.reason);
+    // 终止本模块后续初始化：否则 new SPLAT.WebGLRenderer 会在 gl=null 上继续创建 program 并抛出难读的错误
+    throw new Error(`WebGL2 不可用：${gpuProbe.reason}`);
+}
+
 const renderer = new SPLAT.WebGLRenderer(canvas);
+// 手机端切后台/内存不足会导致上下文丢失：给出提示而不是静默白屏
+canvas.addEventListener("webglcontextlost", (e) => {
+    e.preventDefault();
+    flashStatusBig("WebGL 上下文丢失（切后台或内存不足常见），请刷新页面重测");
+});
 const scene = new SPLAT.Scene();
 const camera = new SPLAT.Camera();
 let controls: SPLAT.OrbitControls | null = null;
