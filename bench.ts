@@ -385,9 +385,7 @@ function applyFluxCamera(level: string): boolean {
         const Mi = inv3(M);
         if (Mi) {
             const vt = [B[12], B[13], B[14]];
-            const t = [0, 1, 2].map(
-                (r) => -(Mi[3 * r] * vt[0] + Mi[3 * r + 1] * vt[1] + Mi[3 * r + 2] * vt[2]),
-            );
+            const t = [0, 1, 2].map((r) => -(Mi[3 * r] * vt[0] + Mi[3 * r + 1] * vt[1] + Mi[3 * r + 2] * vt[2]));
             camera.position = new SPLAT.Vector3(t[0], t[1], t[2]);
             const q = quatFromMatrix(R);
             camera.rotation = new SPLAT.Quaternion(q[0], q[1], q[2], q[3]);
@@ -1126,8 +1124,7 @@ function buildStateFromParams(): BenchState {
     const parts = resRaw.split("x");
     const resW = parseInt(parts[0], 10) || 1600;
     const resH = parseInt(parts[1], 10) || 1063;
-    const resMode: "fixed" | "table" | "auto" =
-        resRaw === "table" ? "table" : resRaw === "auto" ? "auto" : "fixed";
+    const resMode: "fixed" | "table" | "auto" = resRaw === "table" ? "table" : resRaw === "auto" ? "auto" : "fixed";
     const benchFrames = parseInt(param("frames", inpFrames?.value || "300"), 10) || 300;
     const warmup = Math.max(0, parseInt(param("warmup", param("proto", "") === "flux" ? "0" : "10"), 10) || 0);
     const profile = param("profile", selProfile.value);

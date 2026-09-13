@@ -121,7 +121,6 @@ interface BenchState {
 const STATE_KEY = "gsm-fluxbench-v1";
 const ARCHIVE_KEY = "gsm-fluxbench-archive-v1";
 
-
 // ------------------------------------------------------------------ small utils
 function param(name: string, dflt = ""): string {
     try {
@@ -239,7 +238,6 @@ function layoutStage(): void {
     frameHost.style.transform = `scale(${s.toFixed(4)})`;
 }
 
-
 // ------------------------------------------------------------------ session state
 type FluxWindow = Window & {
     __FLUXGS_STATS__?: FluxStats;
@@ -321,7 +319,6 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
         ),
     ]);
 }
-
 
 // ------------------------------------------------------------------ iframe bridge
 function waitIframeLoad(iframe: HTMLIFrameElement, timeoutMs = 30000): Promise<void> {
