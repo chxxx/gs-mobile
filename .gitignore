@@ -141,3 +141,9 @@ vite.site.config.js.timestamp-*.mjs
 public/*.ply
 public/*.splat
 site-dist
+
+# 第7章对比方法实测：生成物 / 大体积第三方资产（不入库，见 BENCH_ASSETS.md）
+bench-camviews.json
+bench-camviews-flux.json
+bench-flux-camera-aligned.json
+reduced-3dgs/*.ply

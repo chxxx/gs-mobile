@@ -995,6 +995,13 @@ function contractToUnisphere(x, y, z) {
             xyz_float[i * 3 + 1] = xyz_raw_float[old_idx * 3 + 1];
             xyz_float[i * 3 + 2] = xyz_raw_float[old_idx * 3 + 2];
         }
+        // [BENCH INSTRUMENTATION] 导出解码后的世界坐标（xyz_float 就是它渲染用的真实坐标），
+        // 供"跨实现坐标系对齐"使用：把这些点与本文模型对比即可求出两者的 4x4 变换。
+        try {
+            self.postMessage({ xyz_dump: xyz_float.slice().buffer });
+        } catch (e) {
+            /* 忽略 */
+        }
         console.time("VQ Decode");
         const scale = decodeVQAttributesConcat(save_dict['scale_index'], save_dict['scale_htable'], save_dict['scale_code']);
         const rotation = decodeVQAttributesConcat(save_dict['rotation_index'], save_dict['rotation_htable'], save_dict['rotation_code']);
@@ -1468,6 +1475,48 @@ async function main() {
         }, 200);
     };
 
+    // ------------------------------------------------------------------
+    // [BENCH INSTRUMENTATION] 第7章对比方法测帧钩子（仅测量用，默认渲染路径不变）
+    //   - ?benchres=1600x1063 时把离屏画布强制为该尺寸，使本仓库 bench.html 与本页可比；
+    //   - window.__FLUXGS_STATS__ 记录 fetch 结束/解码/纹理上传/首帧时刻（iframe 内时间轴）；
+    //   - window.runFluxBenchmark(count) 返回 Promise<{fps,frames,ms,resW,resH}>。
+    //   未带参数时只创建一个空 stats 对象，resize 与渲染行为与原始版本完全一致。
+    //   注意：stats 必须在 fetch 之前创建（fetchStartAt 依赖它）。
+    // ------------------------------------------------------------------
+    const __fluxBenchRes = (() => {
+        const m = /[?&]benchres=(\d+)x(\d+)/.exec(location.search);
+        return m ? { w: parseInt(m[1], 10), h: parseInt(m[2], 10) } : null;
+    })();
+    window.__FLUXGS_STATS__ = {
+        enabled: !!__fluxBenchRes,
+        t0: performance.now(),
+        fetchStartAt: 0,
+        fetchEndAt: 0,
+        decodeDoneAt: 0,
+        texUploadDoneAt: 0,
+        firstFrameAt: 0,
+        resW: 0,
+        resH: 0,
+    };
+    let __fluxBenchResolve = null;
+    let __fluxBenchCoveredPct = 0;
+    // [BENCH INSTRUMENTATION] ?fluxcam=N：用 Flux-GS 原代码里的第 N 个真实镜头（等价于按数字键 N），
+    // 并关掉轮播，使三方机位完全确定、可复现。不传则保持原行为。
+    const __fluxCamIdx = (() => {
+        const m = /[?&]fluxcam=(\d+)/.exec(location.search);
+        return m ? parseInt(m[1], 10) : -1;
+    })();
+    if (__fluxCamIdx >= 0 && cameras[__fluxCamIdx]) {
+        camera = cameras[__fluxCamIdx];
+        carousel = false;
+        viewMatrix = getViewMatrix(camera);
+    }
+    if (__fluxBenchRes) {
+        // 测帧会话必须用**静止且确定**的机位：默认关掉轮播（carousel），
+        // 否则 viewMatrix 每帧按 sin(Date.now()) 动画，每轮测到的姿态都不同，FPS 无法比较。
+        carousel = false;
+    }
+
     showProgress(0);
     const params = new URLSearchParams(location.search);
     try {
@@ -1486,6 +1535,7 @@ async function main() {
         // location.href,
     );
 
+    window.__FLUXGS_STATS__.fetchStartAt = performance.now();
     const req = await fetch(url, {
         mode: "cors",
         credentials: "omit",
@@ -1606,20 +1656,35 @@ async function main() {
     gl.vertexAttribDivisor(a_index, 1);
 
     const resize = () => {
+        // [BENCH INSTRUMENTATION] benchres 模式下，投影矩阵与 viewport uniform 都用固定分辨率：
+        // iframe 的 innerWidth/innerHeight 可能因滚动条等因素与画布尺寸不一致，
+        // 会使两边视场角差约 1%（1600 宽下≈16px），表现为"视角有轻微偏移"。
+        const projW = __fluxBenchRes ? __fluxBenchRes.w : innerWidth;
+        const projH = __fluxBenchRes ? __fluxBenchRes.h : innerHeight;
+
         gl.uniform2fv(u_focal, new Float32Array([camera.fx, camera.fy]));
 
         projectionMatrix = getProjectionMatrix(
             camera.fx,
             camera.fy,
-            innerWidth,
-            innerHeight,
+            projW,
+            projH,
         );
 
-        gl.uniform2fv(u_viewport, new Float32Array([innerWidth, innerHeight]));
+        gl.uniform2fv(u_viewport, new Float32Array([projW, projH]));
 
         gl.canvas.width = Math.round(innerWidth / downsample);
         gl.canvas.height = Math.round(innerHeight / downsample);
+        if (__fluxBenchRes) {
+            // [BENCH INSTRUMENTATION] 固定离屏分辨率（只影响带 ?benchres= 的测帧会话）
+            gl.canvas.width = __fluxBenchRes.w;
+            gl.canvas.height = __fluxBenchRes.h;
+        }
         gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+        if (window.__FLUXGS_STATS__) {
+            window.__FLUXGS_STATS__.resW = gl.canvas.width;
+            window.__FLUXGS_STATS__.resH = gl.canvas.height;
+        }
 
         gl.uniformMatrix4fv(u_projection, false, projectionMatrix);
     };
@@ -1677,6 +1742,10 @@ async function main() {
                 texdata,
             );
             console.log("Main texture updated successfully");
+            // [BENCH INSTRUMENTATION] 解码 + 主纹理上传完成
+            if (!window.__FLUXGS_STATS__.decodeDoneAt) {
+                window.__FLUXGS_STATS__.decodeDoneAt = performance.now();
+            }
         } else if (e.data.texdata_sh) {
             showProgress(99, progressText.prepare);
             const { texdata_sh, texwidth_sh, texheight_sh } = e.data;
@@ -1689,6 +1758,12 @@ async function main() {
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, texwidth_sh, texheight_sh, 0, gl.RGBA, gl.FLOAT, texdata_sh);
             console.log("SH texture updated successfully");
+            // [BENCH INSTRUMENTATION] SH 纹理上传完成
+            window.__FLUXGS_STATS__.texUploadDoneAt = performance.now();
+        } else if (e.data.xyz_dump) {
+            // [BENCH INSTRUMENTATION] 保存解码后的世界坐标，供导出与对齐
+            window.__FLUXGS_XYZ__ = new Float32Array(e.data.xyz_dump);
+            console.log("bench: dumped Flux world positions:", window.__FLUXGS_XYZ__.length / 3);
         } else if (e.data.depthIndex) {
             const { depthIndex, viewProj } = e.data;
             gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
@@ -2174,6 +2249,30 @@ async function main() {
             }
 
             gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, vertexCount);
+            // [BENCH INSTRUMENTATION] 首个真实绘制帧（纹理上传完成后）
+            if (!window.__FLUXGS_STATS__.firstFrameAt) {
+                window.__FLUXGS_STATS__.firstFrameAt = performance.now();
+            }
+            // [BENCH INSTRUMENTATION] 测帧首帧顺带统计画面覆盖率（用于跨方法可比性核对）
+            if (isBenchmarking && benchmarkFrameCount === 1 && __fluxBenchCoveredPct === 0) {
+                try {
+                    const pw = gl.canvas.width;
+                    const ph = gl.canvas.height;
+                    const px = new Uint8Array(pw * ph * 4);
+                    gl.readPixels(0, 0, pw, ph, gl.RGBA, gl.UNSIGNED_BYTE, px);
+                    let hit = 0;
+                    let total = 0;
+                    for (let y = 0; y < ph; y += 8) {
+                        for (let x = 0; x < pw; x += 8) {
+                            if (px[(y * pw + x) * 4 + 3] > 0) hit++;
+                            total++;
+                        }
+                    }
+                    __fluxBenchCoveredPct = total > 0 ? (hit / total) * 100 : 0;
+                } catch (e) {
+                    /* readPixels 不可用时忽略 */
+                }
+            }
 
             const drawError = gl.getError();
             if (drawError !== gl.NO_ERROR) {
@@ -2199,10 +2298,25 @@ async function main() {
                     const elapsed = (performance.now() - benchmarkStartTime) / 1000;
                     const fps = benchmarkFrameCount / elapsed;
                     console.log('Flux-GS Offscreen Benchmark: ' + fps.toFixed(2) + ' FPS (' + benchmarkFrameCount + ' frames in ' + elapsed.toFixed(3) + ' s), resolution: ' + gl.canvas.width + ' x ' + gl.canvas.height);
+                    // [BENCH INSTRUMENTATION] 把结果回传给驱动页面（bench-flux.html）
+                    if (typeof __fluxBenchResolve === 'function') {
+                        const __benchDone = __fluxBenchResolve;
+                        __fluxBenchResolve = null;
+                        __benchDone({
+                            fps: fps,
+                            frames: benchmarkFrameCount,
+                            ms: elapsed * 1000,
+                            resW: gl.canvas.width,
+                            resH: gl.canvas.height,
+                            coveredPct: __fluxBenchCoveredPct,
+                            view: viewMatrix.map((v) => Math.round(v * 1000) / 1000),
+                        });
+                    }
                     isBenchmarking = false;
                     benchmarkFrameCount = 0;
                     benchmarkStartTime = 0;
-                    carousel = true;
+                    // 测帧模式下保持静止机位（否则预热与正式计帧之间姿态会漂移）
+                    carousel = __fluxBenchRes ? false : true;
                     rafId = requestAnimationFrame(frame);
                 }
             } else {
@@ -2213,17 +2327,32 @@ async function main() {
         }
     };
 
-    window.runFluxBenchmark = (count = 300) => {
-        if (isBenchmarking) return;
-        console.log('Starting Flux-GS offscreen benchmark: ' + count + ' frames (waiting for model load)');
-        isBenchmarking = true;
-        benchmarkFrameTarget = count;
-        benchmarkFrameCount = 0;
-        benchmarkStartTime = 0;
+/** [BENCH INSTRUMENTATION] 把本文臂导出的视图矩阵注入进来，使 Flux-GS 在**完全相同的机位**下测帧。
+ *  view16 布局与 getViewMatrix() 一致（与本仓库 gsplat.js 的 CameraData.viewMatrix 同构）。 */
+    window.__FLUXGS_SET_CAM__ = (view16) => {
+        if (!Array.isArray(view16) || view16.length !== 16) return false;
+        viewMatrix = Array.from(view16);
         carousel = false;
-        if (rafId) cancelAnimationFrame(rafId);
-        setTimeout(() => frame(performance.now()), 0);
+        return true;
     };
+    window.__FLUXGS_DUMP_XYZ__ = () => window.__FLUXGS_XYZ__ || null;
+    window.runFluxBenchmark = (count = 300) =>
+        new Promise((resolve) => {
+            if (isBenchmarking) {
+                resolve(null);
+                return;
+            }
+            console.log('Starting Flux-GS offscreen benchmark: ' + count + ' frames (waiting for model load)');
+            isBenchmarking = true;
+            benchmarkFrameTarget = count;
+            benchmarkFrameCount = 0;
+            benchmarkStartTime = 0;
+            __fluxBenchResolve = resolve;
+            __fluxBenchCoveredPct = 0;
+            carousel = false;
+            if (rafId) cancelAnimationFrame(rafId);
+            setTimeout(() => frame(performance.now()), 0);
+        });
 
     frame();
 
@@ -2329,6 +2458,9 @@ async function main() {
         splatData.set(chunk, currentOffset);
         currentOffset += chunk.length;
     }
+
+    // [BENCH INSTRUMENTATION] 网络段结束（首帧口径从此处开始计时）
+    window.__FLUXGS_STATS__.fetchEndAt = performance.now();
 
     // Now post the completely assembled buffer
     if (isPly(splatData)) {

@@ -37,6 +37,16 @@ class Camera extends Object3D {
     get data() {
         return this._data;
     }
+
+    /** 直接注入视图矩阵（16 个数，行主序），用于精确复现外部渲染器的相机；注入后会被锁定。 */
+    setViewMatrix(matrix: number[]): void {
+        this._data.setViewMatrix(matrix);
+    }
+
+    /** 解除视图矩阵锁定，恢复由 position/rotation 驱动的相机。 */
+    unlockViewMatrix(): void {
+        this._data.unlockViewMatrix();
+    }
 }
 
 export { Camera };

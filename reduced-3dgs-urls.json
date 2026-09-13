@@ -1,0 +1,20 @@
+{
+    "version": 1,
+    "note": "reduced-3DGS 量化模型的下载地址表（供 tools/fetch_reduced3dgs_assets.py 使用）。{scene} 会被替换为场景名。2026-09 实测：官方已发布 bicycle/bonsai/counter/kitchen/truck 五个（返回 200 且字节数与本地一致），其余 8 个场景在该路径下 404（官方未发布），需要时请把你手上的链接按同样格式补进 overrides（scene 键名要与 baseline-scenes.json 的 scene 字段一致）。",
+    "default_pattern": "https://repo-sam.inria.fr/fungraph/reduced_3dgs/scenes/{scene}/quantized_{scene}.ply",
+    "overrides": {
+        "bicycle": "https://repo-sam.inria.fr/fungraph/reduced_3dgs/scenes/bicycle/quantized_bicycle.ply",
+        "bonsai": "https://repo-sam.inria.fr/fungraph/reduced_3dgs/scenes/bonsai/quantized_bonsai.ply",
+        "counter": "https://repo-sam.inria.fr/fungraph/reduced_3dgs/scenes/counter/quantized_counter.ply",
+        "kitchen": "https://repo-sam.inria.fr/fungraph/reduced_3dgs/scenes/kitchen/quantized_kitchen.ply",
+        "truck": "https://repo-sam.inria.fr/fungraph/reduced_3dgs/scenes/truck/quantized_truck.ply",
+        "train": "",
+        "room": "",
+        "garden": "",
+        "stump": "",
+        "treehill": "",
+        "flowers": "",
+        "drjohnson": "",
+        "playroom": ""
+    }
+}

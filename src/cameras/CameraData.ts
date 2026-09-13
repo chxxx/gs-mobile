@@ -15,9 +15,16 @@ class CameraData {
     private _projectionMatrix: Matrix4 = new Matrix4();
     private _viewMatrix: Matrix4 = new Matrix4();
     private _viewProj: Matrix4 = new Matrix4();
+    private _viewMatrixLocked: boolean = false;
 
     update: (position: Vector3, rotation: Quaternion) => void;
     setSize: (width: number, height: number) => void;
+    /** 直接注入 16 个数的视图矩阵（行主序，与 update() 产出的布局一致）。
+     *  用于"复现外部渲染器相机"这类场景，避免 position+quaternion 往返重建带来的误差。
+     *  注入后视图矩阵会被**锁定**：后续 update() 不再覆盖它，直到调用 unlockViewMatrix()。 */
+    setViewMatrix: (matrix: number[]) => void;
+    /** 解除视图矩阵锁定，恢复由 position/rotation 驱动的正常相机。 */
+    unlockViewMatrix: () => void;
 
     private _updateProjectionMatrix: () => void;
 
@@ -35,6 +42,11 @@ class CameraData {
         };
 
         this.update = (position: Vector3, rotation: Quaternion) => {
+            // 视图矩阵被显式注入并锁定时，忽略由 position/rotation 驱动的重建，
+            // 否则渲染器内部的 update() 调用会覆盖注入的相机（表现为"视角被转动"）。
+            if (this._viewMatrixLocked) {
+                return;
+            }
             const R = Matrix3.RotationFromQuaternion(rotation).buffer;
             const t = position.flat();
 
@@ -56,6 +68,23 @@ class CameraData {
             this._width = width;
             this._height = height;
             this._updateProjectionMatrix();
+        };
+
+        this.setViewMatrix = (matrix: number[]) => {
+            if (!Array.isArray(matrix) || matrix.length !== 16) {
+                return;
+            }
+            const m = new Matrix4();
+            for (let i = 0; i < 16; i++) {
+                m.buffer[i] = matrix[i];
+            }
+            this._viewMatrix = m;
+            this._viewMatrixLocked = true;
+            this._viewProj = this.projectionMatrix.multiply(this.viewMatrix);
+        };
+
+        this.unlockViewMatrix = () => {
+            this._viewMatrixLocked = false;
         };
     }
 

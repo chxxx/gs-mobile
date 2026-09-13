@@ -28,6 +28,20 @@ jobs:
             - name: Install dependencies
               run: npm ci
 
+            - name: Restore reduced-3DGS assets cache
+              # 量化 PLY 体积大且不入库；按链接表 hash 缓存，避免每次构建都重新下载 ~105MB
+              uses: actions/cache@v4
+              with:
+                  path: reduced-3dgs
+                  key: r3dgs-assets-${{ hashFiles('reduced-3dgs-urls.json') }}
+
+            - name: Fetch reduced-3DGS assets (optional, non-fatal)
+              # 仓库里不入库这些 .ply；构建前从官方地址拉到本地，site-dist 产物才会带上它们，
+              # 从而保证线上页面与模型同源（repo-sam.inria.fr 不返回 CORS 头，跨域 fetch 必被浏览器拦）。
+              # 拉取失败不阻塞部署：对应臂在站点上会标记为资产缺失，其余分组不受影响。
+              continue-on-error: true
+              run: python3 tools/fetch_reduced3dgs_assets.py
+
             - name: Build static site (site-dist/)
               # 仅做站点构建；WASM 预编译产物已入库（src/wasm），无需 Emscripten。
               run: npm run site:build
