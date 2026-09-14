@@ -1581,6 +1581,18 @@ async function main() {
         antialias: false,
     });
 
+    // [BENCH INSTRUMENTATION] 把 GPU renderer 名交给外层测帧页（bench-flux.html）显示设备：
+    // 外层若自己 `canvas.getContext("webgl2")` 探测，会白占一个"上下文名额"（手机端连续冷启动时
+    // 正是这类"建了不用 / 丢了不还"的上下文把名额耗尽），因此改由本页用自己的上下文上报，外层零新建。
+    try {
+        const dbgInfo = gl.getExtension("WEBGL_debug_renderer_info");
+        window.__FLUXGS_STATS__.glRenderer = String(
+            (dbgInfo ? gl.getParameter(dbgInfo.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)) || "",
+        );
+    } catch (err) {
+        console.warn("[BENCH] 读取 GPU renderer 名失败：", err);
+    }
+
     const vertexShader = gl.createShader(gl.VERTEX_SHADER);
     gl.shaderSource(vertexShader, vertexShaderSource);
     gl.compileShader(vertexShader);

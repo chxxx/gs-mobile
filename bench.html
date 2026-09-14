@@ -73,21 +73,9 @@
                         <option value="mip360">仅 Mip-NeRF 360（9 场景）</option>
                         <option value="tnt">仅 Tanks and Temples（2 场景）</option>
                         <option value="db">仅 Deep Blending（2 场景）</option>
-                        <option value="reduced3dgs">对比基线：reduced-3DGS 量化 PLY（本仓库已入库场景）</option>
                     </select>
                 </label>
                 <label>轮数 <input type="number" id="inp-rounds" min="1" max="9" value="3" style="width:64px" /></label>
-                <label>机位
-                    <select id="sel-cam">
-                        <option value="mid">中景 mid（默认，对比臂共用）</option>
-                        <option value="flux">Flux-GS 原相机（三方同角度，推荐）</option>
-                        <option value="near">近景 near（×0.6）</option>
-                        <option value="far">远景 far（×1.8）</option>
-                        <option value="auto">按包围盒自动取景</option>
-                    </select>
-                </label>
-                <label>测帧数 <input type="number" id="inp-frames" min="30" max="1000" value="300" style="width:72px" /></label>
-                <label>预热帧 <input type="number" id="inp-warmup" min="0" max="200" value="10" style="width:64px" title="参考协议（Flux-GS 原协议）为 0" /></label>
                 <label>冷启动刷新
                     <select id="sel-cold">
                         <option value="1">是（更接近真实首开，推荐）</option>

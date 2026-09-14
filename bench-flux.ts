@@ -8,16 +8,18 @@
  * 与 bench.html 对齐的测量口径（论文 7.2.2，参考协议 = Flux-GS 原协议）：
  *   1. 画布分辨率 = **渲染器原生策略**（点数 > 500000 → 1× CSS；否则 CSS × devicePixelRatio），
  *      即"分辨率随设备与场景变化"，与 Flux-GS 论文报告的测帧条件一致；用 `force=WxH` 可强制对照旧口径；
- *      本文臂可用 `res=table` 按 bench-resolutions.json 逐场景匹配同一像素负载；
  *   2. 帧率：调用渲染器自带的 window.runFluxBenchmark(frames)，其内部用 setTimeout(0) 链驱动完整帧，
  *      300 帧、**无预热**（与 Flux-GS 原实现一致）；warmup 参数可显式覆盖；
  *   3. 首帧：只计"模型文件获取完成之后"的解码、纹理上传与首个真实绘制帧，不含网络下载段；
  *   4. 冷启动：每轮新建 iframe、追加 ts= 令牌重取模型；整页冷启动刷新由 sessionStorage 续跑。
  *   5. 机位：测帧会话启动即冻结（carousel=false），并在结果里输出 pose= 指纹供核对。
+ *   6. 设备名：GPU 名由 iframe 内的 Flux 页面**用自己的上下文**上报（__FLUXGS_STATS__.glRenderer），
+ *      本页不建任何探测上下文——手机端"建了不用 / 丢了不还"的上下文会耗尽上下文名额。
  *
  * URL：bench-flux.html?profile=full|mip360|tnt|db|quick&rounds=3&cold=1&u=xxx&frames=300&warmup=0
  *      bench-flux.html?...&force=1600x1063   （强制分辨率，与旧口径对照）
  */
+import { guessChip as guessChipFrom } from "./bench-chip";
 
 // ------------------------------------------------------------------ DOM
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -64,6 +66,8 @@ interface FluxStats {
     firstFrameAt: number;
     resW: number;
     resH: number;
+    /** GPU renderer 名（由 render_shared/main.js 的埋点用自己的上下文写入，供本页显示设备）。 */
+    glRenderer?: string;
 }
 interface FluxBenchResult {
     fps: number;
@@ -202,15 +206,48 @@ function probeWebGL2(): GpuProbe {
         if (!gl) return { ok: false, reason: "canvas.getContext('webgl2') 返回 null", renderer: "" };
         const dbg = gl.getExtension("WEBGL_debug_renderer_info");
         const name = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
-        gl.getExtension("WEBGL_lose_context")?.loseContext(); // 立即释放探测用上下文
+        // 不要在这里调 WEBGL_lose_context().loseContext()：强制丢弃 + 放弃恢复会让上下文名额/显存
+        // 迟迟不归还（手机端连续冷启动到第 2~3 轮就建不出上下文），交给 GC 回收即可。
         return { ok: true, reason: "", renderer: String(name || "") };
     } catch (err) {
         return { ok: false, reason: err instanceof Error ? err.message : String(err), renderer: "" };
     }
 }
 
-function glRendererName(): string {
-    return probeWebGL2().renderer;
+/** 当前桥接 iframe；GPU 名从它内部的 __FLUXGS_STATS__.glRenderer 读取。 */
+let currentIframe: HTMLIFrameElement | null = null;
+/** 首次成功读到的 GPU renderer 名（缓存下来供结果文本与状态栏使用）。 */
+let cachedGlRenderer = "";
+
+/** 读取 GPU renderer 名：来源是 iframe 内 Flux 页面**自己的上下文**（main.js 埋点上报）。
+ *  本页**绝不新建探测上下文**——外层每建一个"建了不用 / 丢了不还"的上下文就白占一个名额，
+ *  手机端连续冷启动时正是这类上下文把名额耗尽（表现为第 2~3 轮建不出上下文）。
+ *  首个场景加载前返回空串（状态栏显示"待读取"，不谎报 unknown）。 */
+function glRendererName(cw: Window | null = null): string {
+    if (cachedGlRenderer) return cachedGlRenderer;
+    try {
+        const w = (cw ?? currentIframe?.contentWindow) as FluxWindow | null;
+        const name = String(w?.__FLUXGS_STATS__?.glRenderer || "");
+        if (name) cachedGlRenderer = name;
+        return cachedGlRenderer;
+    } catch {
+        return "";
+    }
+}
+
+/** 刷新状态栏的设备名；GPU 名还没上报时显示"待读取"，不显示 unknown。 */
+function refreshDeviceLabel(cw: Window | null = null): void {
+    const name = glRendererName(cw);
+    stDevice.textContent = name ? guessChip() : "GPU 名待读取…";
+}
+
+/** 首次失败时才做的 WebGL2 可用性自检：探测上下文**只在失败路径**创建，正常跑测帧时一个都不多建。 */
+let gpuChecked = false;
+function firstFailureGpuCheck(): void {
+    if (gpuChecked) return;
+    gpuChecked = true;
+    const probe = probeWebGL2();
+    if (!probe.ok) showFatalGpuError(probe.reason);
 }
 
 /** WebGL2 不可用时的收尾：显示自检信息（可长按复制回传），并停止测试流程。 */
@@ -230,22 +267,16 @@ function showFatalGpuError(reason: string): void {
         ].join("\n") + "\n";
 }
 function guessChip(): string {
-    const g = glRendererName();
-    if (/qualcomm|adreno/i.test(g)) {
-        const m = /Adreno[^0-9]*(\d+)/i.exec(g);
-        return m ? `Snapdragon (Adreno ${m[1]})` : "Qualcomm Adreno";
-    }
-    if (/immortalis|mali|mediatek/i.test(g)) {
-        const m = /Immortalis[^0-9]*(\d+)|Mali[^0-9]*G?(\d+)/i.exec(g);
-        return m ? `MediaTek/ARM (${m[1] || m[2]})` : "ARM Mali";
-    }
-    return g || "unknown";
+    // 映射表与 bench.html 共用（bench-chip.ts），保证两臂结果头的 `chip=` 写法一致。
+    return guessChipFrom(glRendererName()).chip;
 }
 function deviceInfo(): Record<string, string | number> {
+    const chip = guessChipFrom(glRendererName());
     return {
         ua: navigator.userAgent,
         gl_renderer: glRendererName(),
-        chip: guessChip(),
+        vendor: chip.vendor,
+        chip: chip.chip,
         screen: `${window.screen.width}x${window.screen.height}`,
         dpr: window.devicePixelRatio || 1,
         hardwareConcurrency: navigator.hardwareConcurrency || 0,
@@ -484,6 +515,7 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
     frameHost.dataset.w = String(hostW);
     frameHost.dataset.h = String(hostH);
     frameHost.appendChild(iframe);
+    currentIframe = iframe;
     layoutStage();
 
     try {
@@ -492,6 +524,7 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
         await loaded;
         const cw = iframe.contentWindow as FluxWindow | null;
         if (!cw) throw new Error("无法访问 iframe 内容窗口");
+        refreshDeviceLabel(cw); // iframe 内的渲染器已建好上下文就立刻把 GPU 名显示出来
 
         // pose=aligned：把"本文机位换算到它的坐标系"后的视图矩阵注入它的渲染器
         if (param("pose", "") === "aligned") {
@@ -542,6 +575,7 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
         base.coveredPct = bench.coveredPct;
         base.poseKey = Array.isArray(bench.view) ? bench.view.slice(0, 6).join(",") : undefined;
         base.ok = true;
+        refreshDeviceLabel(cw); // 首帧已过，GPU 名一定已上报（读的是它在用的上下文，零新建）
         return base;
     } catch (err) {
         base.err = err instanceof Error ? err.message : String(err);
@@ -565,7 +599,7 @@ function buildResultText(st: BenchState): string {
     lines.push("engine=fluxgs");
     lines.push(`u=${st.u}`);
     lines.push(`chip=${env.chip}`);
-    lines.push(`vendor=${glRendererName()}`);
+    lines.push(`vendor=${env.vendor}`);
     lines.push("mode=bench");
     lines.push(`profile=${st.sceneIds.join(",")}`);
     lines.push(`rounds=${st.rounds}`);
@@ -667,6 +701,7 @@ async function runBench(st: BenchState): Promise<void> {
     flashStatusBig(`正在测试 ${meta.name} · 第 ${roundNo}/${st.rounds} 轮，请稍候`);
     const r = await measureRound(meta, roundNo, st);
     st.results.push(r);
+    if (!r.ok) firstFailureGpuCheck();
     st.roundDone = roundNo;
     saveState(st);
 
@@ -800,12 +835,9 @@ function applyParamToControls(): void {
 }
 
 async function main(): Promise<void> {
-    const gpu = probeWebGL2();
-    if (!gpu.ok) {
-        // 手机端常见：内核不支持 WebGL2 / 硬件加速关闭 → 若继续跑，13 个场景只会逐个在结果里写 err=
-        showFatalGpuError(gpu.reason);
-        return;
-    }
+    // 注意：这里**不再**在启动时建探测上下文（7b1003a 那个跑通的版本也没有）。
+    // 手机端"建了不用 / 丢了不还"的上下文会挤占名额，导致后面几轮建不出上下文；
+    // 可用性判断交给渲染器自身报错 + 首次失败时的 firstFailureGpuCheck()。
     stDevice.textContent = "读取场景清单…";
     try {
         await loadManifest();
@@ -816,7 +848,7 @@ async function main(): Promise<void> {
         return;
     }
     applyParamToControls();
-    stDevice.textContent = guessChip();
+    refreshDeviceLabel();
     stRes.textContent = param("force", "native");
     bindBenchEvents();
     window.addEventListener("resize", layoutStage);

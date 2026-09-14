@@ -108,3 +108,7 @@ Flux-GS：   bench-flux.html?profile=full&rounds=3&cold=1&u=gen3-01&warmup=0&for
 - `proto=flux`：`warmup=0`（无预热）+ `frames=300`，与 Flux-GS 原实现一致；
 - `cam=flux`：使用 `bench-flux-camera.json` 里它自己的 `defaultViewMatrix`（焦距同步 1159.588）；
 - Flux 页通过 `[BENCH INSTRUMENTATION]` 钩子在启动时冻结轮播（`carousel=false`），使视角可复现、且与另外两个方法完全一致。
+- 设备名（`chip=`/`vendor=`）：两个测帧页共用 `bench-chip.ts` 的同一份映射（Adreno→骁龙、Mali/Immortalis→天玑），
+  保证两臂结果头写法一致；Flux 臂的 GPU 名由 iframe 内的渲染器**用自己的上下文**上报
+  （`render_shared/main.js` 写入 `__FLUXGS_STATS__.glRenderer`），外层**不建任何探测上下文**——
+  手机端"建了不用 / 丢了不还"的上下文会耗尽上下文名额（表现为第 2~3 轮建不出上下文）。

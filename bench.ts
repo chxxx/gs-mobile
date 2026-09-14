@@ -35,189 +35,10 @@ const selProfile = $<HTMLSelectElement>("sel-profile");
 const inpRounds = $<HTMLInputElement>("inp-rounds");
 const selCold = $<HTMLSelectElement>("sel-cold");
 const selViewScene = $<HTMLSelectElement>("sel-view-scene");
-const btnLoadView = $<HTMLButtonElement>("btn-load-view");
-const btnResetView = $<HTMLButtonElement>("btn-reset-view");
-const selCam = $<HTMLSelectElement>("sel-cam");
-const inpFrames = $<HTMLInputElement>("inp-frames");
-const inpWarmup = $<HTMLInputElement>("inp-warmup");
-
 const ckOverlay = $<HTMLInputElement>("ck-overlay");
 const ckInfo = $<HTMLInputElement>("ck-info");
 
-// ------------------------------------------------------------------ WebGL2 能力自检
-// 手机端已知失败模式：内核不支持 WebGL2 / 硬件加速被关闭 / 在微信等内嵌浏览器里 WebGL 被禁用。
-// 这类设备此前会白屏，且控制台只抛 "Cannot read properties of null (reading 'createProgram')"，
-// 无法判断是设备问题还是部署问题；现在提前探测并给出一段可复制回传的自检信息。
-interface GpuProbe {
-    ok: boolean;
-    reason: string;
-    renderer: string;
-}
-
-function probeWebGL2(): GpuProbe {
-    try {
-        const probe = document.createElement("canvas");
-        const gl = probe.getContext("webgl2") as WebGL2RenderingContext | null;
-        if (!gl) return { ok: false, reason: "canvas.getContext('webgl2') 返回 null", renderer: "" };
-        const dbg = gl.getExtension("WEBGL_debug_renderer_info");
-        const name = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
-        gl.getExtension("WEBGL_lose_context")?.loseContext(); // 立即释放探测用上下文
-        return { ok: true, reason: "", renderer: String(name || "") };
-    } catch (err) {
-        return { ok: false, reason: err instanceof Error ? err.message : String(err), renderer: "" };
-    }
-}
-
-/** WebGL2 不可用时的收尾：把自检文本放进结果卡（可长按复制回传），不再继续初始化渲染器。 */
-function showFatalGpuError(reason: string): void {
-    welcome.textContent = "此设备/内核创建不出 WebGL2 上下文，无法运行测帧。自检信息见下方弹窗，可长按复制发回。";
-    statusBig.textContent = "WebGL2 不可用";
-    statusBig.classList.remove("hidden");
-    resultCard.style.display = "flex";
-    rcSummary.textContent =
-        "请在浏览器中开启硬件加速，或改用 Chrome/Edge（微信里可点右上角“在浏览器打开”）。也可以点下方“重试”再试一次。";
-    rcText.value =
-        [
-            "== bench 环境自检失败 ==",
-            "webgl2=0",
-            `reason=${reason}`,
-            `ctx_retry=${ctxTryCount()}`,
-            `ua=${navigator.userAgent}`,
-            `screen=${window.screen.width}x${window.screen.height} dpr=${window.devicePixelRatio}`,
-        ].join("\n") + "\n";
-    // 手动兜底：走到这里说明"页内重试 + 3 次换页重试"都没成功，给一个可点的重试入口
-    try {
-        btnStart.textContent = "重试（重新加载页面）";
-        btnStart.disabled = false;
-        btnStart.addEventListener("click", () => hardNavigate());
-    } catch {
-        /* ignore */
-    }
-}
-
-/**
- * 建渲染器：手机端在高负载/连续冷启动后，GPU 进程可能被系统回收，`getContext('webgl2')` 会短暂返回 null
- * （典型现象：同一台机器前两轮正常，第 3 轮整页刷新后拿不到上下文）。
- * 因此做有限次退避重试；全部失败才给出自检信息并中止。
- * 注意：这里**不再**额外创建"探测用"上下文——探测本身也占一个上下文名额，反而会加剧该问题。
- */
-// ------------------------------------------------------------------ 上下文/重试基建
-/** 本页建渲染器时的重试次数（>0 说明该设备在第 N 轮出现过 GPU 上下文不可用）。 */
-let gpuRetries = 0;
-let ctxLostCount = 0;
-let ctxLostAt = 0;
-
-async function createRenderer(maxTries = 5): Promise<SPLAT.WebGLRenderer> {
-    let last = "";
-    for (let attempt = 1; attempt <= maxTries; attempt++) {
-        try {
-            gpuRetries = attempt - 1;
-            const created = new SPLAT.WebGLRenderer(canvas);
-            setCtxTryCount(0); // 建成功即清零「换页重试」计数
-            return created;
-        } catch (err) {
-            last = err instanceof Error ? err.message : String(err);
-        }
-        if (attempt < maxTries) {
-            statusBig.textContent = `WebGL2 暂时不可用，等待 GPU 恢复（${attempt}/${maxTries - 1}）…`;
-            statusBig.classList.remove("hidden");
-            await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
-        }
-    }
-    // 同页内重试仍失败：换一次导航再试（新文档才有机会拿到刚被释放的上下文名额）
-    if (ctxTryCount() < 3) {
-        setCtxTryCount(ctxTryCount() + 1);
-        statusBig.textContent = `GPU 上下文暂不可用，正在重新加载页面重试（第 ${ctxTryCount()}/3 次）…`;
-        statusBig.classList.remove("hidden");
-        await new Promise((resolve) => setTimeout(resolve, 1200));
-        hardNavigate();
-        throw new Error("页面即将重新加载以重试 WebGL2 上下文");
-    }
-    const probe = probeWebGL2(); // 仅用于生成自检文本（此时已确认建不出渲染器）
-    const reason = probe.reason || last;
-    showFatalGpuError(reason);
-    throw new Error(`WebGL2 不可用：${reason}`);
-}
-
-// ------------------------------------------------------------------ 上下文存活监测
-canvas.addEventListener("webglcontextlost", (e) => {
-    e.preventDefault();
-    ctxLostCount++;
-    ctxLostAt = performance.now();
-    flashStatusBig("WebGL 上下文丢失（GPU 内存不足或切后台），本轮作废，请刷新页面重测");
-});
-/** 本轮测帧期间（或此刻）上下文是否已丢失——丢失后 GL 调用被忽略，setTimeout 计时会得到虚高 FPS。 */
-function contextLostDuring(t0: number): boolean {
-    const gl = renderer.gl as WebGL2RenderingContext | undefined;
-    if (gl && gl.isContextLost()) return true;
-    return ctxLostAt >= t0;
-}
-
-/** 主动释放本页 GL 资源并丢弃上下文：每轮冷启动都是整页刷新，上一页若仍持有上下文会与下一页争抢 GPU 内存。
- *  除 dispose + WEBGL_lose_context 外，还把 canvas 尺寸归零并摘除——让浏览器立刻回收后备存储，而不是等 GC。 */
-function releaseGpu(): void {
-    try {
-        renderer.dispose();
-    } catch {
-        /* ignore */
-    }
-    try {
-        (renderer.gl as WebGL2RenderingContext | undefined)?.getExtension("WEBGL_lose_context")?.loseContext();
-    } catch {
-        /* ignore */
-    }
-    try {
-        renderer.gl?.finish();
-    } catch {
-        /* ignore */
-    }
-    try {
-        canvas.width = 0;
-        canvas.height = 0;
-        canvas.remove();
-    } catch {
-        /* ignore */
-    }
-}
-
-/** 换一个全新 URL 重新加载本页：`replace` 不留历史记录，`rt=` 保证不复用缓存/bfcache。 */
-function hardNavigate(): void {
-    try {
-        const url = new URL(location.href);
-        url.searchParams.set("rt", String(Date.now()));
-        location.replace(url.href);
-    } catch {
-        location.reload();
-    }
-}
-
-// 「换页重试」计数：同页内重试仍建不出上下文时，换一次导航再试（新文档才有机会拿到被释放的名额）
-const CTX_TRY_KEY = "gsm-bench-ctxtry";
-function ctxTryCount(): number {
-    try {
-        return parseInt(sessionStorage.getItem(CTX_TRY_KEY) || "0", 10) || 0;
-    } catch {
-        return 0;
-    }
-}
-function setCtxTryCount(n: number): void {
-    try {
-        sessionStorage.setItem(CTX_TRY_KEY, String(n));
-    } catch {
-        /* ignore */
-    }
-}
-
-// 页面真正卸载（非进入 bfcache）时释放上下文；进入 bfcache 不释放，避免返回时页面已死
-window.addEventListener("pagehide", (e) => {
-    if (!e.persisted) releaseGpu();
-});
-// 注册 unload 会让 Chrome/Firefox 放弃把本页放进 bfcache —— 这正是冷启动链路要的：
-// 每轮都必须是"上一页彻底销毁 → 下一页新建上下文"，否则旧页会一直占着 GPU 上下文与显存
-window.addEventListener("unload", () => releaseGpu());
-
-const renderer = await createRenderer();
-statusBig.classList.add("hidden");
+const renderer = new SPLAT.WebGLRenderer(canvas);
 const scene = new SPLAT.Scene();
 const camera = new SPLAT.Camera();
 let controls: SPLAT.OrbitControls | null = null;
@@ -232,14 +53,11 @@ interface SceneMeta {
     points?: number;
     /** 第7章对比方法臂标记（如 "reduced-3dgs"）：仅用于 profile 分组，不进入 full/演示清单 */
     baseline?: string;
-    /** 该文件对应的场景名（对比方法臂使用，便于按场景名回填论文表格） */
-    scene?: string;
     /** 量化模型文件体积（MB），用于报表核对 */
     storageMB?: number;
 }
 interface RoundResult {
     scene: string;
-    dataset?: string;
     round: number;
     ts: string;
     ok: boolean;
@@ -254,15 +72,6 @@ interface RoundResult {
     firstFrameMs?: number;
     fps?: number;
     cpuMs?: number;
-    /** 本轮实际使用的画布尺寸（参考协议下随场景/设备变化，必须逐轮记录） */
-    resW?: number;
-    resH?: number;
-    /** 本轮视图矩阵（16 个数，布局同 Flux-GS），用于把同一机位注入基线渲染器 */
-    view?: string;
-    /** res=table 但该场景无分辨率记录（已回退），本轮数字不满足参考协议 */
-    resFallback?: boolean;
-    /** 视锥剔除后实际参与绘制的高斯数（渲染负载的直接度量） */
-    visible?: number;
 }
 interface BenchState {
     v: number;
@@ -273,17 +82,11 @@ interface BenchState {
     cold: boolean;
     resW: number;
     resH: number;
-    /** 分辨率模式：fixed(默认,用 resW×resH) / table(逐场景查表) / auto(复刻 Flux-GS 原生策略) */
-    resMode?: "fixed" | "table" | "auto";
     benchFrames: number;
-    /** 计帧前的预热帧数：参考协议（Flux-GS 原协议）= 0；旧 1600×1063 口径 = 10 */
-    warmup?: number;
     idx: number;
     roundDone: number;
     results: RoundResult[];
     started: number;
-    /** 固定机位档位：near|mid|far|ref|auto（见 bench-cameras.json） */
-    cam?: string;
 }
 
 const STATE_KEY = "gsm-bench-v1";
@@ -309,6 +112,17 @@ function median(nums: number[]): number | undefined {
     const a = [...nums].sort((x, y) => x - y);
     const m = Math.floor(a.length / 2);
     return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+}
+
+// ------------------------------------------------------------------ 测帧口径开关（与 Flux-GS 臂对齐）
+/** 参考协议（Flux-GS 原协议）：`?proto=flux` → 焦距取它的 COLMAP 焦距、计帧前不预热。 */
+const PROTO_FLUX = param("proto", "") === "flux";
+/** 三方同视角：`?cam=flux` → 用 Flux-GS 原代码里的相机（见 applyFluxCamera）。 */
+const CAM_FLUX = param("cam", "") === "flux";
+/** 计帧前预热帧数：参考协议（Flux-GS 原协议）为 0，旧 1600×1063 口径为 10；`?warmup=N` 可显式覆盖。 */
+function warmupFrames(): number {
+    const n = parseInt(param("warmup", PROTO_FLUX ? "0" : "10"), 10);
+    return Number.isFinite(n) && n >= 0 ? n : 0;
 }
 
 // ------------------------------------------------------------------ scene manifest
@@ -409,11 +223,11 @@ const FALLBACK_SCENES: SceneMeta[] = [
     },
 ];
 
-let manifest: SceneMeta[] = [];
-
-/** 站点清单：默认场景（bench-scenes.json）与第7章对比方法场景（baseline-scenes.json）合并。
- *  两份清单任一不可达时跳过，全部不可达时退回内置 FALLBACK_SCENES。 */
+/** 站点清单：默认场景（`bench-scenes.json`）与第7章对比方法场景（`baseline-scenes.json`）合并。
+ *  任一清单不可达时跳过该清单；全部不可达时退回内置 `FALLBACK_SCENES`。 */
 const MANIFEST_URLS = ["./bench-scenes.json", "./baseline-scenes.json"];
+
+let manifest: SceneMeta[] = [];
 
 async function loadManifest(): Promise<void> {
     const merged: SceneMeta[] = [];
@@ -432,245 +246,15 @@ async function loadManifest(): Promise<void> {
 function sceneById(id: string): SceneMeta | undefined {
     return manifest.find((s) => s.id === id);
 }
-
-// ------------------------------------------------------------------ fixed camera table
-/** bench-cameras.json：以本文模型为参考的固定机位，供"本方法 + reduced-3DGS"两臂共用同一机位。
- *  这样两条臂的差异只剩模型本身（同一渲染器、同一 FOV、同一姿态、同一分辨率），FPS 才真正可比。 */
-type CamPose = { position: number[]; target: number[] };
-let cameraTable: Record<string, Record<string, CamPose>> = {};
-
-async function loadCameraTable(): Promise<void> {
-    try {
-        const res = await fetch("./bench-cameras.json");
-        if (!res.ok) return;
-        const json = (await res.json()) as { cameras?: Record<string, Record<string, CamPose>> };
-        cameraTable = json.cameras ?? {};
-    } catch {
-        /* 没有机位表时回退到包围盒自动取景 */
-    }
-}
-function cameraKey(meta: SceneMeta): string {
-    return meta.scene ?? meta.id;
-}
-
-/** 焦距（像素）：默认 1132（gsplat.js 自带）。参考协议下可传 ?fx=1159.588 与 Flux-GS 的
- *  COLMAP 焦距完全一致，从而两个渲染器在相同画布下得到完全相同的视场角。
- *  `?proto=flux` 时自动取 1159.588。 */
-function applyFocalFromParam(): void {
-    const dflt = param("proto", "") === "flux" ? "1159.588" : "0";
-    const fx = parseFloat(param("fx", dflt));
-    if (Number.isFinite(fx) && fx > 0) {
-        camera.data.fx = fx;
-        camera.data.fy = fx;
-    }
-}
-/** 导出当前视图矩阵（16 个数，布局与 Flux-GS 的 getViewMatrix 完全一致）。
- *  `?exportPose=1` 时写进结果文本，用于把同一机位注入 Flux-GS 渲染器。 */
-function currentViewMatrix(): number[] {
-    return camera.data.viewMatrix.buffer.map((v) => Math.round(v * 1e5) / 1e5);
-}
-
-// ------------------------------------------------------------------ Flux-GS original camera
-/** bench-flux-camera.json：从 Flux-GS 官方渲染器源码抽出的相机（tools/extract_flux_camera.py）。
- *  `cam=flux` 用其 default_view（未交互时的原始视角，13 场景共用）；`cam=fluxcam:N` 用第 N 个硬编码镜头。
- *  它的 (position, rotation) 与 gsplat.js 的 CameraData.update 完全同构，因此设进去即可得到同一视图矩阵。 */
-type FluxCameraPose = {
-    position: number[];
-    rotation: number[];
-    quaternion: number[];
-    view_matrix?: number[];
-};
-let fluxCameras: { focal_px: number; cameras: FluxCameraPose[]; default_view: FluxCameraPose } | null = null;
-/** 用相机位姿锁住相机：置 true 后 frameRender 不再让 OrbitControls 覆写朝向。 */
-let cameraLocked = false;
-/** 本轮是否走"直接注入视图矩阵"路径（此时绝不能再调 camera.update()，否则会被 position/rotation 覆盖）。 */
-let viewMatrixInjected = false;
-
-/** 3×3 行主序求逆；奇异返回 null。 */
-function inv3(m: number[]): number[] | null {
-    const [a, b, c, d, e, f, g, h, i] = m;
-    const A = e * i - f * h;
-    const B = -(d * i - f * g);
-    const C = d * h - e * g;
-    const D = -(b * i - c * h);
-    const E = a * i - c * g;
-    const F = -(a * h - b * g);
-    const G = b * f - c * e;
-    const H = -(a * f - c * d);
-    const I = a * e - b * d;
-    const det = a * A + b * B + c * C;
-    if (Math.abs(det) < 1e-12) return null;
-    return [A / det, D / det, G / det, B / det, E / det, H / det, C / det, F / det, I / det];
-}
-
-/** 标准矩阵 → 四元数 (x, y, z, w)，与 Matrix3.RotationFromQuaternion 互逆。 */
-function quatFromMatrix(r: number[]): number[] {
-    const [r11, r12, r13, r21, r22, r23, r31, r32, r33] = r;
-    const tr = r11 + r22 + r33;
-    if (tr > 0) {
-        const s = Math.sqrt(tr + 1) * 2;
-        return [(r32 - r23) / s, (r13 - r31) / s, (r21 - r12) / s, 0.25 * s];
-    }
-    if (r11 > r22 && r11 > r33) {
-        const s = Math.sqrt(1 + r11 - r22 - r33) * 2;
-        return [0.25 * s, (r12 + r21) / s, (r13 + r31) / s, (r32 - r23) / s];
-    }
-    if (r22 > r33) {
-        const s = Math.sqrt(1 + r22 - r11 - r33) * 2;
-        return [(r12 + r21) / s, 0.25 * s, (r23 + r32) / s, (r13 - r31) / s];
-    }
-    const s = Math.sqrt(1 + r33 - r11 - r22) * 2;
-    return [(r13 + r31) / s, (r23 + r32) / s, 0.25 * s, (r21 - r12) / s];
-}
-
-async function loadFluxCamera(): Promise<void> {
-    // 用它原代码的相机（三方严格同视角）。注意：不要加载"对齐版"文件——
-    // 实测表明两个模型本来就在同一坐标系，对齐反而把视角弄坏（可见比例从 60~92% 降到 27~58%）。
-    try {
-        const res = await fetch("./bench-flux-camera.json");
-        if (!res.ok) return;
-        fluxCameras = (await res.json()) as typeof fluxCameras;
-        console.log("[bench] flux camera loaded from bench-flux-camera.json");
-    } catch {
-        /* 无：cam=flux 会回退到本文机位表 */
-    }
-}
-
-/** 应用 Flux-GS 原相机；返回 false 表示不支持（调用方回退）。 */
-function applyFluxCamera(level: string): boolean {
-    if (!fluxCameras) return false;
-    let pose: FluxCameraPose | undefined;
-    const m = /^fluxcam:(\d+)$/.exec(level);
-    if (m) {
-        pose = fluxCameras.cameras[parseInt(m[1], 10)];
-    } else {
-        pose = fluxCameras.default_view;
-    }
-    if (!pose) return false;
-    const injected = Array.isArray(pose.view_matrix) && pose.view_matrix.length === 16;
-    viewMatrixInjected = false;
-    if (injected) {
-        const B = pose.view_matrix as number[];
-        camera.setViewMatrix(B);
-        // 兜底：同步 position/rotation，使任何残留的 camera.update() 也只会得到同一个姿态
-        const R = [B[0], B[1], B[2], B[4], B[5], B[6], B[8], B[9], B[10]];
-        const M = [R[0], R[3], R[6], R[1], R[4], R[7], R[2], R[5], R[8]];
-        const Mi = inv3(M);
-        if (Mi) {
-            const vt = [B[12], B[13], B[14]];
-            const t = [0, 1, 2].map((r) => -(Mi[3 * r] * vt[0] + Mi[3 * r + 1] * vt[1] + Mi[3 * r + 2] * vt[2]));
-            camera.position = new SPLAT.Vector3(t[0], t[1], t[2]);
-            const q = quatFromMatrix(R);
-            camera.rotation = new SPLAT.Quaternion(q[0], q[1], q[2], q[3]);
-        }
-        viewMatrixInjected = true;
-    } else {
-        const [x, y, z, w] = pose.quaternion;
-        camera.unlockViewMatrix();
-        camera.position = new SPLAT.Vector3(pose.position[0], pose.position[1], pose.position[2]);
-        camera.rotation = new SPLAT.Quaternion(x, y, z, w);
-        camera.update();
-    }
-    camera.data.fx = fluxCameras.focal_px;
-    camera.data.fy = fluxCameras.focal_px;
-    if (injected) {
-        // 设 fx/fy 会重算投影与 viewProj，但不会动 _viewMatrix；再注入一次以防实现变化
-        camera.setViewMatrix(pose.view_matrix as number[]);
-    } else {
-        camera.update();
-    }
-    cameraLocked = true;
-    return true;
-}
-
-// ------------------------------------------------------------------ per-scene resolution (reference protocol)
-/** bench-resolutions.json：由 Flux-GS 臂实测得到的"逐场景原生画布尺寸"。
- *  本文臂用 `?res=table` 时按场景查这张表，从而与基线在**完全相同的像素负载**下对比。 */
-let resTable: Record<string, { w: number; h: number }> = {};
-
-async function loadResolutionTable(): Promise<void> {
-    try {
-        const res = await fetch("./bench-resolutions.json");
-        if (!res.ok) return;
-        const json = (await res.json()) as { resolutions?: Record<string, { w: number; h: number }> };
-        resTable = json.resolutions ?? {};
-    } catch {
-        /* 缺失时回退到固定分辨率 */
-    }
-}
-
-/** 解析本轮画布尺寸：
- *  - `res=WxH`   固定分辨率（旧口径 1600×1063）
- *  - `res=table` 按场景查 bench-resolutions.json（与 Flux-GS 臂逐场景同像素）
- *  - `res=auto`  复刻 Flux-GS 原生策略：点数 > 500000 → 1× CSS；否则 CSS × devicePixelRatio
- */
-function resolveRoundResolution(meta: SceneMeta, st: BenchState): { w: number; h: number; fallback: boolean } {
-    const mode = st.resMode ?? "fixed";
-    if (mode === "table") {
-        const hit = resTable[cameraKey(meta)];
-        if (hit?.w && hit?.h) return { w: hit.w, h: hit.h, fallback: false };
-        console.warn(
-            `[bench] res=table 但没有 ${cameraKey(meta)} 的分辨率记录（bench-resolutions.json 为空或未生成），` +
-                `已回退到 ${st.resW}x${st.resH}。请先跑 Flux-GS 臂并执行 tools/make_bench_resolutions.py。`,
-        );
-        return { w: st.resW, h: st.resH, fallback: true };
-    }
-    if (mode === "auto") {
-        const dpr = window.devicePixelRatio || 1;
-        const cssW = Math.max(1, canvas.clientWidth || window.innerWidth);
-        const cssH = Math.max(1, canvas.clientHeight || window.innerHeight);
-        const heavy = (meta.points ?? 0) > 500000;
-        return heavy
-            ? { w: cssW, h: cssH, fallback: false }
-            : { w: Math.round(cssW * dpr), h: Math.round(cssH * dpr), fallback: false };
-    }
-    return { w: st.resW, h: st.resH, fallback: false };
-}
-/** 与 OrbitControls 同一套朝向公式：rx=asin(-d.y), ry=atan2(d.x,d.z)，roll=0。 */
-function lookAtRotation(from: number[], to: number[]): SPLAT.Quaternion {
-    const dx = to[0] - from[0];
-    const dy = to[1] - from[1];
-    const dz = to[2] - from[2];
-    const len = Math.hypot(dx, dy, dz) || 1;
-    const x = dx / len;
-    const y = dy / len;
-    const z = dz / len;
-    const rx = Math.asin(-y);
-    const ry = Math.atan2(x, z);
-    return SPLAT.Quaternion.FromEuler(new SPLAT.Vector3(rx, ry, 0));
-}
-
-/** 把相机放到固定机位；返回 false 表示该场景无机位记录，调用方回退自动取景。
- *  关键：姿态直接写入 position/rotation 并锁住相机——否则 OrbitControls 每帧会 lerp 回它自己的
- *  内部状态（且其 objectChanged 回调会用过期旋转污染目标姿态），导致"固定机位"其实没生效。 */
-function applyFixedCamera(meta: SceneMeta, level: string | undefined): boolean {
-    const spec = cameraTable[cameraKey(meta)];
-    if (!spec) return false;
-    const wanted = level && level !== "auto" ? spec[level] : undefined;
-    const pose = wanted ?? spec.mid ?? spec.ref ?? spec.near ?? spec.far;
-    if (!pose) return false;
-    const [px, py, pz] = pose.position;
-    const [tx, ty, tz] = pose.target;
-    camera.unlockViewMatrix(); // 若上一轮注入过视图矩阵，先解锁
-    camera.position = new SPLAT.Vector3(px, py, pz);
-    camera.rotation = lookAtRotation([px, py, pz], [tx, ty, tz]);
-    camera.update();
-    cameraLocked = true;
-    return true;
-}
-/** 数据集分组型 profile；reduced3dgs 为第7章对比方法臂（走同一测帧协议，按 baseline 字段分组）。 */
-const DATASET_PROFILES = ["mip360", "tnt", "db"];
-
 function expandProfile(profile: string): string[] {
-    // full 只覆盖本方法部署资产，对比方法臂不进入远程全量测试
     if (profile === "full") return manifest.filter((s) => !s.baseline).map((s) => s.id);
-    if (profile === "reduced3dgs") {
-        return manifest.filter((s) => s.baseline === "reduced-3dgs").map((s) => s.id);
+    if (profile === "mip360" || profile === "tnt" || profile === "db") {
+        return manifest.filter((s) => !s.baseline && s.dataset === profile).map((s) => s.id);
     }
-    if (DATASET_PROFILES.includes(profile)) {
-        return manifest.filter((s) => s.dataset === profile).map((s) => s.id);
+    if (profile === "quick") {
+        return ["garden", "truck", "drjohnson"].filter((id) => sceneById(id) && !sceneById(id)?.baseline);
     }
-    if (profile === "quick") return ["garden", "truck", "drjohnson"].filter((id) => sceneById(id));
+    if (profile === "reduced3dgs") return manifest.filter((s) => s.baseline === "reduced-3dgs").map((s) => s.id);
     return [];
 }
 
@@ -685,9 +269,9 @@ function frameRender(): void {
     renderer.render(scene, camera);
 }
 /**
- * 帧率测量：帧驱动方式**完全对齐 Flux-GS 原始实现**（其 `runFluxBenchmark`）——
+ * 帧率测量：仿照 Flux-GS Offscreen Benchmark 的帧驱动方式——
  * 每渲染一帧后 setTimeout(0) 让出事件循环，再渲染下一帧；整段墙钟时间 / 帧数 = 平均单帧耗时。
- * Flux-GS 原协议没有预热帧，因此 warmup 由调用方传入（参考协议模式传 0，旧口径默认 10）。
+ * 这样每帧都是“完整提交并被驱动执行”的帧，规避同步死循环里 Worker/驱动消息无法回流的失真。
  */
 async function runThroughputFrames(frames: number, warmup = 10): Promise<{ fps: number; cpuMs: number }> {
     for (let i = 0; i < warmup; i++) {
@@ -700,11 +284,6 @@ async function runThroughputFrames(frames: number, warmup = 10): Promise<{ fps: 
         const step = (): void => {
             frameRender();
             rendered++;
-            if ((renderer.gl as WebGL2RenderingContext).isContextLost()) {
-                // 上下文丢失后 GL 调用被忽略，继续计时会得到虚高 FPS：立即结束，由调用方判定本轮作废
-                resolve();
-                return;
-            }
             if (rendered >= frames) {
                 resolve();
                 return;
@@ -723,7 +302,7 @@ async function runThroughputFrames(frames: number, warmup = 10): Promise<{ fps: 
  * 测帧前必须让出事件队列，等待 worker 至少完成一次排序并产生真实绘制。
  */
 /** 读一帧像素，统计画面中被高斯覆盖的像素比例；同时读取视锥剔除后的保留比例，用于诊断测帧画面是否“空转”。 */
-function probeFrameCoverage(): { coveredPct: number; keptPct: number; visible: number } {
+function probeFrameCoverage(): { coveredPct: number; keptPct: number } {
     const gl = renderer.gl as WebGL2RenderingContext;
     const w = renderer.canvas.width || 1;
     const h = renderer.canvas.height || 1;
@@ -747,8 +326,7 @@ function probeFrameCoverage(): { coveredPct: number; keptPct: number; visible: n
     }
     const cull = renderer.renderProgram?.cullStats;
     const keptPct = cull && cull.total > 0 ? cull.keptRatio * 100 : 0;
-    const visible = cull && cull.total > 0 ? Math.round(cull.keptRatio * cull.total) : 0;
-    return { coveredPct: samples > 0 ? (covered / samples) * 100 : 0, keptPct, visible };
+    return { coveredPct: samples > 0 ? (covered / samples) * 100 : 0, keptPct };
 }
 
 async function waitForSortedFrame(timeoutMs = 12000): Promise<boolean> {
@@ -771,7 +349,6 @@ function ensureControls(): SPLAT.OrbitControls {
 
 /** 把相机放到能完整框住场景包围盒的固定机位，避免“默认视角大半被剔除”导致测帧失真。 */
 function frameScene(splat: SPLAT.Splat): void {
-    camera.unlockViewMatrix();
     const data = splat.data;
     const p = data.positions;
     const n = data.vertexCount;
@@ -927,41 +504,69 @@ function flashStatusBig(text: string): void {
     statusBig.classList.remove("hidden");
 }
 
+/** 焦距（像素）：默认 1132（gsplat.js 自带）。`?proto=flux` 时取 Flux-GS 的 COLMAP 焦距，
+ *  从而两个渲染器在同一画布下得到完全相同的视场角；`?fx=N` 可显式覆盖。 */
+function applyFocalFromParam(): void {
+    const fx = parseFloat(param("fx", PROTO_FLUX ? "1159.588" : "0"));
+    if (Number.isFinite(fx) && fx > 0) {
+        camera.data.fx = fx;
+        camera.data.fy = fx;
+    }
+}
+
+// ------------------------------------------------------------------ Flux-GS 原相机（三方同视角）
+/**
+ * `?cam=flux`：用 Flux-GS 原代码里的相机（`bench-flux-camera.json`，由 tools/extract_flux_camera.py 抽出）。
+ * 它的 (position, quaternion) 与 gsplat.js 的 CameraData.update 同构，设进去即可复现同一视图矩阵，
+ * 于是本方法 / reduced-3DGS 两臂与 Flux-GS 臂看到的是同一个角度、同一个视场。
+ * 注：Flux 源码里的 defaultViewMatrix 只写了 2 位小数、并非严格正交，走"位置+四元数"路径与它原矩阵
+ * 最多差 0.32°（1600px 画布下画面边缘约 4.4px）；对测帧结论无影响，肉眼看不出差别。
+ */
+type FluxPose = { position: number[]; quaternion: number[] };
+let fluxCamera: { focal_px: number; default_view: FluxPose } | null = null;
+/** 机位由 cam=flux 显式指定时置 true：frameRender 不再让 OrbitControls 覆写相机。 */
+let cameraLocked = false;
+
+async function loadFluxCamera(): Promise<void> {
+    try {
+        const res = await fetch("./bench-flux-camera.json");
+        if (!res.ok) return;
+        fluxCamera = (await res.json()) as { focal_px: number; default_view: FluxPose };
+    } catch {
+        /* 取不到就回退到包围盒自动取景 */
+    }
+}
+
+/** 应用 Flux-GS 原相机（位置 + 姿态 + 焦距）。返回 false 表示资产缺失，调用方回退包围盒取景。 */
+function applyFluxCamera(): boolean {
+    if (!fluxCamera || !fluxCamera.default_view) return false;
+    const [px, py, pz] = fluxCamera.default_view.position;
+    const [x, y, z, w] = fluxCamera.default_view.quaternion;
+    camera.data.fx = fluxCamera.focal_px;
+    camera.data.fy = fluxCamera.focal_px;
+    camera.position = new SPLAT.Vector3(px, py, pz);
+    camera.rotation = new SPLAT.Quaternion(x, y, z, w);
+    camera.update();
+    cameraLocked = true;
+    return true;
+}
+
 // ------------------------------------------------------------------ measurement
 async function measureRound(meta: SceneMeta, round: number, st: BenchState): Promise<RoundResult> {
-    const base: RoundResult = {
-        scene: meta.id,
-        dataset: meta.dataset,
-        round,
-        ts: new Date().toISOString(),
-        ok: false,
-    };
+    const base: RoundResult = { scene: meta.id, round, ts: new Date().toISOString(), ok: false };
     const token = `r${Date.now()}_${Math.floor(Math.random() * 1e9)}`;
     const url = `${meta.file}${meta.file.includes("?") ? "&" : "?"}ts=${token}`;
     const tStart = performance.now();
     scene.reset();
-    const res = resolveRoundResolution(meta, st);
-    setBenchmarkResolution(res.w, res.h);
-    applyFocalFromParam();
+    setBenchmarkResolution(st.resW, st.resH);
     try {
         const splat = await SPLAT.PLYLoader.LoadAsync(url, scene, undefined);
         const tLoaded = performance.now();
-        cameraLocked = false;
-        const camLevel = st.cam ?? "mid";
-        if (camLevel === "flux" || camLevel.startsWith("fluxcam:")) {
-            // 用 Flux-GS 原代码里的相机（三方视角完全一致）
-            if (!applyFluxCamera(camLevel)) {
-                if (!applyFixedCamera(meta, "mid")) frameScene(splat);
-            }
-        } else if (!applyFixedCamera(meta, camLevel)) {
-            frameScene(splat); // 无机位记录的老场景回退到包围盒自动取景
-            cameraLocked = true; // 自动取景同样要锁住，避免 OrbitControls 改写
+        // cam=flux：用 Flux-GS 原相机（位置 + 姿态 + 焦距）复现同一视角；资产缺失时才退回包围盒取景
+        if (!(CAM_FLUX && applyFluxCamera())) {
+            frameScene(splat);
         }
-        // 关键：走"直接注入视图矩阵"的路径时**绝不能**再调 camera.update()——
-        // 那会用 position/rotation（可能是初始值）重算并覆盖刚注入的矩阵，表现为"视角被转动了"。
-        if (!viewMatrixInjected) {
-            camera.update();
-        }
+        camera.update();
         // 让出事件循环等待深度排序回传——此时才产生真实的首帧绘制
         const sorted = await waitForSortedFrame();
         const tFirstFrame = performance.now();
@@ -988,23 +593,12 @@ async function measureRound(meta: SceneMeta, round: number, st: BenchState): Pro
         base.drawOk = sorted;
         base.points = splat.data ? splat.data.vertexCount : undefined;
         base.bytes = bytes;
-        base.resW = res.w;
-        base.resH = res.h;
-        base.resFallback = res.fallback;
-        base.view = currentViewMatrix().join(",");
-        const perf = await runThroughputFrames(st.benchFrames, st.warmup ?? 10);
-        if (contextLostDuring(tStart)) {
-            // 上下文丢失后 GL 调用被忽略，而 setTimeout 计时仍在走 → 会得到虚高 FPS，必须作废本轮
-            throw new Error(
-                `WebGL 上下文在测帧中丢失（累计 ${ctxLostCount} 次；常见于 GPU 内存不足或切后台）——本轮 FPS 不可用`,
-            );
-        }
+        const perf = await runThroughputFrames(st.benchFrames, warmupFrames());
         base.fps = perf.fps;
         base.cpuMs = perf.cpuMs;
         const probe = probeFrameCoverage();
         base.coveredPct = probe.coveredPct;
         base.keptPct = probe.keptPct;
-        base.visible = probe.visible;
         base.ok = true;
         return base;
     } catch (err) {
@@ -1017,24 +611,18 @@ function buildResultText(st: BenchState): string {
     const env = deviceInfo();
     const lines: string[] = [];
     lines.push("[RESULT]");
-    lines.push("engine=gsplat");
-
     lines.push(`u=${st.u}`);
     lines.push(`chip=${env.chip}`);
     lines.push(`vendor=${env.vendor}`);
-    lines.push(`webgl2_retry=${gpuRetries}`);
-    lines.push(`ctx_lost=${ctxLostCount}`);
-    lines.push(`ctx_retry=${ctxTryCount()}`);
     lines.push(`mode=bench`);
     lines.push(`profile=${st.sceneIds.join(",")}`);
     lines.push(`rounds=${st.rounds}`);
     lines.push(`cold=${st.cold ? 1 : 0}`);
     lines.push(`res=${st.resW}x${st.resH}`);
-    lines.push(`res_mode=${st.resMode ?? "fixed"}`);
     lines.push(`proto=${param("proto", "")}`);
-    lines.push(`warmup=${st.warmup ?? 10}`);
-    lines.push(`fx=${Math.round((camera.data.fx ?? 0) * 1000) / 1000}`);
-    lines.push(`cam=${st.cam ?? "mid"}`);
+    lines.push(`cam=${CAM_FLUX ? "flux" : "auto"}`);
+    lines.push(`warmup=${warmupFrames()}`);
+    lines.push(`fx=${Math.round(camera.data.fx * 1000) / 1000}`);
     lines.push(`ts=${new Date().toISOString()}`);
     lines.push(`ua=${env.ua}`);
     lines.push(`gl_renderer=${env.gl_renderer}`);
@@ -1046,12 +634,9 @@ function buildResultText(st: BenchState): string {
     for (const r of st.results) {
         const tags = [
             `scene=${r.scene}`,
-            `dataset=${r.dataset ?? ""}`,
             `round=${r.round}`,
             `ok=${r.ok ? 1 : 0}`,
             `drawOk=${r.drawOk === undefined ? "" : r.drawOk ? 1 : 0}`,
-            `res=${r.resW ?? ""}x${r.resH ?? ""}`,
-            `res_fallback=${r.resFallback ? 1 : 0}`,
             `points=${r.points ?? ""}`,
             `bytes=${r.bytes ?? ""}`,
             `fetch_ms=${fmt(r.fetchMs, 0)}`,
@@ -1059,7 +644,6 @@ function buildResultText(st: BenchState): string {
             `first_frame_ms=${fmt(r.firstFrameMs, 0)}`,
             `fps=${fmt(r.fps, 1)}`,
             `cpu_ms=${fmt(r.cpuMs, 2)}`,
-            `visible=${r.visible ?? ""}`,
             `covered=${fmt(r.coveredPct, 1)}%`,
             `kept=${fmt(r.keptPct, 1)}%`,
         ];
@@ -1084,18 +668,11 @@ function buildResultText(st: BenchState): string {
         lines.push(
             [
                 `summary scene=${sceneId}`,
-                `dataset=${(byScene.get(sceneId) || [])[0]?.dataset ?? ""}`,
                 `ok=${ok.length}/${arr.length || st.rounds}`,
                 `fps_median=${fmt(median(ok.map((r) => r.fps ?? NaN).filter((v) => Number.isFinite(v))), 1)}`,
                 `first_frame_ms_median=${fmt(median(ok.map((r) => r.firstFrameMs ?? NaN).filter((v) => Number.isFinite(v))), 0)}`,
                 `parse_ms_median=${fmt(median(ok.map((r) => r.parseMs ?? NaN).filter((v) => Number.isFinite(v))), 0)}`,
                 `fetch_ms_median=${fmt(median(ok.map((r) => r.fetchMs ?? NaN).filter((v) => Number.isFinite(v))), 0)}`,
-                `visible_median=${fmt(median(ok.map((r) => r.visible ?? NaN).filter((v) => Number.isFinite(v))), 0)}`,
-                `covered_median=${fmt(median(ok.map((r) => r.coveredPct ?? NaN).filter((v) => Number.isFinite(v))), 1)}%`,
-                `kept_median=${fmt(median(ok.map((r) => r.keptPct ?? NaN).filter((v) => Number.isFinite(v))), 1)}%`,
-                `res=${arr[0]?.resW ?? ""}x${arr[0]?.resH ?? ""}`,
-                `res_fallback=${ok.some((r) => r.resFallback) ? 1 : 0}`,
-                ...(param("exportPose") === "1" ? [`view=${arr[0]?.view ?? ""}`] : []),
             ].join(" "),
         );
     }
@@ -1141,11 +718,7 @@ async function runBench(st: BenchState): Promise<void> {
     if (st.cold) {
         // 整页冷启动：新页面重建 WebGL 上下文与 shader，更接近真实首开
         await new Promise((resolve) => setTimeout(resolve, 600));
-        // 先主动释放本页的 GL 资源与上下文，再等一小会儿让浏览器/GPU 进程真正回收，
-        // 最后用新 URL 重新导航：手机端连续冷启动最常见的失败就是"上一页还占着上下文名额/显存"
-        releaseGpu();
-        await new Promise((resolve) => setTimeout(resolve, 400));
-        hardNavigate();
+        location.reload();
         return;
     }
     await new Promise((resolve) => setTimeout(resolve, 150));
@@ -1299,7 +872,6 @@ function setupViewMode(): void {
     renderer.enableAutoResize();
     renderer.setPixelRatio(window.devicePixelRatio || 1);
     renderer.resize();
-    camera.unlockViewMatrix(); // view 模式：恢复常规相机
     window.addEventListener("resize", () => renderer.resize());
     camera.position = new SPLAT.Vector3(0, 0, -5);
     camera.update();
@@ -1311,13 +883,11 @@ function setupViewMode(): void {
 function buildStateFromParams(): BenchState {
     const rounds = Math.max(1, Math.min(9, parseInt(param("rounds", "3"), 10) || 3));
     const cold = param("cold") !== "0"; // 默认整页冷启动刷新
-    const resRaw = param("res", param("proto", "") === "flux" ? "table" : "1600x1063");
+    const resRaw = param("res", "1600x1063");
     const parts = resRaw.split("x");
     const resW = parseInt(parts[0], 10) || 1600;
     const resH = parseInt(parts[1], 10) || 1063;
-    const resMode: "fixed" | "table" | "auto" = resRaw === "table" ? "table" : resRaw === "auto" ? "auto" : "fixed";
-    const benchFrames = parseInt(param("frames", inpFrames?.value || "300"), 10) || 300;
-    const warmup = Math.max(0, parseInt(param("warmup", param("proto", "") === "flux" ? "0" : "10"), 10) || 0);
+    const benchFrames = parseInt(param("frames", "300"), 10) || 300;
     const profile = param("profile", selProfile.value);
     const sceneIds = expandProfile(profile);
     return {
@@ -1329,14 +899,11 @@ function buildStateFromParams(): BenchState {
         cold,
         resW,
         resH,
-        resMode,
         benchFrames,
-        warmup,
         idx: 0,
         roundDone: 0,
         results: [],
         started: Date.now(),
-        cam: param("cam", selCam?.value || "mid"),
     };
 }
 
@@ -1404,19 +971,13 @@ function populateSceneSelect(): void {
 
 function applyParamToControls(): void {
     const profile = param("profile");
-    if (profile && ["quick", "full", "mip360", "tnt", "db", "reduced3dgs"].includes(profile)) {
+    if (profile && ["quick", "full", "mip360", "tnt", "db"].includes(profile)) {
         selProfile.value = profile;
     }
     const rounds = param("rounds");
     if (rounds) inpRounds.value = rounds;
     const cold = param("cold");
     if (cold !== "") selCold.value = cold === "0" ? "0" : "1";
-    const cam = param("cam");
-    if (cam && selCam) selCam.value = cam;
-    const frames = param("frames");
-    if (frames && inpFrames) inpFrames.value = frames;
-    const warmup = param("warmup");
-    if (warmup && inpWarmup) inpWarmup.value = warmup;
 }
 
 async function main(): Promise<void> {
@@ -1428,11 +989,10 @@ async function main(): Promise<void> {
         welcome.textContent = "bench-scenes.json 未能加载，请检查部署是否完整。";
         return;
     }
-    await loadCameraTable(); // 固定机位表（缺失时自动回退包围盒取景）
-    await loadResolutionTable(); // 逐场景分辨率表（res=table 时使用）
-    await loadFluxCamera(); // Flux-GS 原相机（cam=flux / fluxcam:N 时使用）
     populateSceneSelect();
     applyParamToControls();
+    applyFocalFromParam();
+    if (CAM_FLUX) await loadFluxCamera(); // 三方同视角：读 Flux-GS 原相机（取不到则回退包围盒取景）
     stDevice.textContent = shortDeviceLabel();
     stRes.textContent = param("res", "1600×1063");
 

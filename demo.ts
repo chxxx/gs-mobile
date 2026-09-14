@@ -10,17 +10,9 @@ const fileInput = document.getElementById("file-input") as HTMLInputElement;
 const dropZone = document.getElementById("drop-zone") as HTMLDivElement;
 const sceneSelect = document.getElementById("scene-select") as HTMLSelectElement;
 
-/** WebGL2 能力自检：拿不到上下文时（手机内核不支持或关闭了硬件加速）给出明确提示，避免白屏。 */
-function assertWebGL2(): void {
-    const probe = document.createElement("canvas");
-    const gl = probe.getContext("webgl2") as WebGL2RenderingContext | null;
-    if (!gl) {
-        alert("此设备/内核创建不出 WebGL2 上下文，无法运行 3DGS 演示。请在浏览器中开启硬件加速，或改用 Chrome/Edge。");
-        throw new Error("WebGL2 不可用：canvas.getContext('webgl2') 返回 null");
-    }
-    gl.getExtension("WEBGL_lose_context")?.loseContext(); // 立即释放探测用上下文
-}
-assertWebGL2();
+// 注意：这里**不再**单独建探测上下文做"WebGL2 能力自检"。
+// 手机端每页多建一个"建了不用 / 丢了不还"的上下文会挤占上下文名额（连续冷启动尤其致命：
+// 表现为第 2~3 轮建不出上下文）。可读的错误提示已由 WebGLRenderer 构造函数直接抛出。
 
 const renderer = new SPLAT.WebGLRenderer(canvas);
 const scene = new SPLAT.Scene();
