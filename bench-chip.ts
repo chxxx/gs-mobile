@@ -38,3 +38,10 @@ export function guessChip(renderer: string): ChipGuess {
     }
     return { vendor: "other", chip: g || "unknown" };
 }
+
+/** 在线结果头 `u=` 的默认设备标识：auto-adreno-750 / auto-mali-610 / auto-device。
+ *  与 `guessChip` 用同一套正则，保证 bench.html 与 bench-flux.html 的 `u=` 写法一致。 */
+export function chipSlug(renderer: string): string {
+    const mm = /(Adreno|Mali|Immortalis)[^0-9]*(\d+)/i.exec(renderer);
+    return mm ? `auto-${mm[1].toLowerCase()}-${mm[2]}` : "auto-device";
+}

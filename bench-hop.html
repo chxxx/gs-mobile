@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <title>正在切换测试项…</title>
+    <style>
+        :root { --bg:#0d1117; --panel:#161b22; --line:#2b3340; --text:#e6edf3; --muted:#8b98a8; --accent:#e3b341; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { height: 100%; }
+        body { background: var(--bg); color: var(--text); font: 15px/1.6 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; display: flex; align-items: center; justify-content: center; padding: 24px; }
+        .box { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; max-width: 560px; }
+        h1 { font-size: 16px; margin-bottom: 8px; }
+        p { color: var(--muted); font-size: 13px; }
+        code { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+        #st { margin-top: 10px; color: var(--text); font-size: 14px; }
+        a { color: var(--accent); }
+    </style>
+</head>
+<body>
+    <!--
+      中转页（benchmark 页面隔离用）：本页**不创建任何 WebGL 上下文、不建 Worker、不发场景请求**。
+      作用：手机端“第 2 页建不出上下文”的根因是上一项刚销毁的上下文/显存还没被 GPU 进程还回来；
+      先把上一页文档整个换成本页（零 GL、零 Worker），停留 delay 毫秒，再进下一项，
+      于是“销毁旧上下文”和“创建新上下文”就被确定性地分开了（不依赖浏览器对新旧页面上下文的异步回收）。
+      URL：bench-hop.html?delay=1500&next=<encodeURIComponent 的下一项 URL>
+      本页不参与任何计时：既不进首帧时间，也不进 FPS 采样。
+    -->
+    <div class="box">
+        <h1>正在切换到下一个测试项…</h1>
+        <p>本页不创建 WebGL 上下文与 Worker：上一项的上下文/显存需要在这里归还，然后才进入下一项。</p>
+        <p id="st">…</p>
+    </div>
+    <script>
+        (function () {
+            var el = document.getElementById("st");
+            var params = new URLSearchParams(location.search);
+            var raw = params.get("next") || "";
+            var delay = parseInt(params.get("delay") || "1500", 10);
+            if (!isFinite(delay) || delay < 0) delay = 1500;
+            if (delay > 5000) delay = 5000;
+
+            var target = null;
+            try {
+                target = new URL(raw, location.href);
+                // 只允许同源跳转，避免被当成开放重定向
+                if (target.origin !== location.origin) target = null;
+            } catch (e) {
+                target = null;
+            }
+
+            if (!target) {
+                el.innerHTML =
+                    '缺少有效的 <code>next</code> 参数，无法继续。请回到 <a href="./bench.html?mode=bench">bench.html</a> 重新开始。';
+                return;
+            }
+
+            el.textContent = "等待 " + delay + " ms 后进入下一项…";
+            setTimeout(function () {
+                el.textContent = "正在进入下一项…";
+                // 再让出一帧：保证本页这一帧已经提交，再整页替换
+                requestAnimationFrame(function () {
+                    location.replace(target.href);
+                });
+            }, delay);
+        })();
+    </script>
+</body>
+</html>

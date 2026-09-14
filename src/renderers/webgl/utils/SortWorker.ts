@@ -29,9 +29,18 @@ let cullEnabled = true;
 
 async function initWasm() {
     if (!wasmModule) {
-        wasmModule = await createSortModule();
+        try {
+            wasmModule = await createSortModule();
+        } catch (error) {
+            // 明确报告初始化失败：否则排序会永远静默不产出（表现为画面全黑、drawOk=0）
+            console.error("[SortWorker] 排序 WASM 初始化失败：", error);
+            wasmModule = undefined;
+            throw error;
+        }
 
         if (!wasmModule || !wasmModule.HEAPF32 || !wasmModule._sort) {
+            console.error("[SortWorker] 排序 WASM 初始化结果不完整");
+            wasmModule = undefined;
             throw new Error("WASM module failed to initialize properly");
         }
     }
@@ -45,46 +54,51 @@ const allocateBuffers = async () => {
     lock = true;
     allocationPending = false;
 
-    if (!wasmModule) {
-        await initWasm();
-    }
-
-    const targetAllocatedVertexCount = Math.pow(2, Math.ceil(Math.log2(sortData.vertexCount)));
-    if (allocatedVertexCount < targetAllocatedVertexCount) {
-        if (allocatedVertexCount > 0) {
-            wasmModule._free(viewProjPtr);
-            wasmModule._free(transformIndicesPtr);
-            wasmModule._free(positionsPtr);
-            wasmModule._free(depthBufferPtr);
-            wasmModule._free(depthIndexPtr);
-            wasmModule._free(startsPtr);
-            wasmModule._free(countsPtr);
+    try {
+        if (!wasmModule) {
+            await initWasm();
         }
 
-        allocatedVertexCount = targetAllocatedVertexCount;
+        const targetAllocatedVertexCount = Math.pow(2, Math.ceil(Math.log2(sortData.vertexCount)));
+        if (allocatedVertexCount < targetAllocatedVertexCount) {
+            if (allocatedVertexCount > 0) {
+                wasmModule._free(viewProjPtr);
+                wasmModule._free(transformIndicesPtr);
+                wasmModule._free(positionsPtr);
+                wasmModule._free(depthBufferPtr);
+                wasmModule._free(depthIndexPtr);
+                wasmModule._free(startsPtr);
+                wasmModule._free(countsPtr);
+            }
 
-        viewProjPtr = wasmModule._malloc(16 * 4);
-        transformIndicesPtr = wasmModule._malloc(allocatedVertexCount * 4);
-        positionsPtr = wasmModule._malloc(3 * allocatedVertexCount * 4);
-        depthBufferPtr = wasmModule._malloc(allocatedVertexCount * 4);
-        depthIndexPtr = wasmModule._malloc(allocatedVertexCount * 4);
-        startsPtr = wasmModule._malloc(allocatedVertexCount * 4);
-        countsPtr = wasmModule._malloc(allocatedVertexCount * 4);
-    }
+            allocatedVertexCount = targetAllocatedVertexCount;
 
-    if (allocatedTransformCount < sortData.transforms.length) {
-        if (allocatedTransformCount > 0) {
-            wasmModule._free(transformsPtr);
+            viewProjPtr = wasmModule._malloc(16 * 4);
+            transformIndicesPtr = wasmModule._malloc(allocatedVertexCount * 4);
+            positionsPtr = wasmModule._malloc(3 * allocatedVertexCount * 4);
+            depthBufferPtr = wasmModule._malloc(allocatedVertexCount * 4);
+            depthIndexPtr = wasmModule._malloc(allocatedVertexCount * 4);
+            startsPtr = wasmModule._malloc(allocatedVertexCount * 4);
+            countsPtr = wasmModule._malloc(allocatedVertexCount * 4);
         }
 
-        allocatedTransformCount = sortData.transforms.length;
-        transformsPtr = wasmModule._malloc(allocatedTransformCount * 4);
-    }
+        if (allocatedTransformCount < sortData.transforms.length) {
+            if (allocatedTransformCount > 0) {
+                wasmModule._free(transformsPtr);
+            }
 
-    lock = false;
-    if (allocationPending) {
-        allocationPending = false;
-        await allocateBuffers();
+            allocatedTransformCount = sortData.transforms.length;
+            transformsPtr = wasmModule._malloc(allocatedTransformCount * 4);
+        }
+    } catch (error) {
+        // 失败时必须让出 lock，否则 runSort 会永远直接 return（画面全黑且无任何报错）
+        console.error("[SortWorker] 排序缓冲区分配失败：", error);
+    } finally {
+        lock = false;
+        if (allocationPending) {
+            allocationPending = false;
+            await allocateBuffers();
+        }
     }
 };
 
@@ -155,8 +169,18 @@ const cullFrustum = (order: Uint32Array): Uint32Array => {
     return k === order.length ? kept : kept.slice(0, k);
 };
 
+let pendingWarnAt = 0;
+
 const runSort = () => {
     if (lock || allocationPending || !wasmModule || !sortData) {
+        // 静默等待原本会让"画面全黑"完全无迹可寻；每 3s 报一次原因（正常路径下 0~1 次）
+        const now = performance.now();
+        if (now - pendingWarnAt > 3000) {
+            pendingWarnAt = now;
+            console.warn(
+                `[SortWorker] 暂不能排序（lock=${lock} allocPending=${allocationPending} wasm=${!!wasmModule} sortData=${!!sortData}）`,
+            );
+        }
         return;
     }
     lock = true;
@@ -217,7 +241,9 @@ const runSort = () => {
             },
             [detachedDepthIndex.buffer],
         );
-    } catch {
+    } catch (error) {
+        // 把真实原因打出来（原来只回一个空 depthIndex，导致"画面全黑却没有任何报错"）
+        console.error("[SortWorker] 排序失败：", error);
         self.postMessage({ depthIndex: new Uint32Array(0) }, []);
     }
 

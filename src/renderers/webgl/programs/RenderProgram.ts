@@ -808,6 +808,14 @@ class RenderProgram extends ShaderProgram {
             gl.deleteTexture(this.splatTexture);
             gl.deleteTexture(transformsTexture);
             gl.deleteTexture(transformIndicesTexture);
+            // 颜色变换用的两张纹理同样由本程序创建，_dispose 必须成对删除：
+            // 漏掉它们会让"每轮新建上下文"的用法（bench-case 的 iframe）在 GPU 侧逐轮累积句柄。
+            if (colorTransformsTexture) {
+                gl.deleteTexture(colorTransformsTexture);
+            }
+            if (colorTransformIndicesTexture) {
+                gl.deleteTexture(colorTransformIndicesTexture);
+            }
 
             for (const texture of this._shTextures) {
                 if (texture) {

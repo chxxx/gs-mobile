@@ -31,16 +31,24 @@ type ParsedPLYResult = {
 };
 
 class PLYLoader {
+    /**
+     * 从 URL 加载模型。
+     *
+     * @param signal 可选中止信号：bench-case 的 dispose 会用它取消下载与读取，避免旧轮的网络/内存占用
+     *              拖到下一轮（中止后本方法抛 AbortError，调用方按"已取消"处理）。
+     */
     static async LoadAsync(
         url: string,
         scene: Scene,
         onProgress?: (progress: number) => void,
         format: string = "",
         useCache: boolean = false,
+        signal?: AbortSignal,
     ): Promise<Splat> {
         const loadStart = performance.now();
-        const res: Response = await initiateFetchRequest(url, useCache);
-        const plyData = await loadDataIntoBuffer(res, onProgress);
+        const res: Response = await initiateFetchRequest(url, useCache, signal);
+        const plyData = await loadDataIntoBuffer(res, onProgress, signal);
+        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
         if (plyData[0] !== 112 || plyData[1] !== 108 || plyData[2] !== 121 || plyData[3] !== 10) {
             throw new Error("Invalid PLY file");
@@ -48,7 +56,7 @@ class PLYLoader {
 
         console.log(`File load: ${plyData.byteLength} B, ${performance.now() - loadStart} ms`);
 
-        return await this.LoadFromArrayBuffer(plyData.buffer, scene, format, loadStart);
+        return await this.LoadFromArrayBuffer(plyData.buffer, scene, format, loadStart, signal);
     }
 
     static async LoadFromFileAsync(
@@ -90,12 +98,13 @@ class PLYLoader {
         scene: Scene,
         format: string = "",
         loadStart?: number,
+        signal?: AbortSignal,
     ): Promise<Splat> {
         const inputBuffer = arrayBuffer as ArrayBuffer;
         const arrayStart = loadStart ?? performance.now();
 
         if (IsLowRankQPLY(inputBuffer)) {
-            return await this._LoadLowRankQPLYFromArrayBuffer(inputBuffer, scene, arrayStart);
+            return await this._LoadLowRankQPLYFromArrayBuffer(inputBuffer, scene, arrayStart, signal);
         }
 
         if (IsQPLY(inputBuffer)) {
@@ -138,6 +147,7 @@ class PLYLoader {
         inputBuffer: ArrayBuffer,
         scene: Scene,
         arrayStart: number,
+        signal?: AbortSignal,
     ): Promise<Splat> {
         const inputSize = inputBuffer.byteLength;
         const prepared = prepareLowRankQPLY(inputBuffer);
@@ -226,16 +236,19 @@ class PLYLoader {
                 }),
             );
         } catch (error) {
+            console.warn("Low-rank QPLY worker decode failed, falling back to synchronous decode.", error);
+            return this._loadLowRankQPLYSync(fallbackBuffer, scene, arrayStart, inputSize);
+        } finally {
+            // 成功 / 失败 / 被中止三条路径都必须在 finally 里终止 worker（terminate 幂等）：
+            // 只在成功路径 terminate 时，异常或中止会留下仍在运行的解码 worker，
+            // 它们继续持有输入缓冲（每轮几十 MB）与 worker 线程，是"下一轮更容易崩"的来源之一。
             for (const worker of workers) {
                 worker.terminate();
             }
-            console.warn("Low-rank QPLY worker decode failed, falling back to synchronous decode.", error);
-            return this._loadLowRankQPLYSync(fallbackBuffer, scene, arrayStart, inputSize);
+            workerBuffers.length = 0; // worker 已 transfer 过这些缓冲；清空引用，别让闭包继续持有
         }
 
-        for (const worker of workers) {
-            worker.terminate();
-        }
+        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
         console.log(
             `Low-rank QPLY parallel decode (${workerCount} workers, rank ${rank}): ${performance.now() - decodeStart} ms`,
@@ -244,6 +257,10 @@ class PLYLoader {
         const mergeStart = performance.now();
         const merged = mergeLowRankChunks(results, vertexCount);
         console.log(`Low-rank QPLY chunk merge: ${performance.now() - mergeStart} ms`);
+
+        // 合并结果已经在 merged 里（mergeLowRankChunks 另行分配），分块结果与 worker 缓冲可以立即断开：
+        // 每块都带着 ArrayBuffer，留着会让整轮的解码中间产物一直挂到 iframe 被回收为止。
+        results.length = 0;
 
         const deserializeStart = performance.now();
         const data = SplatData.Deserialize(new Uint8Array(merged.splatBuffer));

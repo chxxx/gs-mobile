@@ -64,7 +64,11 @@ export default defineConfig(() => ({
             input: {
                 index: resolve(dirname, "index.html"),
                 bench: resolve(dirname, "bench.html"),
+                // 单轮测量子页面（bench.html 每轮新建/销毁的 iframe）
+                benchCase: resolve(dirname, "bench-case.html"),
                 benchFlux: resolve(dirname, "bench-flux.html"),
+                // 轮间中转页（bench.html/bench-flux.html 的 ?hop= 用：零 GL、零 Worker 的空白页）
+                benchHop: resolve(dirname, "bench-hop.html"),
             },
         },
     },
