@@ -1,0 +1,6 @@
+{
+    "version": 1,
+    "note": "占位文件：逐场景原生画布尺寸表。跑完 Flux-GS 臂后必须用 `python gsplat.js/tools/make_bench_resolutions.py` 重新生成，否则本文臂用 ?res=table 时会回退到 1600x1063。",
+    "device": "",
+    "resolutions": {}
+}

@@ -1,0 +1,100 @@
+{
+    "version": 1,
+    "note": "Bench page scene manifest. 'demo:true' entries appear in the viewer dropdown. File paths must stay same-origin under ./scenes/.",
+    "scenes": [
+        {
+            "id": "garden",
+            "name": "Garden (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-garden.ply",
+            "dataset": "mip360",
+            "demo": true,
+            "points": 610000
+        },
+        {
+            "id": "bicycle",
+            "name": "Bicycle (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-bicycle.ply",
+            "dataset": "mip360",
+            "demo": false
+        },
+        {
+            "id": "flowers",
+            "name": "Flowers (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-flowers.ply",
+            "dataset": "mip360",
+            "demo": false
+        },
+        {
+            "id": "stump",
+            "name": "Stump (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-stump.ply",
+            "dataset": "mip360",
+            "demo": false
+        },
+        {
+            "id": "treehill",
+            "name": "Treehill (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-treehill.ply",
+            "dataset": "mip360",
+            "demo": false
+        },
+        {
+            "id": "room",
+            "name": "Room (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-room.ply",
+            "dataset": "mip360",
+            "demo": false
+        },
+        {
+            "id": "counter",
+            "name": "Counter (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-counter.ply",
+            "dataset": "mip360",
+            "demo": false
+        },
+        {
+            "id": "kitchen",
+            "name": "Kitchen (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-kitchen.ply",
+            "dataset": "mip360",
+            "demo": false
+        },
+        {
+            "id": "bonsai",
+            "name": "Bonsai (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-bonsai.ply",
+            "dataset": "mip360",
+            "demo": false
+        },
+        {
+            "id": "truck",
+            "name": "Truck (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-truck.ply",
+            "dataset": "tnt",
+            "demo": true,
+            "points": 273169
+        },
+        {
+            "id": "train",
+            "name": "Train (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-train.ply",
+            "dataset": "tnt",
+            "demo": false
+        },
+        {
+            "id": "drjohnson",
+            "name": "DrJohnson (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-drjohnson.ply",
+            "dataset": "db",
+            "demo": true,
+            "points": 432000
+        },
+        {
+            "id": "playroom",
+            "name": "Playroom (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-playroom.ply",
+            "dataset": "db",
+            "demo": false
+        }
+    ]
+}
