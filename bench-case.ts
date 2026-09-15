@@ -20,6 +20,8 @@
  *   `?losectx=0`      关闭轮末的主动 loseContext（默认开启，见 bench-measure.dispose 注释）。
  */
 import { BenchCase, measureOneRound } from "./bench-measure";
+import { createCaseSlave, createSlaveApi } from "./bench-case-slave";
+import { GlProbe } from "./bench-gl-probe";
 import {
     CAM_FLUX,
     ERR_CONTEXT_LOST,
@@ -42,6 +44,12 @@ const CTX_RETRY_DELAYS_MS = [0, 400, 900];
 const CTX_ATTEMPTS = param("ctxretry") === "1" ? CTX_RETRY_DELAYS_MS.length : 1;
 /** `?ctxlosttest=1` 的强制丢失延迟：足够让模型开始下载，落到"加载/排序"这段里。 */
 const FORCED_LOSS_DELAY_MS = 600;
+
+/**
+ * 阶段 5：`?slave=1` 只暴露 `window.__CASE_BENCH__` 给父控制器，本页**不**自驱任何流程：
+ * 不自动 measureOneRound、不自驱 rAF、不自驱 timer benchmark、不自动切场景、不自动 dispose。
+ */
+const SLAVE = param("slave") === "1";
 
 let jobId = "";
 let disposed = false;
@@ -90,12 +98,21 @@ function onContextLost(event: Event): void {
     const duringDispose = disposed;
     contextLost = true;
     clearForcedLoss();
-    if (caseCtx) caseCtx.stopped = true; // 停帧：后续 frameRender() 全部空转
+    if (caseCtx) {
+        caseCtx.stopped = true; // 停帧：后续 frameRender() 全部空转
+        caseCtx.contextLost = true; // 让测帧 harness 立刻作废该轮（FLUX_FPS_PROTOCOL.md §C.6 验收 12）
+    }
     log("contextlost", `webglcontextlost disposed=${disposed} resultSent=${resultSent} duringDispose=${duringDispose}`);
     if (duringDispose) return; // 主动清理引起的丢失：正常路径，不判失败、不重复清理
     if (!resultSent) {
         resultSent = true;
         reportError(ERR_CONTEXT_LOST, "WebGL 上下文丢失（CONTEXT_LOST_WEBGL）");
+    }
+    if (SLAVE) {
+        // slave 模式：只标记 contextLost=true（getContextState() 会如实上报），
+        // **不自动 dispose** —— 清理时机由父控制器决定（阶段 5 禁止自动 dispose）。
+        log("contextlost", "slave 模式：仅标记 contextLost，不自动 dispose（由父控制器处理）");
+        return;
     }
     void disposeCase("context-lost");
 }
@@ -214,6 +231,66 @@ async function createCaseWithRenderer(first: HTMLCanvasElement): Promise<BenchCa
 }
 
 // ------------------------------------------------------------------ 主流程
+/**
+ * 阶段 5 slave 装配：加载模型 → 建首帧（创建排序 worker）→ 探针按实例绑定 →
+ * 暴露 `window.__CASE_BENCH__`。全程**不自驱**任何测量/渲染循环，也不 dispose。
+ */
+async function setupSlaveMode(ctx: BenchCase, modelUrl: string): Promise<void> {
+    const probe = new GlProbe();
+    probe.attach({
+        gl: ctx.glContextForSlave(),
+        workerProto: window.Worker?.prototype ?? null,
+        rafOwner: window,
+        timerOwner: window,
+        realm: "case-iframe",
+        nowMs: () => performance.now(),
+    });
+    const slave = createCaseSlave({
+        scene: {
+            setResolutionOnce: (w, h) => ctx.setResolutionOnceForSlave(w, h),
+            setCameraFromView: (v, fx, fy) => ctx.setCameraFromViewForSlave(v, fx, fy),
+            frameRender: () => ctx.frameRender(),
+            getResolutionAudit: () => ctx.resolutionAuditForSlave(),
+            readCameraMatrices: () => ctx.readCameraMatricesForSlave(),
+            getWorkloadAudit: () => ctx.workloadAuditForSlave(),
+            getContextState: () => ctx.contextStateForSlave(),
+            getCanvas: () => ctx.canvas,
+            dispose: () => ctx.dispose(),
+        },
+        renderer: {
+            getSortAudit: () => ctx.getSortAuditForSlave(),
+            requestSortOnce: (force) => ctx.requestSortOnceForSlave(force),
+            setBenchFreezeSortRequests: (frozen) => ctx.setBenchFreezeForSlave(frozen),
+            cameraHash: () => ctx.sortCameraHashForSlave(),
+            hashViewProj: (values) => ctx.hashViewProjForSlave(values),
+            getSortWorker: () => ctx.getSortWorkerForSlave(),
+            getFrameSerial: () => ctx.getFrameSerialForSlave(),
+            finishGpu: () => ctx.finishGpuForSlave(),
+        },
+        probe,
+        probeDetach: () => probe.detach(),
+    });
+
+    loadAbort = new AbortController();
+    log("load", `slave 模式：加载 ${modelUrl}`);
+    await ctx.loadSplat(modelUrl, loadAbort.signal);
+    if (disposed) {
+        log("load", "slave 模式：加载完成前已被 dispose，放弃装配");
+        return;
+    }
+    slave.ensureFirstFrame(); // 创建排序 worker（RenderProgram._initialize）
+    const worker = ctx.getSortWorkerForSlave();
+    if (worker) {
+        probe.bindSortWorker(worker, { createdAtMs: performance.now() });
+    }
+    window.__CASE_BENCH__ = createSlaveApi(slave, probe, () => probe.getAuthority());
+    log(
+        "boot",
+        `slave ready（worker=${worker ? 1 : 0} realm=case-iframe frozen=${slave.isFrozen ? 1 : 0} ` +
+            `authority=${JSON.stringify(probe.getAuthority())}）`,
+    );
+}
+
 async function main(): Promise<void> {
     const spec = caseSpecFromUrl();
     if (!spec) {
@@ -260,6 +337,20 @@ async function main(): Promise<void> {
     if (param("ctxlosttest") === "1" && spec.attempt === 0) {
         forcedLossTimer = window.setTimeout(forceContextLoss, FORCED_LOSS_DELAY_MS);
         log("boot", `?ctxlosttest=1：${FORCED_LOSS_DELAY_MS}ms 后强制丢失一次上下文（调试用）`);
+    }
+
+    if (SLAVE) {
+        // 阶段 5：slave 模式到此为止——只装配 window.__CASE_BENCH__，
+        // **不**进入 measureOneRound、**不**注册任何自驱循环、**不**自动 dispose。
+        try {
+            await setupSlaveMode(ctx, spec.modelUrl);
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            log("error", `slave 装配失败：${message}`);
+            reportError("SLAVE_SETUP_FAILED", `slave 装配失败：${message}`);
+            await disposeCase("slave-setup-failed");
+        }
+        return;
     }
 
     loadAbort = new AbortController();

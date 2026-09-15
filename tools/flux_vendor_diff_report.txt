@@ -1,0 +1,79 @@
+# Flux-GS official-vs-vendored file comparison
+official tree: 78f28725b906d7af3501daf04a072fdea1bfca64
+blobs in official tree: 49
+
+## byte-identical (LF): 41
+  = .gitignore
+  = README.md
+  = render_bicycle/index.html
+  = render_bicycle/main.js
+  = render_counter/index.html
+  = render_counter/main.js
+  = render_drjohnson/index.html
+  = render_drjohnson/main.js
+  = render_flowers/index.html
+  = render_flowers/main.js
+  = render_garden/index.html
+  = render_garden/main.js
+  = render_kitchen/index.html
+  = render_kitchen/main.js
+  = render_playroom/index.html
+  = render_playroom/main.js
+  = render_room/index.html
+  = render_room/main.js
+  = render_shared/viewer.css
+  = render_train/index.html
+  = render_train/main.js
+  = render_treehill/index.html
+  = render_treehill/main.js
+  = render_truck/index.html
+  = render_truck/main.js
+  = static/css/bulma-carousel.min.css
+  = static/css/bulma-slider.min.css
+  = static/css/bulma.css.map.txt
+  = static/css/bulma.min.css
+  = static/css/fontawesome.all.min.css
+  = static/images/densification.png
+  = static/images/method.png
+  = static/images/motivation.png
+  = static/images/teaser.png
+  = static/js/bulma-carousel.js
+  = static/js/bulma-carousel.min.js
+  = static/js/bulma-slider.js
+  = static/js/bulma-slider.min.js
+  = static/js/fontawesome.all.min.js
+  = tools/tmc3.js
+  = tools/tmc3.wasm
+
+## identical after CRLF->LF normalization only: 0
+
+## MODIFIED (official_size, local_size): 4
+  M index.html  (11071 -> 16207)
+  M render_shared/main.js  (85835 -> 101326)
+  M static/css/index.css  (14011 -> 2299)
+  M static/js/index.js  (1031 -> 2346)
+
+## MISSING locally: 4
+  - .openai/hosting.json (63 bytes)
+  - static/css/authors.css (3654 bytes)
+  - static/videos/bicycle.mp4 (14097154 bytes)
+  - static/videos/teaser.mp4 (6491987 bytes)
+
+## EXTRA locally (not in official tree): 17
+  + render_bonsai/index.html (720 bytes)
+  + render_bonsai/main.js (65 bytes)
+  + render_stump/index.html (720 bytes)
+  + render_stump/main.js (64 bytes)
+  + scene/bicycle.json (4995740 bytes)
+  + scene/bonsai.json (3241322 bytes)
+  + scene/counter.json (2430005 bytes)
+  + scene/drjohnson.json (2747767 bytes)
+  + scene/flowers.json (4939481 bytes)
+  + scene/garden.json (7287834 bytes)
+  + scene/kitchen.json (3578216 bytes)
+  + scene/playroom.json (1991225 bytes)
+  + scene/room.json (2550067 bytes)
+  + scene/stump.json (3939877 bytes)
+  + scene/train.json (3051204 bytes)
+  + scene/treehill.json (4395068 bytes)
+  + scene/truck.json (2903845 bytes)

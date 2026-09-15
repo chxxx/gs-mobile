@@ -11,6 +11,40 @@ import { WebGLRenderer } from "../../WebGLRenderer";
 import { Scene } from "../../../core/Scene";
 import { perf } from "../../../utils/PerfDebug";
 
+/**
+ * bench：相机哈希（FNV-1a，32 位十六进制）。
+ * 这是"排序结果 ↔ 相机"归因的**唯一哈希实现**——bench 侧 adapter/bridge 必须 import 本函数，
+ * 不得各自实现，否则 `activeCameraHash` 与 `token.cameraHash` 无法比较。
+ */
+export function sortCameraHash(values: ArrayLike<number>, digits = 6): string {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < values.length; i++) {
+        const text = Number.isFinite(values[i]) ? values[i].toFixed(digits) : "NaN";
+        for (let c = 0; c < text.length; c++) {
+            h ^= text.charCodeAt(c);
+            h = Math.imul(h, 0x01000193) >>> 0;
+        }
+        h ^= 0x2c; // ','
+        h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+/** bench：排序审计快照（权威来源；外部 Worker/GL wrap 仅作交叉验证）。 */
+export interface RenderProgramSortAudit {
+    requestSerial: number;
+    completedSerial: number;
+    uploadedSerial: number;
+    activeSerial: number;
+    pendingCount: number;
+    frozen: boolean;
+    outOfOrderResults: number;
+    activeCameraHash: string | null;
+    lastDrawSortSerial: number;
+    lastDrawCameraHash: string | null;
+    workerCreated: boolean;
+}
+
 const vertexShaderSource = /* glsl */ `#version 300 es
 precision highp float;
 precision highp int;
@@ -326,6 +360,23 @@ class RenderProgram extends ShaderProgram {
     private _lastCullTotal = 0;
     private _cullSampleCount = 0;
 
+    // ------------------------------------------------------------------ bench instrumentation
+    // 默认值全部保持"不影响默认路径"：冻结关闭、序号从 0 起、审计字段只累加不参与渲染决策。
+    /** 冻结后续排序请求（静态主协议前置条件；默认 false） */
+    private _benchFreezeSortRequests = false;
+    /** 一次性强制排序标志（force=true 绕过 worker 的 dirty 启发式） */
+    private _benchForceSortOnce = false;
+    private _benchSortSerial = 0;
+    private _benchSortCompletedSerial = 0;
+    private _benchSortUploadedSerial = 0;
+    private _benchSortActiveSerial = 0;
+    private _benchSortPending = 0;
+    private _benchSortOutOfOrder = 0;
+    private _benchActiveCameraHash: string | null = null;
+    private _benchLastDrawSortSerial = 0;
+    private _benchLastDrawCameraHash: string | null = null;
+    private _benchCameraHashBySerial = new Map<number, string>();
+
     protected _initialize: () => void;
     protected _resize: () => void;
     protected _render: () => void;
@@ -408,7 +459,17 @@ class RenderProgram extends ShaderProgram {
                         workerMs?: number;
                         keptCount?: number;
                         totalCount?: number;
+                        sortSerial?: number;
                     };
+
+                    // ------------------------------------------------------------------ bench
+                    // 结果归因：把结果绑定到"某一次请求序号"（worker 原样回传）；
+                    // 旧版 worker 未回传序号时退化为"最近一次请求"，并在 outOfOrder 里体现异常。
+                    const resultSerial =
+                        typeof e.data.sortSerial === "number" ? e.data.sortSerial : this._benchSortSerial;
+                    this._benchSortCompletedSerial = resultSerial;
+                    if (resultSerial < this._benchSortActiveSerial) this._benchSortOutOfOrder++;
+                    if (this._benchSortPending > 0) this._benchSortPending--;
 
                     if (typeof keptCount === "number" && typeof totalCount === "number" && totalCount > 0) {
                         this._lastCullKept = keptCount;
@@ -436,6 +497,11 @@ class RenderProgram extends ShaderProgram {
                     gl.bufferData(gl.ARRAY_BUFFER, depthIndex, gl.DYNAMIC_DRAW);
                     gl.bindBuffer(gl.ARRAY_BUFFER, null);
                     activeDepthBuffer = target;
+                    // bench instrumentation：上传与激活是同一步（同一同步块内），序号在此刻推进
+                    this._benchSortUploadedSerial = resultSerial;
+                    this._benchSortActiveSerial = resultSerial;
+                    this._benchActiveCameraHash =
+                        this._benchCameraHashBySerial.get(resultSerial) ?? this._benchActiveCameraHash;
                     if (perf.enabled) {
                         perf.sample("gl.depthIndexUpload.ms", performance.now() - uploadStart);
                     }
@@ -758,7 +824,24 @@ class RenderProgram extends ShaderProgram {
             if (perf.enabled) {
                 this._lastSortRequestAt = performance.now();
             }
-            this._worker?.postMessage({ viewProj: this._camera.data.viewProj.buffer, cullEnabled: this._cullEnabled });
+            if (!this._benchFreezeSortRequests) {
+                // bench instrumentation：序号 + 相机哈希 + force 标志（worker 会原样回传序号；
+                // force=false 时 worker 的 dirty 启发式与改动前完全一致 ⇒ 默认路径行为不变）
+                this._benchSortSerial++;
+                const forced = this._benchForceSortOnce;
+                this._benchForceSortOnce = false;
+                this._benchSortPending++;
+                this._benchCameraHashBySerial.set(
+                    this._benchSortSerial,
+                    sortCameraHash(this._camera.data.viewProj.buffer),
+                );
+                this._worker?.postMessage({
+                    viewProj: this._camera.data.viewProj.buffer,
+                    cullEnabled: this._cullEnabled,
+                    sortSerial: this._benchSortSerial,
+                    force: forced,
+                });
+            }
 
             const drawSetupStart = performance.now();
             gl.viewport(0, 0, canvas.width, canvas.height);
@@ -782,6 +865,10 @@ class RenderProgram extends ShaderProgram {
 
             const drawSubmitStart = performance.now();
             gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, this.depthIndex.length);
+            // bench instrumentation：本帧 draw 使用的索引就是 438 行刚激活的那一块，
+            // 因此在此刻记录"被 draw 使用"的序号与相机哈希（779-784 之间没有 await）
+            this._benchLastDrawSortSerial = this._benchSortActiveSerial;
+            this._benchLastDrawCameraHash = this._benchActiveCameraHash;
             if (perf.enabled) {
                 perf.sample("gl.drawSubmit.ms", performance.now() - drawSubmitStart);
                 perf.sample("cpu.drawSetup.ms", performance.now() - drawSetupStart);
@@ -891,6 +978,63 @@ class RenderProgram extends ShaderProgram {
 
     get worker() {
         return this._worker;
+    }
+
+    // ------------------------------------------------------------------ bench bridge（权威排序审计）
+    /**
+     * 冻结/解冻后续排序请求。
+     * 冻结后 `_render()` 只做 uniform/clear/bind/draw，不再产生任何排序请求
+     * ⇒ 满足 `static-render-only-synchronized-throughput-v1` 的前置条件。
+     */
+    setBenchFreezeSortRequests(frozen: boolean): void {
+        this._benchFreezeSortRequests = frozen;
+    }
+
+    /**
+     * 只发**一次**排序请求（不渲染），返回该次请求的序号。
+     * `force=true`（默认）时 worker 必须绕过 dirty 启发式并回传同一序号 —— 主表静态协议要求 true。
+     * 返回 null 表示 worker 尚未创建（此时不应进入测量）。
+     */
+    requestSortOnce(force = true): number | null {
+        if (!this._worker || !this._camera) {
+            return null;
+        }
+        this._benchSortSerial++;
+        this._benchSortPending++;
+        this._benchCameraHashBySerial.set(this._benchSortSerial, sortCameraHash(this._camera.data.viewProj.buffer));
+        this._worker.postMessage({
+            viewProj: this._camera.data.viewProj.buffer,
+            cullEnabled: this._cullEnabled,
+            sortSerial: this._benchSortSerial,
+            force,
+        });
+        return this._benchSortSerial;
+    }
+
+    /** 让**下一次**由 `_render()` 发出的请求带 force=true（默认路径不使用）。 */
+    setBenchForceNextSort(): void {
+        this._benchForceSortOnce = true;
+    }
+
+    /** 当前相机（供 bridge 计算 token.cameraHash；与 `_benchCameraHashBySerial` 用同一实现）。 */
+    cameraHash(): string | null {
+        return this._camera ? sortCameraHash(this._camera.data.viewProj.buffer) : null;
+    }
+
+    getSortAudit(): RenderProgramSortAudit {
+        return {
+            requestSerial: this._benchSortSerial,
+            completedSerial: this._benchSortCompletedSerial,
+            uploadedSerial: this._benchSortUploadedSerial,
+            activeSerial: this._benchSortActiveSerial,
+            pendingCount: this._benchSortPending,
+            frozen: this._benchFreezeSortRequests,
+            outOfOrderResults: this._benchSortOutOfOrder,
+            activeCameraHash: this._benchActiveCameraHash,
+            lastDrawSortSerial: this._benchLastDrawSortSerial,
+            lastDrawCameraHash: this._benchLastDrawCameraHash,
+            workerCreated: this._worker !== null,
+        };
     }
 
     get cullEnabled(): boolean {

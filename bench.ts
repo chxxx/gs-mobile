@@ -47,6 +47,11 @@ import {
     effectiveFocalPx,
     expandProfile,
     fmt,
+    fluxSpec,
+    fluxProtocolWarning,
+    FLUX_PROTOCOL_LABEL,
+    FLUX_SOURCE_COMMIT,
+    FLUX_SOURCE_REPO,
     jobsPerDocument,
     jobTimeoutMs,
     loadManifest,
@@ -195,6 +200,22 @@ function sanitizeRoundResult(raw: RoundResult): RoundResult {
         "firstFrameCoveredPct",
         "validateFramesUsed",
         "visibilityInsidePct",
+        "focalPx",
+        "viewHash",
+        "viewHashEnd",
+        "canvasW",
+        "canvasH",
+        "drawingBufferW",
+        "drawingBufferH",
+        "cssW",
+        "cssH",
+        "dpr",
+        "internalScale",
+        "submittedGaussianCount",
+        "visibleGaussianCount",
+        "projectionFovHash",
+        "timerGapMedMs",
+        "timerGapP95Ms",
     ] as const;
     for (const key of numKeys) {
         const value = raw[key];
@@ -202,16 +223,70 @@ function sanitizeRoundResult(raw: RoundResult): RoundResult {
             out[key] = value;
         }
     }
-    const strKeys = ["dataset", "err", "gl", "jobId", "prevErr", "trace", "driver", "timeline"] as const;
+    const strKeys = [
+        "dataset",
+        "err",
+        "gl",
+        "jobId",
+        "prevErr",
+        "trace",
+        "driver",
+        "timeline",
+        "protocol",
+        "protocolSource",
+        "metric",
+        "modificationNotes",
+        "projectionFovKey",
+        "visibilityState",
+        "overrides",
+        "conflicts",
+        "viewMatrix",
+        "viewport",
+        "gaussianLoadNote",
+        "abortedReason",
+    ] as const;
     for (const key of strKeys) {
         const value = raw[key];
         if (typeof value === "string") {
             out[key] = value;
         }
     }
-    if (typeof raw.drawOk === "boolean") out.drawOk = raw.drawOk;
-    if (typeof raw.contextLost === "boolean") out.contextLost = raw.contextLost;
-    if (typeof raw.loseCtx === "boolean") out.loseCtx = raw.loseCtx;
+    // resolutionMode / cameraMode 是联合类型，单独白名单（不能用字符串通用赋值）
+    if (raw.resolutionMode === "flux-native" || raw.resolutionMode === "flux-fixed") {
+        out.resolutionMode = raw.resolutionMode;
+    }
+    if (raw.cameraMode === "auto" || raw.cameraMode === "flux-default" || raw.cameraMode === "flux-hardcoded") {
+        out.cameraMode = raw.cameraMode;
+    }
+    const boolKeys = [
+        "drawOk",
+        "contextLost",
+        "loseCtx",
+        "protocolMatched",
+        "fluxCompatible",
+        "camFrozen",
+        "adaptiveResolution",
+        "resMatch",
+        "gpuSynced",
+        "presentedFps",
+        "paperProtocolVerified",
+        "algorithmModified",
+        "benchmarkLoopModified",
+        "resolutionModified",
+        "cameraModified",
+        "timerClampObserved",
+        "crossResolutionMatched",
+        "crossViewportMatched",
+        "crossCameraMatched",
+        "crossProjectionMatched",
+        "crossProtocolMatched",
+    ] as const;
+    for (const key of boolKeys) {
+        const value = raw[key];
+        if (typeof value === "boolean") {
+            out[key] = value;
+        }
+    }
     return out;
 }
 /** 用户点了"停止测试" */
@@ -300,15 +375,21 @@ const PHASE_TEXT: Record<CasePhase, string> = {
 };
 /** 阶段显示（纯 UI，不参与计时）。 */
 function setPhaseText(phase: CasePhase, detail?: string): void {
+    measuring = phase === "measuring";
     lastPhaseText = detail ? `${PHASE_TEXT[phase]}（${detail}）` : PHASE_TEXT[phase];
     stPhase.textContent = lastPhaseText;
 }
+/** 是否正处于"FPS 采样"阶段：测量期间**禁止**任何诊断 DOM 更新（验收项 11）。 */
+let measuring = false;
 /** 屏上自诊断行（只有 ?diag=1 才显示）：把"渲染区多大 / iframe 在哪 / 子页面画布多大 / 页面是否被撑高 /
  *  当前阶段与子页面最后一条日志"直接印出来，便于看不到渲染时一眼判断是布局问题还是子页面问题。 */
 function startDiagLine(): void {
     if (!DIAG || diagTimer) return;
     diagLine.classList.remove("hidden");
     const tick = (): void => {
+        // 测量期间不更新诊断 DOM：读子页面 DOM + 写自己这行都会引入与渲染无关的开销
+        // （在 rAF 驱动下会直接偷走帧；见 FLUX_FPS_PROTOCOL.md §C.6 验收 11）
+        if (running && measuring) return;
         const area = caseHost.parentElement;
         const frame = caseHost.querySelector("iframe");
         const rect = frame?.getBoundingClientRect();
@@ -330,6 +411,26 @@ function startDiagLine(): void {
     tick();
     diagTimer = window.setInterval(tick, 500);
 }
+// ------------------------------------------------------------------ 协议冲突显著警告（第 4 阶段）
+/**
+ * `proto=flux` 与显式 `driver=<非 timer>` 冲突时必须**显著**提示：
+ * 该轮按用户要求执行，但结果标记 `protocolMatched=false`，禁止与 Flux-GS 的 FPS 直接比较。
+ */
+function showProtocolBanner(): void {
+    const spec = fluxSpec();
+    if (spec.conflicts.length === 0) return;
+    const text = fluxProtocolWarning(spec);
+    console.warn(`[bench][protocol] ${text}`);
+    const bar = document.createElement("div");
+    bar.id = "protocol-warning";
+    bar.textContent = `⚠ ${text}`;
+    bar.style.cssText =
+        "position:fixed;left:0;right:0;top:0;z-index:9999;background:#f85149;color:#fff;" +
+        "font:13px/1.5 system-ui,sans-serif;font-weight:700;padding:8px 12px;text-align:center";
+    document.body.appendChild(bar);
+}
+showProtocolBanner();
+
 function setRunning(next: boolean): void {
     running = next;
     btnStart.disabled = next;
@@ -366,7 +467,40 @@ function buildResultText(st: BenchState): string {
     lines.push(`cold=${st.cold ? 1 : 0}`);
     lines.push(`res=${st.resW}x${st.resH}`);
     lines.push(`frames=${st.benchFrames}`);
-    lines.push(`driver=${param("driver", "raf") === "timer" ? "timer" : "raf"}`);
+    // ---- 第 4~8 阶段：协议 / 驱动 / 分辨率 / 相机 四个审计头（父子两页读同一份 spec）----
+    {
+        const spec = fluxSpec();
+        const lastOk = [...st.results].reverse().find((r) => r.ok);
+        lines.push(`flux_renderer_source=${FLUX_SOURCE_REPO}@${FLUX_SOURCE_COMMIT}`);
+        lines.push(`benchmark_protocol=${spec.protocol === "flux" ? FLUX_PROTOCOL_LABEL : "custom"}`);
+        lines.push(
+            `protocol_matched=${spec.protocolMatched ? "yes" : "no"}` +
+                (spec.conflicts.length > 0 ? ` conflicts=${spec.conflicts.join(",")}` : ""),
+        );
+        lines.push(`flux_compatible=${spec.fluxCompatible ? 1 : 0}`);
+        lines.push(`resolution_mode=${spec.resolutionMode}`);
+        if (lastOk?.canvasW !== undefined) {
+            lines.push(
+                `drawing_buffer=${lastOk.drawingBufferW ?? lastOk.canvasW}x${lastOk.drawingBufferH ?? lastOk.canvasH}`,
+            );
+        }
+        lines.push(`protocol_overrides=${spec.overrides.join(",") || "none"}`);
+        // 指标命名与 GPU 同步（不得称 GPU FPS / 呈现 FPS）＋ 论文口径是否已验证
+        lines.push(`metric=${spec.metric}`);
+        lines.push(`gpu_synced=${spec.gpuSynced ? 1 : 0}`);
+        lines.push(`presented_fps=${spec.presentedFps ? 1 : 0}`);
+        lines.push(`paper_protocol_verified=${spec.paperProtocolVerified ? 1 : 0}`);
+        lines.push(`protocol_source=${spec.protocolSource}`);
+        // 改动拆分（不再用单一的 rendering_modifications=none）
+        lines.push(`algorithm_modified=${spec.modifications.algorithmModified ? 1 : 0}`);
+        lines.push(`benchmark_loop_modified=${spec.modifications.benchmarkLoopModified ? 1 : 0}`);
+        lines.push(`resolution_modified=${spec.modifications.resolutionModified ? 1 : 0}`);
+        lines.push(`camera_modified=${spec.modifications.cameraModified ? 1 : 0}`);
+        lines.push(`modification_notes=${(spec.modifications.notes.join("; ") || "none").replace(/\s+/g, "_")}`);
+        if (lastOk?.viewHash !== undefined) lines.push(`camera_hash=${lastOk.viewHash}`);
+    }
+    lines.push(`driver=${fluxSpec().driver}`);
+    lines.push(`warmup=${warmupFrames()}`);
     lines.push(`validateframe=${param("validateframe", "1") !== "0" ? 1 : 0}`);
     lines.push(`holdms=${parseInt(param("holdms", "0"), 10) || 0}`);
     lines.push(`proto=${param("proto", "")}`);
@@ -398,6 +532,34 @@ function buildResultText(st: BenchState): string {
             `cpu_ms=${fmt(r.cpuMs, 2)}`,
             `covered=${fmt(r.coveredPct, 1)}%`,
             `kept=${fmt(r.keptPct, 1)}%`,
+            // ---- 第 6~8 阶段：分辨率 / 相机 / 负载 审计字段（每轮都打印，便于与 Flux 臂逐条核对）----
+            `res=${r.canvasW ?? r.resW ?? ""}x${r.canvasH ?? r.resH ?? ""}`,
+            `db=${r.drawingBufferW ?? ""}x${r.drawingBufferH ?? ""}`,
+            `viewport=${r.viewport ?? ""}`,
+            `css=${fmt(r.cssW, 0)}x${fmt(r.cssH, 0)}`,
+            `dpr=${fmt(r.dpr, 2)}`,
+            `view_hash=${r.viewHash ?? ""}`,
+            `cam_frozen=${r.camFrozen === undefined ? "" : r.camFrozen ? 1 : 0}`,
+            `res_match=${r.resMatch === undefined ? "" : r.resMatch ? 1 : 0}`,
+            `submitted_gauss=${r.submittedGaussianCount ?? ""}`,
+            `visible_gauss=${r.visibleGaussianCount ?? ""}`,
+            `protocol_matched=${r.protocolMatched === undefined ? "" : r.protocolMatched ? 1 : 0}`,
+            `flux_compatible=${r.fluxCompatible ? 1 : 0}`,
+            `camera_mode=${r.cameraMode ?? ""}`,
+            `fov_key=${r.projectionFovKey ?? ""}`,
+            `fov_hash=${r.projectionFovHash ?? ""}`,
+            `timer_gap_med_ms=${fmt(r.timerGapMedMs, 2)}`,
+            `timer_gap_p95_ms=${fmt(r.timerGapP95Ms, 2)}`,
+            `timer_clamp_observed=${r.timerClampObserved === undefined ? "" : r.timerClampObserved ? 1 : 0}`,
+            `visibility=${r.visibilityState ?? ""}`,
+            `metric=${r.metric ?? ""}`,
+            `gpu_synced=${r.gpuSynced === undefined ? "" : r.gpuSynced ? 1 : 0}`,
+            // 跨臂比对：**未做真机双臂对比时保持空**（由离线比对/人工填写，不得默认 1）
+            `cross_res_matched=${r.crossResolutionMatched === undefined ? "" : r.crossResolutionMatched ? 1 : 0}`,
+            `cross_viewport_matched=${r.crossViewportMatched === undefined ? "" : r.crossViewportMatched ? 1 : 0}`,
+            `cross_camera_matched=${r.crossCameraMatched === undefined ? "" : r.crossCameraMatched ? 1 : 0}`,
+            `cross_projection_matched=${r.crossProjectionMatched === undefined ? "" : r.crossProjectionMatched ? 1 : 0}`,
+            `cross_protocol_matched=${r.crossProtocolMatched === undefined ? "" : r.crossProtocolMatched ? 1 : 0}`,
         ];
         if (diag) {
             // 诊断字段：只描述"这一轮是怎么被隔离执行的"，不参与任何性能指标
@@ -421,6 +583,11 @@ function buildResultText(st: BenchState): string {
                 `gap_max_ms=${fmt(r.gapMaxMs, 2)}`,
                 `ff_covered=${fmt(r.firstFrameCoveredPct, 1)}%`,
                 `vis_inside=${fmt(r.visibilityInsidePct, 1)}%`,
+                `resolution_mode=${r.resolutionMode ?? ""}`,
+                `overrides=${r.overrides ?? ""}`,
+                `conflicts=${r.conflicts ?? ""}`,
+                `gauss_note=${r.gaussianLoadNote ?? ""}`,
+                `aborted_reason=${r.abortedReason ?? ""}`,
                 `timeline=${r.timeline ?? ""}`,
             );
             if (r.trace) tags.push(`trace=${r.trace}`);
@@ -629,6 +796,19 @@ async function runCaseJob(meta: SceneMeta, roundNo: number, st: BenchState, atte
         iframe.style.width = `${st.resW}px`;
         iframe.style.height = `${st.resH}px`;
     }
+    if (fluxSpec().resolutionMode === "flux-native") {
+        // 第 7 阶段：flux-native 的渲染分辨率由**CSS 视口**决定，而参考臂（bench-flux.ts:507-512）
+        // 把它的 iframe 布局成"整台设备的视口"。因此本方法也必须把测试 iframe 设成设备视口，
+        // 否则两边的 CSS 基准不同 ⇒ 原生分辨率不可能相等。
+        const hostW = Math.max(320, window.innerWidth);
+        const hostH = Math.max(320, window.innerHeight);
+        iframe.width = String(hostW);
+        iframe.height = String(hostH);
+        iframe.style.width = `${hostW}px`;
+        iframe.style.height = `${hostH}px`;
+        caseHost.style.overflow = "hidden";
+        logBench("create", `flux-native：测试 iframe 按设备视口布局 ${hostW}x${hostH}（与参考臂一致）`);
+    }
     iframe.setAttribute("scrolling", "no");
     iframe.setAttribute("title", `${meta.id} r${roundNo}`);
     iframe.setAttribute("allow", "fullscreen");
@@ -764,34 +944,11 @@ async function runCaseJob(meta: SceneMeta, roundNo: number, st: BenchState, atte
     if (run.result) {
         // 只接受基本类型字段：Splat / RenderData / ArrayBuffer / TypedArray 之类对象绝不进入结果数组
         const clean = sanitizeRoundResult(run.result);
-        out.ok = clean.ok;
-        out.err = clean.err;
-        out.dataset = clean.dataset ?? out.dataset;
-        out.drawOk = clean.drawOk;
-        out.coveredPct = clean.coveredPct;
-        out.keptPct = clean.keptPct;
-        out.points = clean.points;
-        out.bytes = clean.bytes;
-        out.fetchMs = clean.fetchMs;
-        out.parseMs = clean.parseMs;
-        out.firstFrameMs = clean.firstFrameMs;
-        out.fps = clean.fps;
-        out.cpuMs = clean.cpuMs;
-        out.fx = clean.fx;
-        out.resW = clean.resW;
-        out.resH = clean.resH;
-        out.gl = clean.gl;
-        out.ctxCreate = clean.ctxCreate;
-        out.loseCtx = clean.loseCtx;
-        out.driver = clean.driver;
-        out.frames = clean.frames;
-        out.elapsedMs = clean.elapsedMs;
-        out.renders = clean.renders;
-        out.gapMedMs = clean.gapMedMs;
-        out.gapMinMs = clean.gapMinMs;
-        out.gapMaxMs = clean.gapMaxMs;
-        out.warmupMs = clean.warmupMs;
-        out.firstFrameCoveredPct = clean.firstFrameCoveredPct;
+        // ⚠️ 这里**必须**整体覆盖而不是逐字段列举：`sanitizeRoundResult()` 的白名单会随口径增长
+        // （协议/指标/改动拆分/分辨率/相机/投影/节拍/可见性/跨臂占位…），逐字段列举曾经漏掉新增字段，
+        // 导致结果文本里出现 `res=x db=x view_hash=` 这类空值（已修复）。`clean` 里只有基本类型，
+        // 且缺省的键不会覆盖 `out` 上已有的值（jobId/retryCount 等由父页面自己维护）。
+        Object.assign(out, clean);
         if (clean.fx && clean.fx > 0) focalPxReported = clean.fx;
     } else {
         out.ok = false;
@@ -951,9 +1108,30 @@ function finishBench(st: BenchState, note = "", keepState = false): void {
     rcText.value = text;
     const reportUrl = param("report");
     const head = note ? `${note}：已完成 ${st.results.length} 轮` : "测试完成";
+    const spec = fluxSpec();
+    const lastOk = [...st.results].reverse().find((r) => r.ok);
+    const protocolLines = [
+        `Flux renderer source (vendored copy): ${FLUX_SOURCE_REPO}@${FLUX_SOURCE_COMMIT}`,
+        `Benchmark protocol: ${spec.protocol === "flux" ? FLUX_PROTOCOL_LABEL : "custom"}`,
+        `Protocol source: ${spec.protocolSource}`,
+        `Paper protocol verified: ${spec.paperProtocolVerified ? "yes" : "no（无论文页码/官方代码证据）"}`,
+        `Metric: ${spec.metric}（gpuSynced=${spec.gpuSynced ? 1 : 0}, presentedFps=${spec.presentedFps ? 1 : 0}）`,
+        `Protocol matched: ${spec.protocolMatched ? "yes" : "no"}${spec.conflicts.length > 0 ? `（冲突：${spec.conflicts.join(",")}）` : ""}`,
+        `Resolution mode: ${spec.resolutionMode}`,
+        `Actual drawing buffer: ${lastOk ? `${lastOk.drawingBufferW ?? lastOk.canvasW}x${lastOk.drawingBufferH ?? lastOk.canvasH}` : "-"}`,
+        `Driver: ${spec.driver}${spec.protocol === "flux" && spec.driver !== "timer" ? "（与内嵌副本钩子口径不一致，结果不计入 Flux-compatible）" : ""}`,
+        `Frames: ${st.benchFrames}${spec.overrides.includes(`frames=${st.benchFrames}`) ? "（override）" : ""}`,
+        `Warmup: ${warmupFrames()}${spec.overrides.includes(`warmup=${warmupFrames()}`) ? "（override）" : ""}`,
+        `Camera hash: ${lastOk?.viewHash ?? "-"}`,
+        `Modifications vs official rendering: algorithm=${spec.modifications.algorithmModified ? 1 : 0} ` +
+            `benchmarkLoop=${spec.modifications.benchmarkLoopModified ? 1 : 0} ` +
+            `resolution=${spec.modifications.resolutionModified ? 1 : 0} ` +
+            `camera=${spec.modifications.cameraModified ? 1 : 0}`,
+        `Runtime validation: implemented but not runtime-validated`,
+    ].join("\n");
     rcSummary.textContent = reportUrl
-        ? `${head}：成功 ${okCount}/${st.results.length} 轮。结果将自动提交给测试发起人。`
-        : `${head}：成功 ${okCount}/${st.results.length} 轮。请复制下方文本并发送给测试发起人。`;
+        ? `${head}：成功 ${okCount}/${st.results.length} 轮。结果将自动提交给测试发起人。\n\n${protocolLines}`
+        : `${head}：成功 ${okCount}/${st.results.length} 轮。请复制下方文本并发送给测试发起人。\n\n${protocolLines}`;
     if (ctxExhausted) {
         rcSummary.textContent +=
             "\n本机已无法再创建 WebGL 上下文（canvas.getContext('webgl2') 返回 null）。\n" +

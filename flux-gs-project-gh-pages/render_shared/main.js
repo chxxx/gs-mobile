@@ -310,6 +310,39 @@ function createWorker(self) {
     let depthIndex = new Uint32Array();
     let lastVertexCount = 0;
     let sortRunning;
+    // ------------------------------------------------------------------ bench bridge（阶段 6）
+    // 仅对 {type:"bench-sort"|"bench-barrier"} 生效；默认路径（{view: viewProj}）语义完全不变。
+    let sortScheduled = false; // 已排队一次补排（setTimeout）但尚未执行
+    let queuedReplacementPresent = false; // 已有更新的 viewProj 等待补排
+    let benchInFlight = null; // 严格单飞：在飞的 bench sort serial（null = 无）
+    // bench 强制排序**绑定到具体 view 数组与 serial**：不得被 legacy/replacement 的 runSort() 错误消费
+    let benchPendingSerial = null;
+    let benchPendingView = null;
+    let benchBarrierQueue = []; // 待 ack 的 barrier（异步 ack，**不得**同步循环等待）
+    /**
+     * quiescent 必须四者同时满足（不得只检查 sortRunning）：
+     *   sortRunning=false ∧ sortScheduled=false ∧ queuedReplacementPresent=false ∧ benchInFlight=null
+     */
+    const benchQuiescent = () =>
+        !sortRunning && !sortScheduled && !queuedReplacementPresent && benchInFlight === null;
+    /** worker 真正 quiescent 后才异步 ack 已排队的 barrier。 */
+    const ackBenchBarriersIfQuiescent = () => {
+        if (benchBarrierQueue.length === 0) return;
+        if (!benchQuiescent()) return;
+        const pending = benchBarrierQueue;
+        benchBarrierQueue = [];
+        for (const req of pending) {
+            self.postMessage({
+                type: "bench-barrier-ack",
+                barrierSerial: req.barrierSerial,
+                workerBusy: sortRunning,
+                sortScheduled,
+                queuedReplacementPresent,
+                benchInFlight,
+                quiescent: true,
+            });
+        }
+    };
 
     let tmc3Module = null;
     let pendingMobileGS = null;
@@ -553,14 +586,47 @@ function contractToUnisphereInPlace(x, y, z, out) {
     }
 
     function runSort(viewProj) {
-        if (!buffer) return;
+        // 绑定校验（前置项 1）：只有这次 runSort 用的**正是 bench 请求的那个 view 数组**才算强制 bench sort；
+        // legacy `{view}` 或 replacement 触发的 runSort 绝不会消费到 bench 的 serial/force。
+        const benchForcedThisRun = benchPendingView !== null && benchPendingView === viewProj;
+        const benchSerial = benchForcedThisRun ? benchPendingSerial : null;
+        if (benchForcedThisRun) {
+            benchPendingView = null;
+            benchPendingSerial = null;
+        }
+        if (!buffer) {
+            // bench：无 buffer 也必须回传原 sortSerial（失败路径不得让 controller 只靠 timeout）
+            if (benchSerial !== null) {
+                self.postMessage({
+                    type: "bench-sort-result",
+                    failure: "no-buffer",
+                    sortSerial: benchSerial,
+                    force: true,
+                });
+                benchInFlight = null;
+            }
+            ackBenchBarriersIfQuiescent();
+            return;
+        }
         const f_buffer = new Float32Array(buffer);
         if (lastVertexCount == vertexCount) {
             let dot =
                 lastProj[2] * viewProj[2] +
                 lastProj[6] * viewProj[6] +
                 lastProj[10] * viewProj[10];
-            if (Math.abs(dot - 1) < 0.01) {
+            // 只有 type==="bench-sort" && force===true 才绕过该启发式；默认请求仍可提前返回。
+            if (!benchForcedThisRun && Math.abs(dot - 1) < 0.01) {
+                if (benchSerial !== null) {
+                    self.postMessage({
+                        type: "bench-sort-result",
+                        skipped: "dot-equivalent",
+                        dot: dot,
+                        sortSerial: benchSerial,
+                        force: true,
+                    });
+                    benchInFlight = null;
+                }
+                ackBenchBarriersIfQuiescent();
                 return;
             }
         } else {
@@ -601,9 +667,19 @@ function contractToUnisphereInPlace(x, y, z, out) {
         console.timeEnd("sort");
 
         lastProj = viewProj;
-        self.postMessage({ depthIndex, viewProj, vertexCount }, [
-            depthIndex.buffer,
-        ]);
+        // bench：成功路径回传原 sortSerial（新增字段；默认路径解构时忽略，语义不变）
+        self.postMessage(
+            {
+                depthIndex,
+                viewProj,
+                vertexCount,
+                sortSerial: benchForcedThisRun ? benchSerial : null,
+                force: benchForcedThisRun,
+            },
+            [depthIndex.buffer],
+        );
+        if (benchForcedThisRun) benchInFlight = null;
+        ackBenchBarriersIfQuiescent();
     }
 
     const throttledSort = () => {
@@ -611,10 +687,22 @@ function contractToUnisphereInPlace(x, y, z, out) {
             sortRunning = true;
             let lastView = viewProj;
             runSort(lastView);
+            sortScheduled = true;
             setTimeout(() => {
                 sortRunning = false;
-                if (lastView !== viewProj) throttledSort();
+                sortScheduled = false;
+                if (lastView !== viewProj) {
+                    queuedReplacementPresent = true;
+                    throttledSort();
+                } else {
+                    queuedReplacementPresent = false;
+                }
+                // 只有此刻（三者皆空）才允许 ack barrier
+                ackBenchBarriersIfQuiescent();
             }, 0);
+        } else if (sortRunning && viewProj) {
+            // 排序进行中又来了新 viewProj ⇒ 存在待补排（供 barrier 判定，不改变原有语义）
+            queuedReplacementPresent = true;
         }
     };
 
@@ -1193,6 +1281,41 @@ function contractToUnisphere(x, y, z) {
     
     let shBuffer = null;
     self.onmessage = async (e) => {
+        // ------------------------------------------------------------------ bench bridge（阶段 6）
+        // 严格命名空间：只有 type==="bench-sort" 才进入 bench 语义；默认路径（无 type）不受影响。
+        if (e.data.type === "bench-sort") {
+            if (e.data.force !== true) {
+                self.postMessage({
+                    type: "bench-sort-rejected",
+                    reason: "force-required",
+                    sortSerial: e.data.sortSerial ?? null,
+                });
+                return;
+            }
+            // 严格单飞：并发 bench sort 明确拒绝，**不覆盖**前一个
+            if (benchInFlight !== null || benchPendingSerial !== null) {
+                self.postMessage({
+                    type: "bench-sort-rejected",
+                    reason: "single-flight",
+                    benchInFlight,
+                    benchPendingSerial,
+                    sortSerial: e.data.sortSerial ?? null,
+                });
+                return;
+            }
+            benchInFlight = e.data.sortSerial ?? null;
+            benchPendingSerial = e.data.sortSerial ?? null;
+            benchPendingView = e.data.view;
+            viewProj = e.data.view;
+            throttledSort();
+            return;
+        }
+        if (e.data.type === "bench-barrier") {
+            benchBarrierQueue.push({ barrierSerial: e.data.barrierSerial ?? null });
+            // 异步 ack：只有 worker 真正 quiescent（sortRunning/sortScheduled/replacement 三者皆空）才回复
+            ackBenchBarriersIfQuiescent();
+            return;
+        }
         if (e.data.mobilegs) {
             if (!tmc3Module) {
                 console.log("WASM not ready yet. Queuing payload...");

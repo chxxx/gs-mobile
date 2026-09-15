@@ -11,6 +11,40 @@
  *      避免"父页显示的口径"和"子页实际跑的口径"分叉。
  */
 import { chipSlug, guessChip } from "./bench-chip";
+import { fluxProtocolSpecFromSearch } from "./bench-flux-protocol";
+import type { CameraMode, FluxProtocolSpec, ResolutionMode } from "./bench-flux-protocol";
+
+// 口径常量/工具的统一出口：父子两页与其它 bench 文件都从这里取（实现只在 bench-flux-protocol.ts 一份）
+export {
+    FLUX_GPU_SYNCED,
+    FLUX_METRIC,
+    FLUX_PAPER_PROTOCOL_VERIFIED,
+    FLUX_PRESENTED_FPS,
+    FLUX_PROTOCOL_LABEL,
+    FLUX_PROTOCOL_SOURCE,
+    FLUX_SOURCE_COMMIT,
+    FLUX_SOURCE_REPO,
+    fluxModificationBreakdown,
+    fluxNativeBufferSize,
+    fluxProtocolWarning,
+    formatResolutionAudit,
+    projectionFovHash,
+    projectionFovKey,
+    projectionFovMatches,
+    replicationFocalPx,
+    resolutionAuditKey,
+    resolutionAuditMatches,
+    roundView16,
+    viewMatrixHash,
+    viewMatrixMatches,
+} from "./bench-flux-protocol";
+export type {
+    CameraMode,
+    FluxModificationBreakdown,
+    FluxProtocolSpec,
+    ResolutionAudit,
+    ResolutionMode,
+} from "./bench-flux-protocol";
 
 // ------------------------------------------------------------------ URL 参数与数据格式
 export function param(name: string, dflt = ""): string {
@@ -35,29 +69,59 @@ export function sleep(ms: number): Promise<void> {
 }
 
 // ------------------------------------------------------------------ 测帧口径开关（与 Flux-GS 臂对齐）
-/** 参考协议（Flux-GS 原协议）：`?proto=flux` → 焦距取它的 COLMAP 焦距、计帧前不预热。 */
-export const PROTO_FLUX = param("proto", "") === "flux";
+/**
+ * 测帧口径开关（与内嵌副本的 `runFluxBenchmark()` 钩子对齐）：
+ * 唯一来源是 `bench-flux-protocol.ts`。
+ * `?proto=flux` ⇒ driver=timer、warmup=0、frames=300、相机冻结、默认 flux-native 画布。
+ * 父子两页与单元测试读的是同一份实现，避免口径分叉。
+ */
+let cachedFluxSpec: FluxProtocolSpec | null = null;
+export function fluxSpec(): FluxProtocolSpec {
+    if (!cachedFluxSpec) {
+        let search = "";
+        try {
+            search = location.search || "";
+        } catch {
+            /* 非浏览器环境（单元测试）：按空查询串处理 */
+        }
+        cachedFluxSpec = fluxProtocolSpecFromSearch(search);
+    }
+    return cachedFluxSpec;
+}
+/** 内嵌副本钩子协议：`?proto=flux`。 */
+export const PROTO_FLUX = fluxSpec().protocol === "flux";
 /** 三方同视角：`?cam=flux` → 用 Flux-GS 原代码里的相机（见 bench-measure 的 applyFluxCamera）。 */
 export const CAM_FLUX = param("cam", "") === "flux";
-/** 计帧前预热帧数：参考协议（Flux-GS 原协议）为 0，旧 1600×1063 口径为 10；`?warmup=N` 可显式覆盖。 */
+/** 计帧前预热帧数：内嵌副本钩子协议为 0（钩子本体没有 warmup 参数），旧 1600×1063 口径为 10；`?warmup=N` 可显式覆盖。 */
 export function warmupFrames(): number {
-    const n = parseInt(param("warmup", PROTO_FLUX ? "0" : "10"), 10);
-    return Number.isFinite(n) && n >= 0 ? n : 0;
+    return fluxSpec().warmup;
 }
-/** 测帧数（与旧口径一致：默认 300 帧，`?frames=N` 覆盖）。 */
+/** 测帧数（参考协议默认 300；`?frames=N` 覆盖，结果头会标为 override）。 */
 export function benchFrameCount(): number {
-    return parseInt(param("frames", "300"), 10) || 300;
+    return fluxSpec().frames;
 }
-/** 测帧分辨率（与旧口径一致：默认 1600×1063，`?res=WxH` 覆盖）。 */
+/** 测帧分辨率（旧口径默认 1600×1063；`?proto=flux` 且未给 force/res 时为 flux-native，由视口决定）。 */
 export function resolution(): { w: number; h: number } {
-    const parts = param("res", "1600x1063").split("x");
-    return { w: parseInt(parts[0], 10) || 1600, h: parseInt(parts[1], 10) || 1063 };
+    const spec = fluxSpec();
+    if (spec.forcedRes) return { w: spec.forcedRes.w, h: spec.forcedRes.h };
+    // flux-native：真实尺寸由设备视口与模型字节数决定（子页面算完后回传真实值），
+    // 这里给一个"视口尺寸"的预置值，父页只用于布局与显示。
+    let w = 1600;
+    let h = 1063;
+    try {
+        w = Math.max(1, Math.round(window.innerWidth || w));
+        h = Math.max(1, Math.round(window.innerHeight || h));
+    } catch {
+        /* ignore */
+    }
+    return { w, h };
 }
 /** 相机焦距参数所对应的实际像素焦距（与 bench-measure 的 applyFocalFromParam 一致）。
  *  父页面没有 camera 对象，结果头 `fx=` 优先用子页面每轮上报的真实值，取不到时才回退到这里。 */
 export function effectiveFocalPx(): number {
-    const fx = parseFloat(param("fx", PROTO_FLUX ? "1159.588" : "0"));
-    return Number.isFinite(fx) && fx > 0 ? fx : 1132;
+    const spec = fluxSpec();
+    if (spec.focalPx > 0) return spec.focalPx;
+    return 1132;
 }
 
 // ------------------------------------------------------------------ 场景清单
@@ -296,6 +360,94 @@ export interface RoundResult {
     visibilityInsidePct?: number;
     /** 本轮时间线（诊断）：mark 名:相对毫秒，用 / 分隔 */
     timeline?: string;
+    // ---- 第 4~8 阶段新增：协议 / 分辨率 / 相机 三个审计块（全部是"证明可比性"用的字段）----
+    /** 参考协议名（`proto=flux` 时为 "Flux setTimeout(0) throughput"） */
+    protocol?: string;
+    /** 是否严格按参考协议执行（无 driver 冲突） */
+    protocolMatched?: boolean;
+    /** 是否可归类为 Flux-compatible FPS（必须 protocolMatched 且 driver=timer） */
+    fluxCompatible?: boolean;
+    /** 显式覆盖项（frames/warmup/force/res/fx），例："frames=500 warmup=30" */
+    overrides?: string;
+    /** 冲突参数（例："driver=raf"） */
+    conflicts?: string;
+    /** 分辨率协议：flux-native / flux-fixed */
+    resolutionMode?: ResolutionMode;
+    /** 请求的像素焦距（相机实际使用的 fx/fy） */
+    focalPx?: number;
+    /** 本轮完整 view matrix（16 个数，逗号分隔，1e-3 取整） */
+    viewMatrix?: string;
+    /** view matrix 的 FNV-1a 哈希（与 Flux 臂 `view` 用同一函数计算） */
+    viewHash?: number;
+    /** 测帧结束时再次计算的哈希：与 viewHash 不同 ⇒ 测量期间相机发生了漂移 */
+    viewHashEnd?: number;
+    /** 相机是否在整个测量窗口内保持冻结（且与测帧开始时一致） */
+    camFrozen?: boolean;
+    /** 实际 canvas 后备缓冲尺寸 */
+    canvasW?: number;
+    canvasH?: number;
+    /** gl.drawingBufferWidth/Height */
+    drawingBufferW?: number;
+    drawingBufferH?: number;
+    /** gl.getParameter(gl.VIEWPORT) */
+    viewport?: string;
+    /** CSS 显示尺寸（**只记录，不当渲染分辨率**；取不到时 0） */
+    cssW?: number;
+    cssH?: number;
+    dpr?: number;
+    /** 内部渲染尺度（本方法恒为 1） */
+    internalScale?: number;
+    adaptiveResolution?: boolean;
+    /** 渲染分辨率是否与请求/协议一致（fixed 模式要求严格相等） */
+    resMatch?: boolean;
+    /** 提交给 drawArraysInstanced 的实例数（高斯点数） */
+    submittedGaussianCount?: number;
+    /** 视锥/排序后真正参与绘制的实例数（无剔除统计时等于 submitted，见 gaussianLoadNote） */
+    visibleGaussianCount?: number;
+    /** 负载统计口径说明 */
+    gaussianLoadNote?: string;
+    /** 该轮作废原因（hidden / context-lost / stopped …） */
+    abortedReason?: string;
+    // ---- 指标命名与"改动拆分"（第 1 步修正：不再用单一 rendering_modifications=none）----
+    /** 指标名：unsynchronized-webgl-frame-submission-throughput（不得称 GPU FPS / 呈现 FPS） */
+    metric?: string;
+    /** 测量窗口内是否等待 GPU 完成（恒为 false） */
+    gpuSynced?: boolean;
+    /** 是否为呈现帧率（恒为 false） */
+    presentedFps?: boolean;
+    /** 论文口径是否已被验证（当前恒为 false；没有任何论文/官方代码证据） */
+    paperProtocolVerified?: boolean;
+    /** 复刻对象（= 内嵌副本新增的 runFluxBenchmark() 钩子，不是"论文协议"） */
+    protocolSource?: string;
+    /** shader/排序/剔除/解码/draw 是否被改（false） */
+    algorithmModified?: boolean;
+    /** 计时循环是否被改（true：新增计帧分支 + 删除官方无条件 rAF） */
+    benchmarkLoopModified?: boolean;
+    /** 会话内是否改了画布/投影分辨率（force/res ⇒ true） */
+    resolutionModified?: boolean;
+    /** 会话内是否改了相机（cam=flux / fluxcam=N ⇒ true） */
+    cameraModified?: boolean;
+    /** 改动备注（分号分隔） */
+    modificationNotes?: string;
+    /** 机位来源：auto / flux-default / flux-hardcoded */
+    cameraMode?: CameraMode;
+    /** 投影 FOV key："2fx/w,2fy/h"（整矩阵不可比：两边 near/far 不同） */
+    projectionFovKey?: string;
+    /** 投影 FOV 哈希（跨臂投影判据） */
+    projectionFovHash?: number;
+    /** 相邻帧开始间隔的中位数 / P95（诊断，timer 节拍判断用） */
+    timerGapMedMs?: number;
+    timerGapP95Ms?: number;
+    /** 是否实测到 setTimeout(0) 的 ~4ms 节拍聚集（条件判定，不是常量） */
+    timerClampObserved?: boolean;
+    /** 测量结束时的 document.visibilityState */
+    visibilityState?: string;
+    // ---- 跨臂比对（由离线比对工具/人工填写；未做真机对比时保持空，不得默认 1）----
+    crossResolutionMatched?: boolean;
+    crossViewportMatched?: boolean;
+    crossCameraMatched?: boolean;
+    crossProjectionMatched?: boolean;
+    crossProtocolMatched?: boolean;
 }
 
 export interface BenchState {
@@ -488,9 +640,15 @@ export function buildCasePageUrl(spec: CaseJobRequest): string {
     url.searchParams.set("attempt", String(spec.attempt));
     url.searchParams.set("token", spec.token);
     url.searchParams.set("model", spec.modelUrl);
-    // 用运行态覆盖 res/frames：resume 续跑（URL 里没有参数）时子页面与父页面口径仍然一致
-    url.searchParams.set("res", `${spec.resW}x${spec.resH}`);
+    // 用运行态覆盖 frames：resume 续跑（URL 里没有参数）时子页面与父页面口径仍然一致
     url.searchParams.set("frames", String(spec.frames));
+    // res 只在 flux-fixed 下写：flux-native 的渲染分辨率由子页面视口决定，
+    // 一旦在这里塞一个 res=WxH，子页面就会把它当成"强制分辨率"而切到 flux-fixed（口径分叉）。
+    if (fluxSpec().resolutionMode === "flux-fixed") {
+        url.searchParams.set("res", `${spec.resW}x${spec.resH}`);
+    } else {
+        url.searchParams.delete("res");
+    }
     return url.href;
 }
 

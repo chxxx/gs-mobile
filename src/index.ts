@@ -6,6 +6,7 @@ export { Splat } from "./splats/Splat";
 export { Splatv } from "./splats/Splatv";
 export { CameraData } from "./cameras/CameraData";
 export { Camera } from "./cameras/Camera";
+export { sortCameraHash } from "./renderers/webgl/programs/RenderProgram";
 export { Scene } from "./core/Scene";
 export { Loader } from "./loaders/Loader";
 export { PLYLoader } from "./loaders/PLYLoader";

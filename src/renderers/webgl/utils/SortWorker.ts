@@ -27,6 +27,14 @@ let allocationPending = false;
 let sorting = false;
 let cullEnabled = true;
 
+/**
+ * bench instrumentation（增量字段，默认路径行为不变）：
+ * `pendingSortSerial` = 最近一次请求携带的排序序号，结果消息原样回传，
+ * 使主线程能把"结果"严格归因到"某一次请求"；`pendingForce` 记录该请求是否要求强制排序。
+ */
+let pendingSortSerial: number | null = null;
+let pendingForce = false;
+
 async function initWasm() {
     if (!wasmModule) {
         try {
@@ -116,7 +124,7 @@ const allocateBuffers = async () => {
  *   clipPos = (proj*view) * (objectTransform) * position
  * using exactly the same matrices the shader composes (viewProj * transform).
  */
-const cullFrustum = (order: Uint32Array): Uint32Array => {
+const cullFrustum = (order: Uint32Array<ArrayBuffer>): Uint32Array<ArrayBuffer> => {
     if (!sortData || viewProj.length !== 16) {
         return order;
     }
@@ -226,7 +234,9 @@ const runSort = () => {
         }
 
         const depthIndex = new Uint32Array(heapU32.buffer, depthIndexPtr, sortData.vertexCount);
-        let detachedDepthIndex = new Uint32Array(depthIndex.slice().buffer);
+        // 类型注解仅用于消除既有 TS2322（`Uint32Array<ArrayBufferLike>` → `Uint32Array<ArrayBuffer>`）：
+        // 不改变运行时数据、复制次数，也不改变下方 transferable 语义。
+        let detachedDepthIndex: Uint32Array<ArrayBuffer> = new Uint32Array(depthIndex.slice().buffer);
 
         if (cullEnabled) {
             detachedDepthIndex = cullFrustum(detachedDepthIndex);
@@ -238,13 +248,16 @@ const runSort = () => {
                 workerMs: performance.now() - workerStart,
                 keptCount: detachedDepthIndex.length,
                 totalCount: sortData.vertexCount,
+                // bench instrumentation：把请求序号原样回传（新增字段，不影响传输内容与 transfer）
+                sortSerial: pendingSortSerial,
+                forced: pendingForce,
             },
             [detachedDepthIndex.buffer],
         );
     } catch (error) {
         // 把真实原因打出来（原来只回一个空 depthIndex，导致"画面全黑却没有任何报错"）
         console.error("[SortWorker] 排序失败：", error);
-        self.postMessage({ depthIndex: new Uint32Array(0) }, []);
+        self.postMessage({ depthIndex: new Uint32Array(0), sortSerial: pendingSortSerial, failed: true }, []);
     }
 
     lock = false;
@@ -286,7 +299,15 @@ self.onmessage = (e) => {
         allocateBuffers();
     }
     if (e.data.viewProj) {
-        if ((e.data.viewProj as number[]).every((item) => viewProj.includes(item)) === false) {
+        // bench instrumentation：先记录本次请求的序号与 force 标志（默认路径只是多带两个字段）
+        if (typeof e.data.sortSerial === "number") {
+            pendingSortSerial = e.data.sortSerial;
+        }
+        pendingForce = e.data.force === true;
+
+        // force === true 时**必须**置 dirty（绕过"矩阵相同就不重排"的启发式，
+        // 否则主线程"请求一次 → 等该次结果"会永远等不到回传）。
+        if (pendingForce || (e.data.viewProj as number[]).every((item) => viewProj.includes(item)) === false) {
             viewProj = e.data.viewProj;
             dirty = true;
         }

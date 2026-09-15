@@ -9,8 +9,26 @@
  *     会连带把渲染器/wasm 模块拉进父页面。父页面靠"不导入"来保证 bench 模式下零 WebGL 上下文。
  */
 import * as SPLAT from "./src/index";
-import { CAM_FLUX, PROTO_FLUX, param } from "./bench-shared";
+import { CAM_FLUX, fluxSpec, param } from "./bench-shared";
 import type { RoundResult, SceneMeta } from "./bench-shared";
+import {
+    fluxNativeBufferSize,
+    formatResolutionAudit,
+    projectionFovHash,
+    projectionFovKey,
+    replicationFocalPx,
+    resolutionAuditFrom,
+    runFluxLoop,
+    timerClampObservedFrom,
+    viewMatrixHash,
+} from "./bench-flux-protocol";
+import type { FluxLoopResult, ResolutionAudit, ThroughputDriver } from "./bench-flux-protocol";
+import type { ResolutionAudit as SlaveResolutionAudit, WorkloadAudit as SlaveWorkloadAudit } from "./bench-audit";
+import type { ContextState as SlaveContextState, SortAudit as SlaveSortAudit } from "./bench-controller";
+
+export type { SlaveResolutionAudit, SlaveWorkloadAudit, SlaveContextState, SlaveSortAudit };
+
+export type { ThroughputDriver } from "./bench-flux-protocol";
 
 /** Flux-GS 原相机资产（`bench-flux-camera.json`，由 tools/extract_flux_camera.py 抽出）。 */
 export interface FluxCameraAsset {
@@ -36,10 +54,9 @@ export interface MeasureOptions {
     onMark?: (mark: string, detail?: string) => void;
 }
 
-/** 测帧驱动方式：raf = 每个 requestAnimationFrame 渲染一帧（默认）；timer = 旧的 setTimeout(0) 链 */
-export type ThroughputDriver = "raf" | "timer";
+/** 测帧驱动方式见 `bench-flux-protocol.ts`：`timer` = 参考协议（setTimeout(0) 链），`raf` = 旧口径。 */
 
-/** 测帧统计（诊断字段；FPS 公式未变：frames / 整段墙钟秒数）。 */
+/** 测帧统计（诊断字段；FPS 公式与参考协议一致：frames / 整段墙钟秒数）。 */
 export interface ThroughputStats {
     driver: ThroughputDriver;
     /** 计划帧数（= frames 参数） */
@@ -57,9 +74,25 @@ export interface ThroughputStats {
     warmupMs: number;
     aborted: boolean;
     note: string;
+    /** 协议是否与参考协议一致（无 driver 冲突） */
+    protocolMatched: boolean;
+    /** 是否可归类为 Flux-compatible FPS（protocolMatched && driver === "timer"） */
+    fluxCompatible: boolean;
+    /** 作废原因（"" = 正常完成；hidden / context-lost / stopped / …） */
+    abortedReason: string;
+    /** 相邻帧开始间隔的中位数 / P95（诊断） */
+    timerGapMedMs: number;
+    timerGapP95Ms: number;
+    /** 是否**实测到** setTimeout(0) 节拍聚集（条件判定；不是"约 250fps 上限"的常量结论） */
+    timerClampObserved: boolean;
+    /** 测量结束时的 document.visibilityState */
+    visibilityState: string;
+    /** 本轮实际分辨率审计块（canvas / drawingBuffer / viewport / css …） */
+    resolution: ResolutionAudit | null;
 }
 
 function emptyThroughput(driver: ThroughputDriver, note: string): ThroughputStats {
+    const spec = fluxSpec();
     return {
         driver,
         frames: 0,
@@ -74,6 +107,14 @@ function emptyThroughput(driver: ThroughputDriver, note: string): ThroughputStat
         warmupMs: 0,
         aborted: true,
         note,
+        protocolMatched: spec.protocolMatched,
+        fluxCompatible: false,
+        abortedReason: note,
+        timerGapMedMs: 0,
+        timerGapP95Ms: 0,
+        timerClampObserved: false,
+        visibilityState: "",
+        resolution: null,
     };
 }
 
@@ -96,6 +137,10 @@ export class BenchCase {
     loseContextCalled = false;
     /** `frameRender()` 的累计调用次数（诊断：用来证明"测帧区间里确实发生了 N 次 render"） */
     renderCalls = 0;
+    /** WebGL 上下文丢失标记：由 bench-case.ts 的 onContextLost 置位；置位后测帧必须立即作废 */
+    contextLost = false;
+    /** 最近一次分辨率审计块（applyResolutionProtocol 的输出，供结果上报） */
+    lastResolution: ResolutionAudit | null = null;
 
     private _fluxCamera: FluxCameraAsset | null = null;
 
@@ -160,28 +205,177 @@ export class BenchCase {
         );
     }
 
+    // ------------------------------------------------------------------ 第 6/7 阶段：分辨率协议
     /**
-     * 帧率测量。**默认由 requestAnimationFrame 驱动，每个 RAF 恰好 render 一帧**：
-     * 这样每一帧都是"被合成器调度、真正提交"的帧，不可能测成 CPU 提交循环。
-     * `?driver=timer` 可切回旧的 `setTimeout(0)` 链（仅用于与历史数据对照；会被 rAF 的 vsync 影响，
-     * 因此默认口径是 rAF，并在结果头写明 `driver=`）。
+     * 应用协议分辨率，**复刻官方 Flux-GS 的画布策略**（FLUX_FPS_PROTOCOL.md §C.3）：
+     *   - `flux-fixed`（force=WxH / 显式 res=WxH）：两边强制相同 drawing buffer；
+     *   - `flux-native`（proto=flux 且未强制）：`downsample = 字节/32 > 500000 ? 1 : 1/dpr`，
+     *     `buffer = round(css / downsample)`（官方 `main.js:1551-1552` + `1688-1689`）。
      *
-     * 计时口径不变：FPS = frames / (整段墙钟秒数)，整段墙钟 = 从第一个测帧前的时刻到最后一帧之后的时刻。
+     * 焦距同时按"两边 FOV 相同"对齐：fixed 直接用 Flux 焦距（官方 benchres 模式下 projW 就是 W），
+     * native 按 `bufferW / cssW` 缩放（官方投影用的是 CSS 视口宽度）。
+     *
+     * @param modelBytes 本轮模型下载后的 body 字节数（官方用它决定 downsample）；0/负数 = 未知
      */
-    async runThroughputFrames(frames: number, warmup = 10): Promise<ThroughputStats> {
-        const driver: ThroughputDriver = param("driver", "raf") === "timer" ? "timer" : "raf";
+    applyResolutionProtocol(modelBytes: number): ResolutionAudit {
+        const spec = fluxSpec();
+        const renderer = this.renderer;
+        const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+        const cssW = Math.max(1, Math.round(this.canvas.clientWidth || window.innerWidth || 1));
+        const cssH = Math.max(1, Math.round(this.canvas.clientHeight || window.innerHeight || 1));
+        let bufW: number;
+        let bufH: number;
+        if (spec.resolutionMode === "flux-fixed") {
+            const size = spec.forcedRes ?? { w: 1600, h: 1063 };
+            bufW = size.w;
+            bufH = size.h;
+        } else {
+            const size = fluxNativeBufferSize(cssW, cssH, modelBytes, dpr);
+            bufW = size.w;
+            bufH = size.h;
+        }
+        if (renderer) {
+            renderer.disableAutoResize();
+            renderer.setPixelRatio(1);
+            renderer.setSize(bufW, bufH);
+        }
+        if (spec.focalPx > 0) {
+            const fx = replicationFocalPx(spec, bufW, cssW);
+            this.camera.data.fx = fx;
+            this.camera.data.fy = fx;
+            this.camera.update();
+        }
+        this.lastResolution = this.resolutionAudit();
+        return this.lastResolution;
+    }
+
+    /** 分辨率审计块：canvas / drawingBuffer / viewport / css / dpr / 内部尺度 / 自适应开关。 */
+    resolutionAudit(): ResolutionAudit {
+        const spec = fluxSpec();
+        const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+        const gl = this.renderer?.gl as WebGL2RenderingContext | undefined;
+        let viewport: [number, number, number, number] | undefined;
+        if (gl) {
+            try {
+                const v = gl.getParameter(gl.VIEWPORT) as Int32Array | number[];
+                if (v && v.length >= 4) viewport = [Number(v[0]), Number(v[1]), Number(v[2]), Number(v[3])];
+            } catch {
+                /* ignore */
+            }
+        }
+        return resolutionAuditFrom(
+            this.canvas,
+            gl
+                ? {
+                      drawingBufferWidth: gl.drawingBufferWidth,
+                      drawingBufferHeight: gl.drawingBufferHeight,
+                      viewport,
+                  }
+                : null,
+            dpr,
+            spec.resolutionMode,
+        );
+    }
+
+    // ------------------------------------------------------------------ 第 8 阶段：相机 / 负载审计
+    /** 完整 view matrix + 哈希（与 Flux 臂回报的 `view` 用同一个哈希函数，可直接比对）。 */
+    cameraAudit(): { view16: number[]; hash: number; focalPx: number } {
+        const view16 = Array.from(this.camera.data.viewMatrix.buffer as unknown as ArrayLike<number>);
+        return { view16, hash: viewMatrixHash(view16), focalPx: this.camera.data.fx };
+    }
+
+    /** 该轮是否必须作废：被取消 / 上下文丢失 / 页面隐藏（三者都不产生可用数据）。 */
+    abortReason(): string {
+        if (this.stopped) return "stopped";
+        if (this.contextLost) return "context-lost";
+        try {
+            if (typeof document !== "undefined" && document.visibilityState === "hidden") return "hidden";
+        } catch {
+            /* ignore */
+        }
+        return "";
+    }
+
+    /** 高斯负载：提交给 draw 的实例数 + 视锥保留估计（用于判断"矩阵相同但负载是否不同"）。 */
+    gaussianLoad(submitted: number): { submitted: number; visible: number; note: string } {
+        const cull = this.renderer?.renderProgram?.cullStats;
+        if (cull && cull.total > 0 && cull.samples > 0) {
+            return { submitted, visible: Math.round(cull.total * cull.keptRatio), note: "renderer-cull" };
+        }
+        return { submitted, visible: submitted, note: "no-cull-stats(visible=submitted)" };
+    }
+
+    /**
+     * 第 5 阶段：与 Flux-GS `runFluxBenchmark()` **逐行一致**的测帧（共享 harness，
+     * 见 `bench-flux-protocol.ts` 的 `runFluxLoop`）：
+     *   - 驱动 = `setTimeout(…, 0)`（不是 rAF）；
+     *   - 每次迭代：`render()` → 排下一帧（timer 开销计入 elapsed）；
+     *   - 计时起点 = 第 1 帧 render **结束**时刻，终点 = 第 N 帧 render **结束**时刻；
+     *   - `fps = frames / (elapsed/1000)`；无预热（warmup=0）；不等 GPU；测量期间零 DOM 写入；
+     *   - 页面隐藏 / 上下文丢失 / 被取消 ⇒ 本轮作废（返回 abortedReason）。
+     */
+    runFluxCompatibleBenchmark(frames: number, warmup: number): Promise<FluxLoopResult> {
+        return runFluxLoop(frames, warmup, {
+            render: () => this.frameRender(),
+            schedule: (cb) => {
+                window.setTimeout(cb, 0);
+            },
+            now: () => performance.now(),
+            shouldAbort: () => this.abortReason() || null,
+        });
+    }
+
+    /**
+     * 帧率测量的**调度器**（本方法不再自己实现计时口径）：
+     *   - `driver === "timer"`（`proto=flux` 的默认值）⇒ 走 {@link runFluxCompatibleBenchmark}，
+     *     与 Flux-GS `runFluxBenchmark()` 是**同一个协议**，结果可归类为 Flux-compatible FPS；
+     *   - `driver === "raf"`（未传 proto 时的旧默认，或用户显式 `?driver=raf`）⇒ 保留旧 rAF 循环
+     *     （先等 vsync 再 render），结果**永远不会**被标记为 Flux-compatible。
+     */
+    async runThroughputFrames(frames: number, warmup: number = fluxSpec().warmup): Promise<ThroughputStats> {
+        const spec = fluxSpec();
+        const resolution = this.lastResolution;
+        if (spec.driver === "timer") {
+            // 参考协议：完全走共享 harness（render → setTimeout(0)；计时从第 1 帧 render 结束起）
+            const rendersBefore = this.renderCalls;
+            const loop = await this.runFluxCompatibleBenchmark(frames, warmup);
+            const renders = this.renderCalls - rendersBefore;
+            return {
+                driver: "timer",
+                frames: loop.requested,
+                rendered: loop.frames,
+                renders,
+                elapsedMs: loop.elapsedMs,
+                fps: loop.fps,
+                cpuMs: loop.frames > 0 ? loop.elapsedMs / loop.frames : 0,
+                // 诊断口径统一：timer 路径的 gapMin/Med/Max 与 timer_gap_* 都填真实值（旧 rAF 路径同名同义）
+                gapMinMs: loop.gapMinMs,
+                gapMedMs: loop.gapMedMs,
+                gapMaxMs: loop.gapMaxMs,
+                warmupMs: 0,
+                aborted: loop.abortedReason !== "",
+                note: loop.abortedReason,
+                protocolMatched: spec.protocolMatched,
+                fluxCompatible: spec.protocolMatched,
+                abortedReason: loop.abortedReason,
+                timerGapMedMs: loop.gapMedMs,
+                timerGapP95Ms: loop.gapP95Ms,
+                timerClampObserved: loop.timerClampObserved,
+                visibilityState: loop.visibilityState,
+                resolution,
+            };
+        }
+        // ---- 旧 rAF 口径（保留用于历史数据对照；**永远不会**被标记为 Flux-compatible）----
+        const driver: ThroughputDriver = "raf";
         const nextFrame = (): Promise<void> =>
             new Promise<void>((resolve) => {
-                if (driver === "raf") {
-                    requestAnimationFrame(() => resolve());
-                } else {
-                    setTimeout(resolve, 0);
-                }
+                requestAnimationFrame(() => resolve());
             });
 
         const tWarmup0 = performance.now();
         for (let i = 0; i < warmup; i++) {
-            if (this.stopped) return emptyThroughput(driver, "warmup 期间被取消");
+            const abort = this.abortReason();
+            if (abort) return emptyThroughput(driver, abort);
             this.frameRender();
             await nextFrame();
         }
@@ -192,17 +386,15 @@ export class BenchCase {
         const gaps: number[] = [];
         let last = t0;
         let rendered = 0;
-        let aborted = false;
+        let abortedReason = "";
         while (rendered < frames) {
-            if (this.stopped) {
-                aborted = true;
-                break;
-            }
+            abortedReason = this.abortReason();
+            if (abortedReason) break;
             await nextFrame();
             const now = performance.now();
             gaps.push(now - last);
             last = now;
-            this.frameRender(); // 每个 RAF（或每个 timer tick）**只**渲染并统计一帧
+            this.frameRender(); // 每个 RAF **只**渲染并统计一帧
             rendered++;
         }
         const t1 = performance.now();
@@ -215,14 +407,26 @@ export class BenchCase {
             rendered,
             renders: this.renderCalls - rendersBefore,
             elapsedMs,
-            fps: elapsedMs > 0 ? frames / (elapsedMs / 1000) : 0,
+            fps: elapsedMs > 0 ? rendered / (elapsedMs / 1000) : 0,
             cpuMs: rendered > 0 ? elapsedMs / rendered : 0,
             gapMinMs: sortedGaps[0] ?? 0,
             gapMedMs: medianGapMs,
             gapMaxMs: sortedGaps[sortedGaps.length - 1] ?? 0,
             warmupMs,
-            aborted,
-            note: aborted ? "测帧过程中被取消（stopped）" : "",
+            aborted: abortedReason !== "",
+            note: abortedReason,
+            protocolMatched: spec.protocolMatched,
+            fluxCompatible: false, // rAF 驱动不是参考协议，任何情况下都不算 Flux-compatible
+            abortedReason,
+            timerGapMedMs: medianGapMs,
+            timerGapP95Ms:
+                sortedGaps.length > 0
+                    ? sortedGaps[Math.min(sortedGaps.length - 1, Math.ceil(0.95 * sortedGaps.length) - 1)]
+                    : 0,
+            timerClampObserved: timerClampObservedFrom(gaps),
+            visibilityState:
+                typeof document !== "undefined" && document.visibilityState ? String(document.visibilityState) : "",
+            resolution,
         };
     }
 
@@ -358,9 +562,13 @@ export class BenchCase {
     }
 
     /** 焦距（像素）：默认 1132（gsplat.js 自带）。`?proto=flux` 时取 Flux-GS 的 COLMAP 焦距，
-     *  从而两个渲染器在同一画布下得到完全相同的视场角；`?fx=N` 可显式覆盖。 */
+     *  从而两个渲染器在同一画布下得到完全相同的视场角；`?fx=N` 可显式覆盖。
+     *  注意：`flux-native` 下最终焦距还要按 `bufferW / cssW` 缩放，见 applyResolutionProtocol()。 */
     applyFocalFromParam(): void {
-        const fx = parseFloat(param("fx", PROTO_FLUX ? "1159.588" : "0"));
+        const spec = fluxSpec();
+        const raw = param("fx", "");
+        const parsed = raw === "" ? NaN : parseFloat(raw);
+        const fx = Number.isFinite(parsed) && parsed > 0 ? parsed : spec.focalPx;
         if (Number.isFinite(fx) && fx > 0) {
             this.camera.data.fx = fx;
             this.camera.data.fy = fx;
@@ -414,6 +622,196 @@ export class BenchCase {
     /** 排序/剔除统计（诊断：total>0 说明排序 worker 已经回过消息，画面才有真实实例）。 */
     renderProgramCullTotal(): number {
         return this.renderer?.renderProgram?.cullStats?.total ?? -1;
+    }
+
+    // ------------------------------------------------------------------ 阶段 5：slave bridge（全部薄转发）
+    /** slave：一次性的分辨率设置（复用既有 setBenchmarkResolution）。 */
+    setResolutionOnceForSlave(w: number, h: number): void {
+        this.setBenchmarkResolution(w, h);
+    }
+
+    /**
+     * slave：把 view matrix 反解为 position + quaternion 后写入相机。
+     * 复用 CameraData.update 的**正向**公式（`Quaternion.FromMatrix3` 与 `Matrix3.RotationFromQuaternion` 互逆），
+     * **不引入第二套相机约定**；反解误差在 `recomposeErrorMax` 里如实返回（>1e-4 说明约定不匹配，必须排查）。
+     */
+    setCameraFromViewForSlave(viewMatrix: readonly number[], fx: number, fy: number): { recomposeErrorMax: number } {
+        const v = Array.from(viewMatrix);
+        const r0 = [v[0], v[1], v[2]];
+        const r1 = [v[4], v[5], v[6]];
+        const r2 = [v[8], v[9], v[10]];
+        const q = SPLAT.Quaternion.FromMatrix3(
+            new SPLAT.Matrix3(r0[0], r0[1], r0[2], r1[0], r1[1], r1[2], r2[0], r2[1], r2[2]),
+        );
+        const t = [v[12], v[13], v[14]];
+        // CameraData.update 里 t_view = -R·position ⇒ position = -Rᵀ·t_view
+        const px = -(r0[0] * t[0] + r1[0] * t[1] + r2[0] * t[2]);
+        const py = -(r0[1] * t[0] + r1[1] * t[1] + r2[1] * t[2]);
+        const pz = -(r0[2] * t[0] + r1[2] * t[1] + r2[2] * t[2]);
+        this.camera.data.fx = fx;
+        this.camera.data.fy = fy;
+        this.camera.position = new SPLAT.Vector3(px, py, pz);
+        this.camera.rotation = q;
+        this.camera.update();
+        this.cameraLocked = true;
+        const actual = this.camera.data.viewMatrix.buffer as unknown as ArrayLike<number>;
+        let err = 0;
+        for (let i = 0; i < 16 && i < v.length; i++) err = Math.max(err, Math.abs(actual[i] - v[i]));
+        return { recomposeErrorMax: err };
+    }
+
+    /** slave：读相机 flat 矩阵 + 内参（矩阵按本仓库存储布局原样给出，供 CameraAudit 使用）。 */
+    readCameraMatricesForSlave(): {
+        viewMatrix: number[];
+        viewProj: number[];
+        fx: number;
+        fy: number;
+        near: number;
+        far: number;
+        width: number;
+        height: number;
+        positionX: number;
+        positionY: number;
+        positionZ: number;
+    } {
+        const d = this.camera.data;
+        return {
+            viewMatrix: Array.from(d.viewMatrix.buffer as unknown as ArrayLike<number>),
+            viewProj: Array.from(d.viewProj.buffer as unknown as ArrayLike<number>),
+            fx: d.fx,
+            fy: d.fy,
+            near: d.near,
+            far: d.far,
+            width: d.width,
+            height: d.height,
+            positionX: this.camera.position.x,
+            positionY: this.camera.position.y,
+            positionZ: this.camera.position.z,
+        };
+    }
+
+    /** slave：唯一哈希实现（转发 `RenderProgram.sortCameraHash`；slave 不得自带第二套）。 */
+    hashViewProjForSlave(values: ArrayLike<number>): string {
+        return SPLAT.sortCameraHash(values);
+    }
+
+    /** slave：分辨率审计（四项 + CSS/DPR；与 bench-audit 的 ResolutionAudit 同构）。 */
+    resolutionAuditForSlave(): SlaveResolutionAudit {
+        const s = this.canvasStats();
+        const gl = this.renderer?.gl as WebGL2RenderingContext | undefined;
+        const vp = gl
+            ? (Array.from(gl.getParameter(gl.VIEWPORT) as ArrayLike<number>) as number[])
+            : [0, 0, s.bufW, s.bufH];
+        return {
+            requested: [s.bufW, s.bufH],
+            canvas: [this.canvas.width, this.canvas.height],
+            drawingBuffer: [s.glW, s.glH],
+            viewport: [vp[0] ?? 0, vp[1] ?? 0, vp[2] ?? 0, vp[3] ?? 0],
+            internalFramebuffer: [s.glW, s.glH],
+            renderScale: 1,
+            adaptiveResolution: false,
+            cssWidth: s.cssW,
+            cssHeight: s.cssH,
+            devicePixelRatio: window.devicePixelRatio || 1,
+        };
+    }
+
+    /** slave：context 状态（contextLost 由 onContextLost 置位，如实上报）。 */
+    contextStateForSlave(): SlaveContextState {
+        const s = this.canvasStats();
+        return {
+            contextLost: this.contextLost,
+            rendererName: this.glRendererName(),
+            canvasWidth: s.bufW,
+            canvasHeight: s.bufH,
+        };
+    }
+
+    /**
+     * slave：工作量审计。
+     * 阶段 5 只填**运行时**可测字段；模型来源字段（modelStorageBytes / networkTransferBytes /
+     * decodedBodyBytes / modelHash / …）留 null，由阶段 8 的 adapter 按 §12.6 补齐
+     * （禁止含糊的 `modelBytes`）。
+     */
+    workloadAuditForSlave(): SlaveWorkloadAudit {
+        const cullTotal = this.renderProgramCullTotal();
+        return {
+            model: {
+                modelStorageBytes: null,
+                networkTransferBytes: null,
+                decodedBodyBytes: null,
+                modelHash: null,
+                modelSourceUrl: null,
+                modelSourceCommit: null,
+                modelDownloadDate: null,
+                rendererSourceCommit: null,
+            },
+            gaussianTotal: null,
+            gaussianVisibleMean: null,
+            gaussianSubmittedMean: null,
+            shDegree: null,
+            drawCallsMean: null,
+            sortRequests: null,
+            sortCompleted: cullTotal >= 0 ? cullTotal : null,
+            sortWaited: null,
+            lodEnabled: false,
+            cullingEnabled: false,
+            adaptiveQuality: false,
+        };
+    }
+
+    /** slave：排序审计（**直接转发** `RenderProgram.getSortAudit()`，本层不实现任何计数器）。 */
+    getSortAuditForSlave(): SlaveSortAudit {
+        return (
+            this.renderer?.renderProgram?.getSortAudit() ?? {
+                requestSerial: 0,
+                completedSerial: 0,
+                uploadedSerial: 0,
+                activeSerial: 0,
+                pendingCount: 0,
+                frozen: false,
+                outOfOrderResults: 0,
+                activeCameraHash: null,
+                lastDrawSortSerial: 0,
+                lastDrawCameraHash: null,
+            }
+        );
+    }
+
+    /** slave：只发一次排序请求（转发 `RenderProgram.requestSortOnce`）。 */
+    requestSortOnceForSlave(force: boolean): number | null {
+        return this.renderer?.renderProgram?.requestSortOnce(force) ?? null;
+    }
+
+    /** slave：冻结/解冻（转发 `RenderProgram.setBenchFreezeSortRequests`）。 */
+    setBenchFreezeForSlave(frozen: boolean): void {
+        this.renderer?.renderProgram?.setBenchFreezeSortRequests(frozen);
+    }
+
+    /** slave：当前相机哈希（转发 `RenderProgram.cameraHash()` ⇒ 内部即 `sortCameraHash(viewProj)`）。 */
+    sortCameraHashForSlave(): string | null {
+        return this.renderer?.renderProgram?.cameraHash() ?? null;
+    }
+
+    /** slave：排序 worker 实例（供探针按实例绑定）。 */
+    getSortWorkerForSlave(): Worker | null {
+        return this.renderer?.renderProgram?.worker ?? null;
+    }
+
+    /** slave：frame serial = 既有 `renderCalls` 计数（**不新增**计数器）。 */
+    getFrameSerialForSlave(): number {
+        return this.renderCalls;
+    }
+
+    /** slave：GPU 同步边界（复用同一个 renderer 上下文的 `gl.finish()`）。 */
+    finishGpuForSlave(): void {
+        const gl = this.renderer?.gl as WebGL2RenderingContext | undefined;
+        gl?.finish();
+    }
+
+    /** slave：已有 WebGL2 上下文（供探针包装；**不创建**新上下文）。 */
+    glContextForSlave(): WebGL2RenderingContext | null {
+        return (this.renderer?.gl as WebGL2RenderingContext | undefined) ?? null;
     }
 
     /**
@@ -597,6 +995,41 @@ export class BenchCase {
     }
 }
 
+/** 从 Resource Timing 里定位本轮模型下载条目（token 即模型 URL 上的 `ts=` 值）。 */
+function findModelResourceEntry(token: string): PerformanceResourceTiming | undefined {
+    const entries = performance.getEntriesByType("resource") as PerformanceResourceTiming[];
+    for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i];
+        if (!token || e.name.includes(`ts=${token}`)) return e;
+    }
+    return undefined;
+}
+
+/**
+ * 把分辨率审计块写进本轮结果，并判定"渲染分辨率是否符合协议"（不符 ⇒ 该轮无效，见 FLUX_FPS_PROTOCOL.md §C.3.3）。
+ * CSS 尺寸只记录、绝不参与判定。
+ */
+function applyResolutionAuditToRound(base: RoundResult, audit: ResolutionAudit, reqW: number, reqH: number): void {
+    const expectedW = audit.resolutionMode === "flux-fixed" ? Math.max(1, Math.round(reqW)) : audit.canvasWidth;
+    const expectedH = audit.resolutionMode === "flux-fixed" ? Math.max(1, Math.round(reqH)) : audit.canvasHeight;
+    const glOk = audit.drawingBufferWidth === audit.canvasWidth && audit.drawingBufferHeight === audit.canvasHeight;
+    const sizeOk = audit.canvasWidth === expectedW && audit.canvasHeight === expectedH;
+    base.resolutionMode = audit.resolutionMode;
+    base.canvasW = audit.canvasWidth;
+    base.canvasH = audit.canvasHeight;
+    base.drawingBufferW = audit.drawingBufferWidth;
+    base.drawingBufferH = audit.drawingBufferHeight;
+    base.viewport = audit.viewport.join(",");
+    base.cssW = audit.cssWidth;
+    base.cssH = audit.cssHeight;
+    base.dpr = audit.devicePixelRatio;
+    base.internalScale = audit.internalRenderScale;
+    base.adaptiveResolution = audit.adaptiveResolution;
+    base.resMatch = glOk && sizeOk;
+    base.resW = audit.canvasWidth;
+    base.resH = audit.canvasHeight;
+}
+
 /**
  * 单轮测量（旧 bench.ts `measureRound` 的逐行等价实现，计时起点/终点与结果字段完全一致）。
  *
@@ -616,6 +1049,26 @@ export async function measureOneRound(
 ): Promise<RoundResult> {
     const base: RoundResult = { scene: meta.id, round: roundNo, ts: new Date().toISOString(), ok: false };
     base.dataset = meta.dataset;
+    // 第 4 阶段：协议元信息（父子两页读同一份 spec；结果头据此标注 protocol_matched / flux_compatible）
+    {
+        const spec = fluxSpec();
+        base.protocol = spec.label;
+        base.protocolSource = spec.protocolSource;
+        base.protocolMatched = spec.protocolMatched;
+        base.fluxCompatible = spec.fluxCompatible;
+        base.overrides = spec.overrides.join(" ");
+        base.conflicts = spec.conflicts.join(" ");
+        base.metric = spec.metric;
+        base.gpuSynced = spec.gpuSynced;
+        base.presentedFps = spec.presentedFps;
+        base.paperProtocolVerified = spec.paperProtocolVerified;
+        base.cameraMode = spec.cameraMode;
+        base.algorithmModified = spec.modifications.algorithmModified;
+        base.benchmarkLoopModified = spec.modifications.benchmarkLoopModified;
+        base.resolutionModified = spec.modifications.resolutionModified;
+        base.cameraModified = spec.modifications.cameraModified;
+        base.modificationNotes = spec.modifications.notes.join("; ");
+    }
     /** 时间线：每个 mark 记相对本轮开始的毫秒数（诊断用，不参与任何指标） */
     const timeline: Array<[string, number]> = [];
     const tRound0 = performance.now();
@@ -630,13 +1083,12 @@ export async function measureOneRound(
 
     const tStart = performance.now();
     ctx.resetScene();
-    ctx.setBenchmarkResolution(opts.resW, opts.resH);
-    {
-        // item 6：确认测的确实是 res 尺寸（canvas 后备缓冲 + gl.drawingBuffer）
-        const cs = ctx.canvasStats();
-        const sizeOk = cs.bufW === opts.resW && cs.bufH === opts.resH && cs.glW === opts.resW && cs.glH === opts.resH;
-        mark("scale-set", `${ctx.canvasStatsLine()}${sizeOk ? "" : " ⚠ 后备缓冲与 res 不一致！"}`);
-    }
+    // 第 6/7 阶段：分辨率先按协议预置（flux-native 的真实值要等模型字节数确定后再复核一次）
+    ctx.applyResolutionProtocol(0);
+    mark(
+        "scale-set",
+        `${formatResolutionAudit(ctx.lastResolution ?? ctx.resolutionAudit())}（请求 ${opts.resW}x${opts.resH}）`,
+    );
     opts.onPhase?.("loading");
     try {
         const splat = await ctx.loadSplat(opts.modelUrl, opts.signal);
@@ -648,11 +1100,37 @@ export async function measureOneRound(
         }
         const tLoaded = performance.now();
         mark("decode-done", `splats=${splat.data?.vertexCount ?? "?"}`);
+        // ---- 第 6/7 阶段：模型字节数确定后复核分辨率（flux-native 与官方同一条分支判断）----
+        const rtEntry = findModelResourceEntry(opts.token);
+        const modelBytes = rtEntry ? rtEntry.decodedBodySize || rtEntry.transferSize || 0 : 0;
+        const audit = ctx.applyResolutionProtocol(modelBytes);
+        applyResolutionAuditToRound(base, audit, opts.resW, opts.resH);
+        mark("scale-set-final", `${formatResolutionAudit(audit)} bytes=${modelBytes}`);
+        if (!base.resMatch) {
+            base.err = `渲染分辨率与协议不一致（该轮无效）：${formatResolutionAudit(audit)}`;
+            mark("FAIL-resolution");
+            base.timeline = formatTimeline(timeline);
+            return base;
+        }
         // cam=flux：用 Flux-GS 原相机（位置 + 姿态 + 焦距）复现同一视角；资产缺失时才退回包围盒取景
         if (!(CAM_FLUX && ctx.applyFluxCamera())) {
             ctx.frameScene(splat);
         }
         ctx.camera.update();
+        // ---- 第 8 阶段：完整 view matrix + 哈希（与 Flux 臂 `view` 用同一哈希函数）----
+        {
+            const cam = ctx.cameraAudit();
+            base.viewMatrix = cam.view16.map((v) => Math.round(v * 1000) / 1000).join(",");
+            base.viewHash = cam.hash;
+            base.focalPx = cam.focalPx;
+            // 投影：整矩阵两边不可比（near/far 不同），只比 FOV 项 2fx/w、2fy/h
+            base.projectionFovKey = projectionFovKey(cam.focalPx, cam.focalPx, base.canvasW ?? 0, base.canvasH ?? 0);
+            base.projectionFovHash = projectionFovHash(cam.focalPx, cam.focalPx, base.canvasW ?? 0, base.canvasH ?? 0);
+            mark(
+                "camera-audit",
+                `viewHash=${cam.hash} focal=${cam.focalPx} fov=${base.projectionFovKey} camLocked=${ctx.cameraLocked}`,
+            );
+        }
         mark("camera-ready", `camLocked=${ctx.cameraLocked}`);
         opts.onPhase?.("sorting");
         // 让出事件循环等待深度排序回传——此时才产生真实的首帧绘制
@@ -665,19 +1143,9 @@ export async function measureOneRound(
             return base;
         }
 
-        const entries = performance.getEntriesByType("resource") as PerformanceResourceTiming[];
-        let fetchMs: number | undefined;
-        let bytes: number | undefined;
-        let foundEntry: PerformanceResourceTiming | undefined;
-        for (let i = entries.length - 1; i >= 0; i--) {
-            const e = entries[i];
-            if (opts.token && e.name.includes(`ts=${opts.token}`)) {
-                foundEntry = e;
-                fetchMs = e.duration;
-                bytes = e.transferSize > 0 ? e.transferSize : undefined;
-                break;
-            }
-        }
+        const foundEntry = rtEntry;
+        const fetchMs = foundEntry ? foundEntry.duration : undefined;
+        const bytes = foundEntry && foundEntry.transferSize > 0 ? foundEntry.transferSize : undefined;
         // 论文口径：首帧时间从"文件获取完成"之后算起
         // responseEnd 与 performance.now() 同时间轴，不能再加 performance.timeOrigin
         const fetchEndWall = foundEntry ? foundEntry.responseEnd : tStart;
@@ -689,8 +1157,6 @@ export async function measureOneRound(
         base.points = splat.data ? splat.data.vertexCount : undefined;
         base.bytes = bytes;
         base.fx = ctx.camera.data.fx;
-        base.resW = opts.resW;
-        base.resH = opts.resH;
         base.gl = ctx.glRendererName();
 
         // ---- 门禁 1：深度排序必须回过消息，否则"首帧"其实是空帧 → 本轮判失败，不进入测帧 ----
@@ -733,9 +1199,11 @@ export async function measureOneRound(
         mark("throughput-start", `frames=${opts.frames} warmup=${opts.warmup} driver=${param("driver", "raf")}`);
         const perf = await ctx.runThroughputFrames(opts.frames, opts.warmup);
         // ---- 门禁 3：测帧必须是完整跑完的，且每帧都真的 render 过 ----
+        // 作废原因（hidden / context-lost / stopped）优先写入，便于把"页面被切走"与"渲染坏了"分开
         if (perf.aborted || perf.rendered < opts.frames) {
-            base.err = `测帧未完成（rendered=${perf.rendered}/${opts.frames} ${perf.note}）`;
-            mark("FAIL-throughput-aborted");
+            base.abortedReason = perf.abortedReason;
+            base.err = `测帧未完成（rendered=${perf.rendered}/${opts.frames}${perf.abortedReason ? ` reason=${perf.abortedReason}` : ""} ${perf.note}）`;
+            mark("FAIL-throughput-aborted", perf.abortedReason);
             base.timeline = formatTimeline(timeline);
             return base;
         }
@@ -758,7 +1226,35 @@ export async function measureOneRound(
         base.gapMaxMs = perf.gapMaxMs;
         base.warmupMs = perf.warmupMs;
         base.firstFrameCoveredPct = firstFrameCovered >= 0 ? firstFrameCovered : undefined;
+        base.fluxCompatible = base.fluxCompatible === true && perf.fluxCompatible;
+        base.protocolMatched = perf.protocolMatched;
+        base.timerGapMedMs = perf.timerGapMedMs;
+        base.timerGapP95Ms = perf.timerGapP95Ms;
+        base.timerClampObserved = perf.timerClampObserved;
+        base.visibilityState = perf.visibilityState;
         base.timeline = formatTimeline(timeline);
+
+        // ---- 第 8 阶段：测量期间相机必须保持冻结（哈希漂移 ⇒ 该轮无效）----
+        {
+            const camEnd = ctx.cameraAudit();
+            base.viewHashEnd = camEnd.hash;
+            base.camFrozen = camEnd.hash === base.viewHash;
+            if (!base.camFrozen) {
+                base.ok = false;
+                base.err = `测量期间相机发生了漂移（viewHash ${base.viewHash} → ${camEnd.hash}），该轮无效`;
+                mark("FAIL-camera-drift");
+                base.timeline = formatTimeline(timeline);
+                return base;
+            }
+        }
+        // ---- 第 8 阶段：高斯负载（提交实例数 / 可见估计），用于判断"矩阵相同但负载是否不同"----
+        {
+            const load = ctx.gaussianLoad(splat.data.vertexCount);
+            base.submittedGaussianCount = load.submitted;
+            base.visibleGaussianCount = load.visible;
+            base.gaussianLoadNote = load.note;
+            mark("gaussian-load", `submitted=${load.submitted} visible=${load.visible} note=${load.note}`);
+        }
 
         // ---- 人工确认用：测完之后先保持画面 holdms 毫秒再上报（默认 0，不进任何指标）----
         const holdMs = Math.max(0, parseInt(param("holdms", "0"), 10) || 0);

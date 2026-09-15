@@ -20,6 +20,20 @@
  *      bench-flux.html?...&force=1600x1063   （强制分辨率，与旧口径对照）
  */
 import { guessChip as guessChipFrom } from "./bench-chip";
+import {
+    FLUX_FOCAL_PX,
+    FLUX_GPU_SYNCED,
+    FLUX_METRIC,
+    FLUX_PAPER_PROTOCOL_VERIFIED,
+    FLUX_PRESENTED_FPS,
+    FLUX_PROTOCOL_LABEL,
+    FLUX_PROTOCOL_SOURCE,
+    FLUX_SOURCE_COMMIT,
+    FLUX_SOURCE_REPO,
+    projectionFovHash,
+    projectionFovKey,
+    viewMatrixHash,
+} from "./bench-flux-protocol";
 
 // ------------------------------------------------------------------ DOM
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -100,6 +114,22 @@ interface RoundResult {
     coveredPct?: number;
     /** 机位指纹（视图矩阵前 6 项；每轮应完全一致，否则说明机位未固定） */
     poseKey?: string;
+    /**
+     * 完整视图矩阵的 FNV-1a 哈希（与本文臂 `view_hash` 用同一函数计算，见 bench-flux-protocol.ts）。
+     * 跨臂判据：两臂哈希不同 ⇒ 该轮机位不一致，结果无效（FLUX_FPS_PROTOCOL.md §C.4）。
+     */
+    viewHash?: number;
+    /** 该轮渲染器上报的实际 drawing buffer（Flux 侧 = gl.canvas.width/height） */
+    drawingBufferW?: number;
+    drawingBufferH?: number;
+    /** 投影 FOV key（fixed/benchres 模式下由 focal+尺寸推导；native 模式下钩子未上报 CSS 视口 ⇒ 空） */
+    fovKey?: string;
+    /** 投影 FOV 哈希（与本文臂 fov_hash 用同一函数；仅 fixed 模式可比） */
+    fovHash?: number;
+    /** 投影基准：benchres | css-viewport */
+    projBasis?: string;
+    /** 该轮使用的像素焦距（Flux 侧恒为 focal_px=1159.5880733038064） */
+    focalPx?: number;
     /** `pose=ours` 时机位是否成功注入（false 表示仍用 Flux-GS 自己的机位） */
     poseInjected?: boolean;
     /** dump=1 时导出的世界坐标点数 */
@@ -574,6 +604,25 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
         base.resH = bench.resH || base.resH;
         base.coveredPct = bench.coveredPct;
         base.poseKey = Array.isArray(bench.view) ? bench.view.slice(0, 6).join(",") : undefined;
+        // 完整矩阵哈希（同一哈希函数 → 可与本文臂的 view_hash 直接比对）
+        base.viewHash = Array.isArray(bench.view) && bench.view.length === 16 ? viewMatrixHash(bench.view) : undefined;
+        base.drawingBufferW = bench.resW || base.resW;
+        base.drawingBufferH = bench.resH || base.resH;
+        // 投影 FOV（**不是整矩阵**：两边 near/far 不同，见 bench-flux-protocol.ts 的说明）
+        {
+            base.focalPx = FLUX_FOCAL_PX;
+            const fixed = /^\d+x\d+$/.test(param("force", ""));
+            const w = Number(base.drawingBufferW || 0);
+            const h = Number(base.drawingBufferH || 0);
+            if (fixed && w > 0 && h > 0) {
+                base.fovKey = projectionFovKey(FLUX_FOCAL_PX, FLUX_FOCAL_PX, w, h);
+                base.fovHash = projectionFovHash(FLUX_FOCAL_PX, FLUX_FOCAL_PX, w, h);
+                base.projBasis = "benchres";
+            } else {
+                // native：官方投影用的是 innerWidth/innerHeight(CSS 视口)，钩子没有上报这两个值 ⇒ 无法推导
+                base.projBasis = "css-viewport(钩子未上报 innerWidth/innerHeight ⇒ fov 不可比)";
+            }
+        }
         base.ok = true;
         refreshDeviceLabel(cw); // 首帧已过，GPU 名一定已上报（读的是它在用的上下文，零新建）
         return base;
@@ -606,6 +655,28 @@ function buildResultText(st: BenchState): string {
     lines.push(`cold=${st.cold ? 1 : 0}`);
     lines.push(`res=${st.resW}x${st.resH}`);
     lines.push(`frames=${st.benchFrames}`);
+    lines.push(`flux_renderer_source=${FLUX_SOURCE_REPO}@${FLUX_SOURCE_COMMIT}`);
+    lines.push(`protocol_source=${FLUX_PROTOCOL_SOURCE}`);
+    lines.push(`benchmark_protocol=${FLUX_PROTOCOL_LABEL}`);
+    lines.push(`paper_protocol_verified=${FLUX_PAPER_PROTOCOL_VERIFIED ? 1 : 0}`);
+    lines.push(`metric=${FLUX_METRIC}`);
+    lines.push(`gpu_synced=${FLUX_GPU_SYNCED ? 1 : 0}`);
+    lines.push(`presented_fps=${FLUX_PRESENTED_FPS ? 1 : 0}`);
+    lines.push(`driver=timer（内嵌副本 runFluxBenchmark 内部的 setTimeout(0) 链）`);
+    // 改动拆分（本臂就是内嵌副本本身：算法未改、计时循环已改、分辨率/相机按会话）
+    lines.push(`algorithm_modified=0`);
+    lines.push(`benchmark_loop_modified=1`);
+    lines.push(`resolution_modified=${/^\d+x\d+$/.test(param("force", "")) ? 1 : 0}`);
+    lines.push(`camera_modified=1`);
+    lines.push(
+        `modification_notes=${(
+            "benchmarkLoop: main.js:2303-2339; " +
+            (param("force", "") ? "resolution: benchres; " : "") +
+            "camera: carousel 冻结 + __FLUXGS_SET_CAM__ 注入点"
+        ).replace(/\s+/g, "_")}`,
+    );
+    lines.push(`timer_clamp_observed=na（内嵌副本钩子未上报逐帧间隔）`);
+    lines.push(`runtime_validation=implemented_but_not_runtime_validated`);
     lines.push(`warmup=${st.warmupFrames}`);
     lines.push(`force=${param("force", "native")}`);
     lines.push(`pose_src=${param("pose", "flux")}`);
@@ -632,6 +703,22 @@ function buildResultText(st: BenchState): string {
             `covered=${fmt(r.coveredPct, 1)}%`,
             `poseInjected=${r.poseInjected === undefined ? "" : r.poseInjected ? 1 : 0}`,
             `pose=${r.poseKey ?? ""}`,
+            `view_hash=${r.viewHash ?? ""}`,
+            `db=${r.drawingBufferW ?? ""}x${r.drawingBufferH ?? ""}`,
+            `viewport=0,0,${r.drawingBufferW ?? ""},${r.drawingBufferH ?? ""}`,
+            `focal=${fmt(r.focalPx, 3)}`,
+            `fov_key=${r.fovKey ?? ""}`,
+            `fov_hash=${r.fovHash ?? ""}`,
+            `proj_basis=${r.projBasis ?? ""}`,
+            `metric=${FLUX_METRIC}`,
+            `gpu_synced=${FLUX_GPU_SYNCED ? 1 : 0}`,
+            `camera_mode=vendored-flux (carousel=false)`,
+            `timer_clamp_observed=na（钩子未上报逐帧间隔）`,
+            `cross_res_matched=`,
+            `cross_viewport_matched=`,
+            `cross_camera_matched=`,
+            `cross_projection_matched=`,
+            `cross_protocol_matched=`,
         ];
         if (!r.ok) tags.push(`err=${r.err ?? ""}`);
         lines.push(tags.join(" "));
