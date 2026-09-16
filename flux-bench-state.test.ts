@@ -1,6 +1,6 @@
 /** 阶段 6 主线程半：可执行状态机测试（覆盖任务书要求的 7 项）。 */
 import { describe, expect, it } from "vitest";
-import { FluxBenchState } from "./flux-bench-state";
+import { FluxBenchState, toTerminalReason } from "./flux-bench-state";
 
 const VIEW_A = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 const VIEW_B = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 2, 3, 1];
@@ -108,7 +108,7 @@ describe("阶段 6：Flux bridge 主线程状态机", () => {
 
         s.trackPromise("sort:3");
         s.trackPromise("barrier:3");
-        const r = s.dispose("dispose");
+        const r = s.dispose("disposed");
         expect(r.settledPromises).toBe(2);
         expect(s.pendingPromiseCount).toBe(0);
         expect(s.settledPromiseCount).toBe(4); // sort:1:rejection + sort:2:failure + sort:3:dispose + barrier:3:dispose
@@ -160,5 +160,110 @@ describe("阶段 6：Flux bridge 主线程状态机", () => {
         s.markDrawAttempt(11, "failed");
         expect(s.getSnapshot().drawFailures).toBe(1);
         expect(s.getSnapshot().lastDrawSerial).toBe(11);
+    });
+
+    it("11) [H22-A] markDrawnSync：只认当前 active 的**同步**归因（fail-closed），并与事实路径幂等", () => {
+        const s = new FluxBenchState({ bridgeEnabled: true });
+        s.beginSortRequest(31);
+        s.onResultReceived({ sortSerial: 31, viewProj: VIEW_A });
+        s.markUploaded(31, VIEW_A);
+        // 未 active ⇒ 不记账
+        expect(s.markDrawnSync(31)).toBe(false);
+        expect(s.getSnapshot().lastDrawSerial).toBe(0);
+        s.markActive(31, VIEW_A);
+        // 非当前 active 的 serial ⇒ 不记账（禁止把"画了别的一代索引"记为成功 draw）
+        expect(s.markDrawnSync(30)).toBe(false);
+        expect(s.getSnapshot().lastDrawSerial).toBe(0);
+        // 当前 active ⇒ 同任务内立即可见（controller 的 warmup 归因校验依赖这一点）
+        expect(s.markDrawnSync(31)).toBe(true);
+        expect(s.getSnapshot().lastDrawSerial).toBe(31);
+        expect(s.isDrawn(31)).toBe(true);
+        // 事实路径（markDrawAttempt）只是幂等确认：不得回退 lastDraw
+        s.beginDraw();
+        s.markDrawAttempt(31, "ok");
+        expect(s.getSnapshot().lastDrawSerial).toBe(31);
+    });
+
+    describe("B1：生命周期与精确 pending 计数", () => {
+        it("10) getPendingCounts 用阶段差集，历史记录不计为 pending", () => {
+            const s = new FluxBenchState({ bridgeEnabled: true });
+            s.beginSortRequest(21);
+            s.onResultReceived({ sortSerial: 21, viewProj: VIEW_A });
+            expect(s.getPendingCounts().acceptedNotUploaded).toBe(1);
+            expect(s.getPendingCounts().uploadedNotActive).toBe(0);
+            s.markUploaded(21, VIEW_A);
+            expect(s.getPendingCounts().acceptedNotUploaded).toBe(0);
+            expect(s.getPendingCounts().uploadedNotActive).toBe(1);
+            s.markActive(21, VIEW_A);
+            expect(s.getPendingCounts().acceptedNotUploaded).toBe(0);
+            expect(s.getPendingCounts().uploadedNotActive).toBe(0);
+            expect(s.hasAccepted(21, VIEW_A)).toBe(true);
+            expect(s.hasUploaded(21, VIEW_A)).toBe(true);
+            expect(s.isActive(21, VIEW_A)).toBe(true);
+            expect(s.isActive(21, VIEW_B)).toBe(false);
+        });
+
+        it("11) isSortQuiescent 用目标 serial 精确阶段，且不要求 lastDraw", () => {
+            const s = new FluxBenchState({ bridgeEnabled: true });
+            s.trackPromise("sort:31");
+            s.beginSortRequest(31);
+            s.onResultReceived({ sortSerial: 31, viewProj: VIEW_A });
+            s.markUploaded(31, VIEW_A);
+            s.markActive(31, VIEW_A);
+            expect(s.isSortQuiescent(31, VIEW_A)).toBe(false);
+            s.settlePromise("sort:31", "applied");
+            expect(s.isSortQuiescent(31, VIEW_A)).toBe(true);
+            expect(s.isDrawn(31)).toBe(false);
+            s.beginDraw();
+            s.markDrawAttempt(31, "ok");
+            expect(s.isDrawn(31)).toBe(true);
+            expect(s.isSortQuiescent(30, VIEW_A)).toBe(false);
+        });
+
+        it("12) dispose 幂等并清空阶段缓存", () => {
+            const s = new FluxBenchState({ bridgeEnabled: true });
+            s.trackPromise("sort:41");
+            s.beginSortRequest(41);
+            s.onResultReceived({ sortSerial: 41, viewProj: VIEW_A });
+            s.markUploaded(41, VIEW_A);
+            s.markActive(41, VIEW_A);
+            s.beginDraw();
+            s.markDrawAttempt(41, "ok");
+            expect(s.isDrawn(41)).toBe(true);
+            s.scheduleFrame("timer");
+            const first = s.dispose("context-lost");
+            expect(first.settledPromises).toBe(1);
+            expect(s.getSnapshot().disposeReason).toBe("context-lost");
+            expect(s.isDrawn(41)).toBe(false);
+            expect(s.getPendingCounts().inFlight).toBeNull();
+            expect(s.getPendingCounts().scheduledRaf).toBe(0);
+            expect(s.getPendingCounts().scheduledTimers).toBe(0);
+            const second = s.dispose("disposed");
+            expect(second.settledPromises).toBe(0);
+            expect(s.getPendingCounts().acceptedNotUploaded).toBe(0);
+            expect(s.markUploaded(41, VIEW_A)).toBe(false);
+        });
+
+        it("13) toTerminalReason 显式映射且未知值 fail-closed", () => {
+            expect(toTerminalReason("completed")).toBe("applied");
+            expect(toTerminalReason("applied")).toBe("applied");
+            expect(toTerminalReason("rejection")).toBe("rejected");
+            expect(toTerminalReason("failure")).toBe("failed");
+            expect(toTerminalReason("protocol-failure")).toBe("protocol-failure");
+            expect(toTerminalReason("timeout")).toBe("timeout");
+            expect(toTerminalReason("context-lost")).toBe("context-lost");
+            expect(toTerminalReason("dispose")).toBe("disposed");
+            expect(toTerminalReason("worker-whatever")).toBe("protocol-failure");
+            expect(toTerminalReason("unexpected-value")).toBe("protocol-failure");
+            const s18 = new FluxBenchState({ bridgeEnabled: true });
+            // 编译期边界证据（包在 if (false) 中，Vitest 不执行）
+            const compileOnly: boolean = false;
+            if (compileOnly) {
+                // @ts-expect-error arbitrary strings must not cross the state boundary
+                s18.dispose("worker-whatever");
+                // @ts-expect-error legacy raw reasons require normalization first
+                s18.settleAll("failure");
+            }
+        });
     });
 });

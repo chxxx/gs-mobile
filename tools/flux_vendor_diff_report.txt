@@ -49,7 +49,7 @@ blobs in official tree: 49
 
 ## MODIFIED (official_size, local_size): 4
   M index.html  (11071 -> 16207)
-  M render_shared/main.js  (85835 -> 101326)
+  M render_shared/main.js  (85835 -> 116409)
   M static/css/index.css  (14011 -> 2299)
   M static/js/index.js  (1031 -> 2346)
 

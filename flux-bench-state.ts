@@ -11,7 +11,26 @@
  *   · 只保存**原始 viewProj 快照**（不实现跨臂 hash）。
  */
 export type FluxDrawOutcome = "ok" | "failed";
-export type FluxTerminalReason = "completed" | "failure" | "rejection" | "context-lost" | "dispose";
+export type FluxTerminalReason =
+    "applied" | "rejected" | "failed" | "protocol-failure" | "timeout" | "context-lost" | "disposed";
+
+/** 显式映射（未知值 fail-closed → failed）。 */
+export const toTerminalReason = (raw: string): FluxTerminalReason => {
+    const map: Record<string, FluxTerminalReason> = {
+        applied: "applied",
+        completed: "applied",
+        rejected: "rejected",
+        rejection: "rejected",
+        failed: "failed",
+        failure: "failed",
+        "protocol-failure": "protocol-failure",
+        timeout: "timeout",
+        "context-lost": "context-lost",
+        disposed: "disposed",
+        dispose: "disposed",
+    };
+    return map[raw] ?? "protocol-failure";
+};
 export type FluxResultVerdict = "accepted" | "ignored-stale" | "ignored-view-mismatch" | "ignored-disposed";
 
 export interface FluxSortAudit {
@@ -39,8 +58,9 @@ export interface StaticFrameSideEffects {
     timerScheduled: boolean;
 }
 
-/** 逐项比较 viewProj 快照（16 元素；长度不同即不匹配）。 */
-const sameView = (a: readonly number[], b: readonly number[]): boolean => {
+/** 逐项比较 viewProj 快照（16 元素；长度不同即不匹配）。
+ *  **唯一**"逐位严格"语义权威（父侧门与状态机共用；禁止各处自行实现近似比较）。 */
+export const sameView = (a: readonly number[], b: readonly number[]): boolean => {
     if (a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
     return true;
@@ -77,6 +97,8 @@ export class FluxBenchState {
     private activeResults = new Map<number, number[]>();
     /** draw 前的 active serial/view 快照（draw 成功后据此提交 lastDraw） */
     private drawSnapshot: { serial: number; viewProj: number[] } | null = null;
+    /** 已真实 draw 成功的 serial（逐 serial 精确记录，不用水位代替） */
+    private drawnResults = new Set<number>();
 
     constructor(opts?: { bridgeEnabled?: boolean }) {
         this.bridgeEnabled = opts?.bridgeEnabled ?? false;
@@ -92,6 +114,75 @@ export class FluxBenchState {
 
     getSnapshot(): FluxSortAudit {
         return { ...this.audit, activeViewProj: this.audit.activeViewProj ? [...this.audit.activeViewProj] : null };
+    }
+    /** 只读：该 serial 是否合法接收过（可选校验 view 快照一致）。 */
+    hasAccepted(serial: number, viewProj?: readonly number[]): boolean {
+        const v = this.acceptedResults.get(serial);
+        return v !== undefined && (viewProj === undefined || sameView(v, viewProj));
+    }
+
+    /** 只读：该 serial 是否真实上传过。 */
+    hasUploaded(serial: number, viewProj?: readonly number[]): boolean {
+        const v = this.uploadedResults.get(serial);
+        return v !== undefined && (viewProj === undefined || sameView(v, viewProj));
+    }
+
+    /** 只读：该 serial 是否为当前 active。 */
+    isActive(serial: number, viewProj?: readonly number[]): boolean {
+        const v = this.activeResults.get(serial);
+        return (
+            v !== undefined && serial === this.audit.activeSerial && (viewProj === undefined || sameView(v, viewProj))
+        );
+    }
+
+    /** 只读：该 serial 是否真实 draw 成功过。 */
+    isDrawn(serial: number): boolean {
+        return this.drawnResults.has(serial);
+    }
+
+    /** 只读计数（供联合静止判定，禁止父侧用水位重推阶段有效性）。 */
+    getPendingCounts(): {
+        inFlight: number | null;
+        pendingPromises: number;
+        scheduledRaf: number;
+        scheduledTimers: number;
+        acceptedNotUploaded: number;
+        uploadedNotActive: number;
+    } {
+        let acceptedNotUploaded = 0;
+        for (const serial of this.acceptedResults.keys()) if (!this.uploadedResults.has(serial)) acceptedNotUploaded++;
+        let uploadedNotActive = 0;
+        for (const serial of this.uploadedResults.keys()) if (!this.activeResults.has(serial)) uploadedNotActive++;
+        return {
+            inFlight: this.inFlight,
+            pendingPromises: this.pending.size,
+            scheduledRaf: this.rafHandleCount,
+            scheduledTimers: this.timerHandleCount,
+            acceptedNotUploaded,
+            uploadedNotActive,
+        };
+    }
+
+    /** 精确排序静止（不含 draw）：目标 serial 自身经历 accepted/uploaded/active，且无 pending/in-flight/自驱调度。 */
+    isSortQuiescent(serial: number, viewProj?: readonly number[]): boolean {
+        return (
+            this.hasAccepted(serial, viewProj) &&
+            this.hasUploaded(serial, viewProj) &&
+            this.isActive(serial, viewProj) &&
+            this.inFlight === null &&
+            this.pending.size === 0 &&
+            this.rafHandleCount === 0 &&
+            this.timerHandleCount === 0
+        );
+    }
+
+    /** dispose 时清理四张阶段 Map 与 draw 快照。 */
+    private clearStageMaps(): void {
+        this.acceptedResults.clear();
+        this.uploadedResults.clear();
+        this.activeResults.clear();
+        this.drawnResults.clear();
+        this.drawSnapshot = null;
     }
 
     // ---------------------------------------------------------------- 排序请求（严格单飞）
@@ -110,14 +201,14 @@ export class FluxBenchState {
     markRejectedByWorker(serial: number, reason: string): void {
         this.audit.rejected.push({ serial, reason });
         if (this.inFlight === serial) this.inFlight = null;
-        this.settlePromise(`sort:${serial}`, "rejection");
+        this.settlePromise(`sort:${serial}`, "rejected");
     }
 
     /** worker 明确 failure ⇒ 立即结算。 */
     markWorkerFailure(serial: number, reason: string): void {
         this.audit.failures.push({ serial, reason });
         if (this.inFlight === serial) this.inFlight = null;
-        this.settlePromise(`sort:${serial}`, "failure");
+        this.settlePromise(`sort:${serial}`, "failed");
     }
 
     /** barrier ack：只记账，**不得**推进 uploaded/active。 */
@@ -177,6 +268,7 @@ export class FluxBenchState {
         if (!sameView(uploaded, viewProj)) return false; // view 不匹配不得激活
         if (this.activeResults.has(serial)) return false; // 重复激活拒绝
         this.activeResults.set(serial, [...viewProj]);
+        if (this.inFlight === serial) this.inFlight = null; // 成功路径释放单飞槽（applied 后不再占用）
         this.audit.activeSerial = serial;
         this.audit.activeViewProj = [...viewProj]; // 只保存原始 viewProj 快照
         return true;
@@ -206,6 +298,27 @@ export class FluxBenchState {
         if (snap === null || snap.serial !== serial) return; // 非本帧 draw 前快照 ⇒ 不提交
         if (serial !== this.audit.activeSerial) return; // active 已换代 ⇒ 本帧快照作废
         this.audit.lastDrawSerial = serial;
+        this.drawnResults.add(serial);
+    }
+
+    /**
+     * [H22-A] **同步**绘制归属：父侧在**同一任务**内、以跨 realm 调用的**返回值**直接记账。
+     *
+     * 为什么必须有这条路径：`draw-completed` 事实走 `postMessage` ⇒ 父侧只能在**下一个任务**读到；
+     * 而 controller 的 warmup 归因校验（`getSortAudit().lastDrawSortSerial`）与测量窗口基线都是
+     * **同步**读取 ⇒ 只靠事实时 `lastDrawSerial` 恒为 0，合法轮也会被判 `warmup-draw-not-verified`
+     * （实测 build 8B-7 smoke：`reasons=...warmup-draw-not-verified|measure-window-audit:changed`）。
+     * 因此 `lastDraw` 的权威写入点是本方法；事实路径（`markDrawAttempt`）退化为**幂等确认**。
+     *
+     * fail-closed：只接受"当前 active"的 serial；与 active 不一致 ⇒ 不记账并返回 false
+     * （禁止把"画了别的一代索引"伪装成成功 draw）。
+     */
+    markDrawnSync(serial: number): boolean {
+        if (this.audit.disposed) return false;
+        if (serial !== this.audit.activeSerial) return false;
+        this.audit.lastDrawSerial = serial;
+        this.drawnResults.add(serial);
+        return true;
     }
 
     /** static frame 的副作用记录（全部必须为 false）。 */
@@ -270,10 +383,12 @@ export class FluxBenchState {
 
     // ---------------------------------------------------------------- 终态
     dispose(reason: FluxTerminalReason): { settledPromises: number; cancelledHandles: number } {
+        if (this.audit.disposed) return { settledPromises: 0, cancelledHandles: 0 }; // 幂等
         const settledPromises = this.settleAll(reason);
         const cancelledHandles = this.cancelScheduled();
         this.audit.disposed = true;
-        this.audit.disposeReason = reason;
+        this.audit.disposeReason = toTerminalReason(reason);
+        this.clearStageMaps(); // 生命周期内部清理
         this.inFlight = null;
         return { settledPromises, cancelledHandles };
     }

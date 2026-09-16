@@ -32,6 +32,15 @@
     "bench-adapters.ts",
     "bench-adapters.test.ts",
     "bench-flux-bridge.test.ts",
+    "bench-flux-bridge.ts",
+    "bench-flux-adapter.ts",
+    "bench-flux-adapter.test.ts",
+    "bench-three-way.ts",
+    "bench-three-way.test.ts",
+    "bench-slave-url.ts",
+    "bench-slave-url.test.ts",
+    "flux-bench-state.ts",
+    "flux-bench-state.test.ts",
     "src/**/*"
   ],
   "exclude": ["src/wasm/*"]

@@ -914,3 +914,48 @@ core-implemented-adapters-not-implemented
   `implemented-but-not-runtime-validated`；
 - 无 Chromium 的环境下 **smoke 一律保持 pending**，不得伪造运行数据；
 - **目标手机系统浏览器完成正式测试之前**，禁止修改论文表格。
+
+---
+
+## 13. 落地记录 H23：三臂入口 URL（ours / reduced-3dgs 从未被浏览器跑过的缺口）
+
+**症状**（桌面 Chromium，组合跑）：`bench-three-way.html?methods=ours,flux-gs&only=bicycle&res=1600x1063&frames=300&warmup=120&rounds=12&yieldMode=none` 在 `ours` 臂固定失败：
+
+```
+运行失败：Error: 等待超时：__CASE_BENCH__(ours)
+    at waitFor (bench-three-way.ts:280)
+    at async CaseSlaveAdapter.init (bench-adapters.ts:72)
+```
+
+**根因**（与渲染器 / 协议无关，纯接线）：`readSceneEntries()` 只认 `modelUrl` / `iframeUrl` 两个字段，
+而 `bench-scenes.json` / `baseline-scenes.json` 用的是**旧 schema**（模型叫 `file`、vendor 页叫 `page`）⇒
+
+| 臂           | 清单给的字段 | `readSceneEntries()` 产出                    | 实际 iframe                     | 结果     |
+| ------------ | ------------ | -------------------------------------------- | ------------------------------- | -------- |
+| ours         | `file`       | `modelUrl=""` + flux 保守默认页              | **flux 的页面**（无 `__CASE_BENCH__`） | 30s 超时 |
+| reduced-3dgs | `file`       | 同上                                         | `render_r3dgs-*`（甚至不存在）  | 30s 超时 |
+| flux-gs      | `page`       | `iframeUrl=`（flux 保守默认页）              | flux 页                         | ✅ 能跑  |
+
+flux 臂**只是碰巧**能跑：那条保守默认（`flux-gs-project-gh-pages/render_<id>/index.html`）恰好就是它自己的页面路径。
+因此"ours 臂从未在浏览器里真正启动过"这一点此前完全没有暴露。
+
+**修复**（新增 `bench-slave-url.ts`；纯函数，单测 `bench-slave-url.test.ts` 8 条）：
+
+1. `readSceneEntries()` 归一旧 schema：`modelUrl ← modelUrl | file`、`iframeUrl ← iframeUrl | page | <flux 保守默认>`；
+2. `slaveIframeUrl(method, entry, { jobId, resW, resH })` 成为**唯一**入口 URL 构造器：
+    - `ours` / `reduced-3dgs` ⇒ `bench-case.html?slave=1&jobId=…&scene=…&dataset=…&model=…&res=WxH`
+      （`caseSpecFromUrl()` 要求 `jobId` / `scene` / `model` 三者齐全，缺一则子页报 NO_JOB 且**不会**挂 `__CASE_BENCH__`）；
+    - `flux-gs` ⇒ 清单声明的 vendor 页原样返回（`bridge=1&benchres=…&fxsession=…` 只由
+      `FluxGsAdapter.injectBridgeParams()` 注入，避免两处注入）；
+    - 缺字段**显式抛错** ⇒ 由 `runThreeWayPlan` 记成 `round-failed:…`，不再退化成 30s 的"等待超时"；
+3. 状态行加 `runner=H23`（确认加载的是这一版 runner），并在每个臂创建 iframe 前打印
+   `[three-way] <method> iframe: page=… slave=… jobId=… scene=… model=…`（自诊断：下次一步定位）。
+
+**与 §8.1 / §8.2 草案的差异（以实现为准）**：方法名是 `methods=ours,flux-gs,reduced-3dgs`
+（短名 `flux` / `reduced` 被 `REJECTED_METHOD_ALIASES` 显式拒绝）；没有 `profile=` / `coolms=`；
+`round` / `attempt` / `token` 在 `?slave=1` 下无意义（slave 模式不进 `measureOneRound`，见 `bench-case.ts:342-354`）。
+
+**状态（诚实口径）**：`flux-gs` 臂单方法 smoke 已在桌面 Chromium 跑出 `valid=true`；
+`ours` / `reduced-3dgs` 臂的浏览器验证 **pending**（本修复后必须重跑 §8.2 的 ①②③）。
+在三条 smoke 全部 `valid=true` 之前，主表采集仍然禁止（§12.8 / §12.11 状态词不变：`browser-validated pending`）。
+

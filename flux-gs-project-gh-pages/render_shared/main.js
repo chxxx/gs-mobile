@@ -315,9 +315,11 @@ function createWorker(self) {
     let sortScheduled = false; // 已排队一次补排（setTimeout）但尚未执行
     let queuedReplacementPresent = false; // 已有更新的 viewProj 等待补排
     let benchInFlight = null; // 严格单飞：在飞的 bench sort serial（null = 无）
-    // bench 强制排序**绑定到具体 view 数组与 serial**：不得被 legacy/replacement 的 runSort() 错误消费
+    // bench 强制排序**绑定到显式 serial**（跨 postMessage 的对象引用同一性不成立）：
+    // 身份 = serial；排序输入 = view；view 仅作数据与诊断，不再参与关联判定
     let benchPendingSerial = null;
     let benchPendingView = null;
+    let benchFrameSerial = null; // 本次 {view} 帧消息携带的 benchSerial（未登记则 null）
     let benchBarrierQueue = []; // 待 ack 的 barrier（异步 ack，**不得**同步循环等待）
     /**
      * quiescent 必须四者同时满足（不得只检查 sortRunning）：
@@ -586,9 +588,19 @@ function contractToUnisphereInPlace(x, y, z, out) {
     }
 
     function runSort(viewProj) {
-        // 绑定校验（前置项 1）：只有这次 runSort 用的**正是 bench 请求的那个 view 数组**才算强制 bench sort；
-        // legacy `{view}` 或 replacement 触发的 runSort 绝不会消费到 bench 的 serial/force。
-        const benchForcedThisRun = benchPendingView !== null && benchPendingView === viewProj;
+        // 绑定校验（协议纠错）：身份 = serial。跨 postMessage 的结构化克隆会破坏对象引用同一性，
+        // 因此：(a) 帧消息显式携带 benchSerial 时按 serial 匹配；
+        //         (b) 未携带（登记触发的立即 runSort、或排队 replacement 的延迟 runSort）时，
+        //             退化为**内容逐项相等**的 view 校验（仍拒绝 legacy 的不同机位请求）。
+        const benchViewMatches =
+            benchPendingView !== null &&
+            Array.isArray(viewProj) &&
+            benchPendingView.length === viewProj.length &&
+            viewProj.every((v, i) => v === benchPendingView[i]);
+        const benchForcedThisRun =
+            benchPendingSerial !== null &&
+            (benchFrameSerial === benchPendingSerial || (benchFrameSerial === null && benchViewMatches));
+        benchFrameSerial = null; // 一次性消费
         const benchSerial = benchForcedThisRun ? benchPendingSerial : null;
         if (benchForcedThisRun) {
             benchPendingView = null;
@@ -1306,6 +1318,7 @@ function contractToUnisphere(x, y, z) {
             benchInFlight = e.data.sortSerial ?? null;
             benchPendingSerial = e.data.sortSerial ?? null;
             benchPendingView = e.data.view;
+            benchFrameSerial = e.data.sortSerial ?? null; // 本次登记立即触发的 runSort 也按 serial 匹配
             viewProj = e.data.view;
             throttledSort();
             return;
@@ -1335,6 +1348,8 @@ function contractToUnisphere(x, y, z) {
             vertexCount = e.data.vertexCount;
         } else if (e.data.view) {
             viewProj = e.data.view;
+            // bridge 帧消息可携带显式 benchSerial（未启用 bridge 时恒为 null ⇒ 默认行为逐字不变）
+            benchFrameSerial = typeof e.data.benchSerial === "number" ? e.data.benchSerial : null;
             throttledSort();
         }
     };
@@ -1827,6 +1842,166 @@ async function main() {
     window.addEventListener("resize", resize);
     resize();
 
+    // [BENCH BRIDGE H6–H12] 仅在 `?bridge=1` 时启用：默认路径不创建任何订阅、状态或调度守卫。
+    const __fxBenchEnabled = /(?:^|[?&])bridge=1(?:&|$)/.test(window.location.search);
+    // 父侧下发的 session（`?fxsession=<id>`）；缺失才自行生成，保证父子 session 必然一致
+    const __fxSessionFromParent = (() => {
+        try {
+            return new URLSearchParams(window.location.search).get("fxsession");
+        } catch (err) {
+            return null;
+        }
+    })();
+    const __fxBench = __fxBenchEnabled
+        ? {
+              session:
+                  __fxSessionFromParent ||
+                  "fx-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8),
+              pending: new Map(),
+              pendingSerial: null,
+              active: null,
+              /** [BENCH H19] 上传门最近一次拒绝的精确检查项（写入 fact reason，杜绝"generic 失败"） */
+              lastAuthReason: null,
+          }
+        : null;
+    /** H13：最近一帧真实使用的 view 矩阵（供电 `frameStatic` 复用"既定 view"） */
+    let __fxLastActualView = null;
+    /** 事实上报：只发元数据（serial / view 快照 / reason），depthIndex 字节永不离开本 iframe。 */
+    const __fxFact = (fact, extra) => {
+        if (!__fxBench) return;
+        try {
+            const msg = Object.assign({ __fxbench: true, fact, session: __fxBench.session }, extra);
+            if (window.parent && window.parent !== window) window.parent.postMessage(msg, "*");
+        } catch (err) {
+            /* fail-closed：事实上报失败不得影响渲染 */
+        }
+    };
+    /** 同步上传前安全门（H6）：vendor 自身最小 token 关联 + 可选父侧同步 validator，异常一律拒绝。 */
+    const __fxAuthorizeUpload = (serial, viewProj) => {
+        if (!__fxBench) return true; // 非 bridge 模式：默认路径行为完全不变
+        __fxBench.lastAuthReason = "vendor:ok";
+        const tok = __fxBench.pending.get(serial);
+        if (!tok) {
+            __fxBench.lastAuthReason = "vendor:no-token";
+            return false;
+        }
+        if (tok.settled) {
+            __fxBench.lastAuthReason = "vendor:token-settled";
+            return false;
+        }
+        if (!Array.isArray(viewProj) || viewProj.length !== 16) {
+            __fxBench.lastAuthReason = "vendor:view-not-16";
+            return false;
+        }
+        let same = true;
+        for (let i = 0; i < 16; i++) {
+            // [BENCH H19] 诊断：漂移发生在哪一项、量级多大（1e-6 舍入比较）
+            if (Math.round(tok.view[i] * 1e6) / 1e6 !== Math.round(viewProj[i] * 1e6) / 1e6) {
+                __fxBench.lastAuthReason = "vendor:view-drift@" + i + "=" + Math.abs(tok.view[i] - viewProj[i]).toExponential(2);
+                same = false;
+                break;
+            }
+        }
+        if (!same) return false;
+        try {
+            const parentAuth = window.parent && window.parent.__fxbenchAuthorize;
+            if (typeof parentAuth === "function") {
+                __fxBench.lastAuthReason = "parent:ok";
+                const ok = parentAuth.call(window.parent, { session: __fxBench.session, sortSerial: serial, viewProj }) === true;
+                if (!ok) {
+                    // [BENCH H20] 父侧拒绝必须自证原因：drift=0 ⇒ 非视图原因（session/单飞/未 force/dispose），
+                    // drift>0 ⇒ 传入视图与登记 token 视图不一致（不得再出现"未知原因"）
+                    let __fxDrift = 0;
+                    for (let i = 0; i < 16; i++) {
+                        const d = Math.abs(tok.view[i] - viewProj[i]);
+                        if (d > __fxDrift) __fxDrift = d;
+                    }
+                    __fxBench.lastAuthReason = "parent:reject@drift=" + __fxDrift.toExponential(2);
+                }
+                return ok;
+            }
+            return true; // 非同源无 validator 时以 vendor 自身 token 关联为准（仍已是 fail-closed）
+        } catch (err) {
+            __fxBench.lastAuthReason = "parent:throw";
+            return false;
+        }
+    };
+    // 父侧薄原语（H9）：仅注册桥接最小入口，不复制五阶段状态机
+    if (__fxBenchEnabled) {
+        window.__FLUXGS_BENCH_SORT__ = {
+            session: __fxBench.session,
+            sortRequested: (sortSerial, viewProj) => {
+                if (typeof sortSerial !== "number" || !Array.isArray(viewProj) || viewProj.length !== 16) return false;
+                __fxBench.pending.set(sortSerial, { view: viewProj.slice(), settled: false });
+                __fxBench.pendingSerial = sortSerial;
+                __fxFact("sort-requested", { sortSerial, viewProj: viewProj.slice() });
+                // 转交 worker 登记（worker 侧 benchPendingSerial 只由 type==="bench-sort" 分支设置）
+                worker.postMessage({ type: "bench-sort", sortSerial, view: viewProj.slice(), force: true });
+                return true;
+            },
+            contextLost: () => {
+                __fxFact("context-lost", { sortSerial: null });
+                __fxBench.pending.clear();
+                __fxBench.pendingSerial = null;
+                __fxBench.active = null;
+                return true;
+            },
+            dispose: () => {
+                __fxBench.pending.clear();
+                __fxBench.pendingSerial = null;
+                __fxBench.active = null;
+                return true;
+            },
+            /** 父侧驱动的单帧入口：复用唯一 frame 主体（bridge 模式下不自驱调度）。 */
+            frameOnce: (view16) => {
+                if (Array.isArray(view16) && view16.length === 16 && typeof window.__FLUXGS_SET_CAM__ === "function") {
+                    window.__FLUXGS_SET_CAM__(view16);
+                }
+                requestAnimationFrame(frame); // 单次、显式、父侧驱动
+                return true;
+            },
+            /**
+             * H13：真正的 render-only 静态帧（不排序、不更新相机、不写 DOM、不调度；单次一 draw）。
+             * [H22-A] 返回**同步归属描述**（而不是布尔）：父侧只能通过跨 realm 调用的**返回值**在同一任务内
+             * 得知本帧真实画了什么；`draw-completed` 事实走 postMessage，至少晚一个任务 ⇒ 无法用于
+             * 父侧紧随其后的 warmup 归因校验与测量窗口基线。
+             * 返回值只在 `drawActiveFrame` **真实执行**（返回 true）时才带 serial/view。
+             */
+            frameStatic: () => {
+                const __fxA =
+                    __fxBench && __fxBench.active && __fxBench.active.viewMatrix ? __fxBench.active : null;
+                const __fxDrawnStatic = __fxA ? drawActiveFrame(__fxA.viewMatrix, { writeDom: false }) === true : false;
+                return {
+                    drawn: __fxDrawnStatic,
+                    serial: __fxDrawnStatic && __fxA ? __fxA.serial : null,
+                    viewMatrix: __fxDrawnStatic && __fxA ? __fxA.viewMatrix.slice() : null,
+                };
+            },
+            /**
+             * [H22-B] synchronized throughput 的必要条件：父侧 t1 必须包含**真实 GPU 排空**。
+             * `gl.finish()` 只能在本 realm 内同步执行 ⇒ 只能由父侧跨 realm **同步调用**本原语。
+             * 注意：父侧旧的 `postMessage({prim:"finish-gpu"})` 在本文件里**没有任何监听者**，
+             * 那会让 finish 静默变成空操作（同步吞吐退化为 CPU 提交吞吐）。
+             */
+            finishGpu: () => {
+                gl.finish();
+                return true;
+            },
+            /** H13：负载元数据（`loaded` = 模型字节已读到；`vertexCount` 由首次上传设定）。 */
+            stats: () => ({ vertexCount, loaded: splatData.length > 0 }),
+            /** H17：当前 view 矩阵（供父侧取得 vendor 默认机位作为统一相机基线）。 */
+            getViewMatrix: () => (Array.isArray(viewMatrix) ? viewMatrix.slice() : null),
+        };
+    }
+    // context lost ⇒ 立即终态：清空 token、上报事实、不再接受任何上传授权
+    canvas.addEventListener("webglcontextlost", () => {
+        if (!__fxBench) return;
+        __fxBench.pending.clear();
+        __fxBench.pendingSerial = null;
+        __fxBench.active = null;
+        __fxFact("context-lost", { sortSerial: null });
+    });
+
     worker.onmessage = (e) => {
         if (e.data.progress) {
             showProgress(
@@ -1901,10 +2076,58 @@ async function main() {
             console.log("bench: dumped Flux world positions:", window.__FLUXGS_XYZ__.length / 3);
         } else if (e.data.depthIndex) {
             const { depthIndex, viewProj } = e.data;
-            gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
-            gl.bufferData(gl.ARRAY_BUFFER, depthIndex, gl.DYNAMIC_DRAW);
-            vertexCount = e.data.vertexCount;
-            hideProgress();
+            const __fxSerial = typeof e.data.sortSerial === "number" ? e.data.sortSerial : null;
+            const __fxView = Array.isArray(viewProj) ? viewProj.slice() : undefined;
+            // 事实：结果已在主线程收到（真实执行点；只带元数据）
+            if (__fxBench && __fxSerial !== null) {
+                __fxFact("result-received", { sortSerial: __fxSerial, viewProj: __fxView });
+            }
+            // 上传前同步安全门：[BENCH H20] 不通过则**绝不**触碰 GL（迟到/异 session/异 view 结果不得污染 renderer）。
+            // 判定主体 = 本消息回显的视图 `__fxView`（与父侧登记视图逐位相等：登记视图 → worker 排序输入 → 结果原样回显）。
+            // 本分支内的 `viewProj` 是 `e.data` 解构出的同名局部（与 `__fxView` 同值）；显式写 `__fxView` 使
+            // "门主体 = 上报视图"这一身份链一眼可查（真正的失败原因在**父侧**，见 FLUX_VENDOR_DIFF §4.H21）。
+            if (__fxBench && __fxSerial !== null && !__fxAuthorizeUpload(__fxSerial, __fxView)) {
+                const tok = __fxBench.pending.get(__fxSerial);
+                if (tok) tok.settled = true;
+                __fxBench.pendingSerial = null; // 该 token 已终结
+                __fxFact("sort-failed", {
+                    sortSerial: __fxSerial,
+                    viewProj: __fxView,
+                    reason: "pre-upload-gate:" + (__fxBench.lastAuthReason || "unknown"),
+                });
+            } else {
+                gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, depthIndex, gl.DYNAMIC_DRAW);
+                vertexCount = e.data.vertexCount;
+                hideProgress();
+                if (__fxBench && __fxSerial !== null) {
+                    // 真实执行点：GPU 缓冲已更新 → uploaded；该缓冲即刻成为 draw 数据源 → activated
+                    const tok = __fxBench.pending.get(__fxSerial);
+                    if (tok) tok.settled = true;
+                    __fxBench.pendingSerial = null; // 已进入 uploaded/activated，token 终结
+                    __fxBench.active = {
+                        serial: __fxSerial,
+                        view: __fxView,
+                        viewMatrix: __fxLastActualView ? __fxLastActualView.slice() : null,
+                    };
+                    __fxFact("index-uploaded", { sortSerial: __fxSerial, viewProj: __fxView });
+                    __fxFact("index-activated", { sortSerial: __fxSerial, viewProj: __fxView });
+                }
+            }
+        } else if (
+            __fxBench &&
+            (e.data.skipped || e.data.failure || e.data.type === "bench-sort-rejected") &&
+            typeof e.data.sortSerial === "number"
+        ) {
+            // 事实（H12）：worker 明确拒绝 / 失败 / 跳过 ⇒ 立即终态事实（只带元数据，无 depthIndex 字节）
+            const __fxTok = __fxBench.pending.get(e.data.sortSerial);
+            if (__fxTok) __fxTok.settled = true;
+            if (__fxBench.pendingSerial === e.data.sortSerial) __fxBench.pendingSerial = null; // 终态：仅清理匹配 serial
+            __fxFact(e.data.type === "bench-sort-rejected" ? "sort-rejected" : "sort-failed", {
+                sortSerial: e.data.sortSerial,
+                viewProj: Array.isArray(e.data.viewProj) ? e.data.viewProj.slice() : undefined,
+                reason: e.data.reason || e.data.failure || e.data.skipped || "unknown",
+            });
         }
     };
 
@@ -2184,6 +2407,71 @@ async function main() {
 
     let leftGamepadTrigger, rightGamepadTrigger;
 
+    /** H13：**唯一绘制主体**（frame / frameOnce / frameStatic 共用，禁止复制渲染代码）。 */
+    const drawActiveFrame = (viewMatrixForDraw, opts) => {
+        const writeDom = !(opts && opts.writeDom === false);
+        if (vertexCount <= 0) {
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            if (writeDom) document.getElementById("spinner").style.display = "";
+            return false;
+        }
+        if (writeDom) document.getElementById("spinner").style.display = "none";
+        gl.uniformMatrix4fv(u_view, false, viewMatrixForDraw);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, mainTexture);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, shTexture);
+
+        const error = gl.getError();
+        if (error !== gl.NO_ERROR) {
+            console.error("WebGL error before draw:", error);
+        }
+
+        // draw 前 active 快照（H12）：draw 主体不得在 draw 过程中重读 active
+        const __fxDrawSnap =
+            __fxBench && __fxBench.active ? { serial: __fxBench.active.serial, view: __fxBench.active.view } : null;
+        gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, vertexCount);
+        if (__fxBench) {
+            // 只有真实 draw 调用返回后才上报完成事实
+            __fxFact(__fxDrawSnap ? "draw-completed" : "draw-failed", {
+                sortSerial: __fxDrawSnap ? __fxDrawSnap.serial : null,
+                viewProj: __fxDrawSnap ? __fxDrawSnap.view : undefined,
+            });
+        }
+        // [BENCH INSTRUMENTATION] 首个真实绘制帧（纹理上传完成后）
+        if (!window.__FLUXGS_STATS__.firstFrameAt) {
+            window.__FLUXGS_STATS__.firstFrameAt = performance.now();
+        }
+        // [BENCH INSTRUMENTATION] 测帧首帧顺带统计画面覆盖率（用于跨方法可比性核对）
+        if (isBenchmarking && benchmarkFrameCount === 1 && __fluxBenchCoveredPct === 0) {
+            try {
+                const pw = gl.canvas.width;
+                const ph = gl.canvas.height;
+                const px = new Uint8Array(pw * ph * 4);
+                gl.readPixels(0, 0, pw, ph, gl.RGBA, gl.UNSIGNED_BYTE, px);
+                let hit = 0;
+                let total = 0;
+                for (let y = 0; y < ph; y += 8) {
+                    for (let x = 0; x < pw; x += 8) {
+                        if (px[(y * pw + x) * 4 + 3] > 0) hit++;
+                        total++;
+                    }
+                }
+                __fluxBenchCoveredPct = total > 0 ? (hit / total) * 100 : 0;
+            } catch (e) {
+                /* readPixels 不可用时忽略 */
+            }
+        }
+
+        const drawError = gl.getError();
+        if (drawError !== gl.NO_ERROR) {
+            console.error("WebGL error after draw:", drawError);
+        }
+        return true;
+    };
+
     const frame = (now) => {
         let inv = invert4(viewMatrix);
         let shiftKey =
@@ -2363,59 +2651,25 @@ async function main() {
         gl.uniform3fv(u_camPos, cameraPos);
 
         const viewProj = multiply4(projectionMatrix, actualViewMatrix);
-        worker.postMessage({ view: viewProj });
+        if (__fxBench && __fxBench.pendingSerial !== null) {
+            // [BENCH H19] 单一视图基线：排序输入必须与父侧登记的 token 视图**逐位一致**。
+            // vendor 自身动画重算的 viewProj（含 jumpDelta/rotate 变换与浮点往返）与登记视图存在漂移，
+            // 会被上传前授权门的 1e-6 逐项比较正确拒绝 ⇒ 排序输入改以登记视图为准。
+            const __fxTok = __fxBench.pending.get(__fxBench.pendingSerial);
+            const __fxSortView =
+                __fxTok && Array.isArray(__fxTok.view) && __fxTok.view.length === 16 ? __fxTok.view : viewProj;
+            worker.postMessage({ view: __fxSortView, benchSerial: __fxBench.pendingSerial });
+        } else {
+            // 默认路径：消息形状逐字保持原样
+            worker.postMessage({ view: viewProj });
+        }
 
         const currentFps = 1000 / (now - lastFrame) || 0;
         avgFps = avgFps * 0.9 + currentFps * 0.1;
 
-        if (vertexCount > 0) {
-            document.getElementById("spinner").style.display = "none";
-            gl.uniformMatrix4fv(u_view, false, actualViewMatrix);
-            gl.clear(gl.COLOR_BUFFER_BIT);
-
-            gl.activeTexture(gl.TEXTURE0);
-            gl.bindTexture(gl.TEXTURE_2D, mainTexture);
-            gl.activeTexture(gl.TEXTURE1);
-            gl.bindTexture(gl.TEXTURE_2D, shTexture);
-
-            const error = gl.getError();
-            if (error !== gl.NO_ERROR) {
-                console.error("WebGL error before draw:", error);
-            }
-
-            gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, vertexCount);
-            // [BENCH INSTRUMENTATION] 首个真实绘制帧（纹理上传完成后）
-            if (!window.__FLUXGS_STATS__.firstFrameAt) {
-                window.__FLUXGS_STATS__.firstFrameAt = performance.now();
-            }
-            // [BENCH INSTRUMENTATION] 测帧首帧顺带统计画面覆盖率（用于跨方法可比性核对）
-            if (isBenchmarking && benchmarkFrameCount === 1 && __fluxBenchCoveredPct === 0) {
-                try {
-                    const pw = gl.canvas.width;
-                    const ph = gl.canvas.height;
-                    const px = new Uint8Array(pw * ph * 4);
-                    gl.readPixels(0, 0, pw, ph, gl.RGBA, gl.UNSIGNED_BYTE, px);
-                    let hit = 0;
-                    let total = 0;
-                    for (let y = 0; y < ph; y += 8) {
-                        for (let x = 0; x < pw; x += 8) {
-                            if (px[(y * pw + x) * 4 + 3] > 0) hit++;
-                            total++;
-                        }
-                    }
-                    __fluxBenchCoveredPct = total > 0 ? (hit / total) * 100 : 0;
-                } catch (e) {
-                    /* readPixels 不可用时忽略 */
-                }
-            }
-
-            const drawError = gl.getError();
-            if (drawError !== gl.NO_ERROR) {
-                console.error("WebGL error after draw:", drawError);
-            }
-        } else {
-            gl.clear(gl.COLOR_BUFFER_BIT);
-            document.getElementById("spinner").style.display = "";
+        __fxLastActualView = actualViewMatrix; // H13：static 帧复用"既定 view"
+        const __fxDrawn = drawActiveFrame(actualViewMatrix, { writeDom: true });
+        if (!__fxDrawn) {
             start = Date.now() + 2000;
         }
         fps.innerText = Math.round(avgFps) + " fps";
@@ -2428,7 +2682,7 @@ async function main() {
                 if (benchmarkStartTime === 0) benchmarkStartTime = performance.now();
                 benchmarkFrameCount++;
                 if (benchmarkFrameCount < benchmarkFrameTarget) {
-                    setTimeout(() => frame(performance.now()), 0);
+                    if (!__fxBench) setTimeout(() => frame(performance.now()), 0); // bridge 模式：不自驱调度
                 } else {
                     const elapsed = (performance.now() - benchmarkStartTime) / 1000;
                     const fps = benchmarkFrameCount / elapsed;
@@ -2452,13 +2706,13 @@ async function main() {
                     benchmarkStartTime = 0;
                     // 测帧模式下保持静止机位（否则预热与正式计帧之间姿态会漂移）
                     carousel = __fluxBenchRes ? false : true;
-                    rafId = requestAnimationFrame(frame);
+                    if (!__fxBench) rafId = requestAnimationFrame(frame); // bridge 模式：不自驱调度
                 }
             } else {
-                setTimeout(() => frame(performance.now()), 0);
+                if (!__fxBench) setTimeout(() => frame(performance.now()), 0); // bridge 模式：不自驱调度
             }
         } else {
-            rafId = requestAnimationFrame(frame);
+            if (!__fxBench) rafId = requestAnimationFrame(frame); // bridge 模式：不自驱调度
         }
     };
 
@@ -2486,7 +2740,7 @@ async function main() {
             __fluxBenchCoveredPct = 0;
             carousel = false;
             if (rafId) cancelAnimationFrame(rafId);
-            setTimeout(() => frame(performance.now()), 0);
+            if (!__fxBench) setTimeout(() => frame(performance.now()), 0); // bridge 模式：不自驱调度
         });
 
     frame();

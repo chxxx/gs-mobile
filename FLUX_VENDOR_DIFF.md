@@ -279,3 +279,307 @@ const bench = await runBenchmark(cw, st.benchFrames, 240000);
 （`fps` 原样写进结果行），所以它就是"**内嵌副本钩子口径**"的原样输出（不得称作论文口径）。
 `bench.html` 要逐项对齐的目标是 §4.2 的画布策略 + hunk 10 的调度/计时顺序。
 
+
+## §4 追加：H6–H12 接线 hunk 记录（仅 ?bridge=1 生效）
+
+| Hunk | 位置（render_shared/main.js） | 内容 | 默认路径影响 |
+|---|---|---|---|
+| H6-1 | worker.onmessage 之前（约 L1830–L1904） | __fxBenchEnabled(?bridge=1) / __fxBench(session+pending token+active) / __fxFact(postMessage 元数据) / __fxAuthorizeUpload(同步 fail-closed 上传门) / window.__FLUXGS_BENCH_SORT__(薄原语 sortRequested·contextLost·dispose·frameOnce) / webglcontextlost 监听 | 无：__fxBench===null 时全部惰性早退 |
+| H6-2 | e.data.depthIndex 分支 | 上传前发 result-received；门控失败则不触碰 GL 并发 sort-failed(pre-upload-gate)；成功则在原 bufferData 后发 index-uploaded + index-activated 并记录 draw 前 active 快照 | 无：条件首位为 __fxBench |
+| H6-3 | gl.drawArraysInstanced 处 | draw 前冻结 active 快照；draw 返回后发 draw-completed / draw-failed | 无 |
+| H6-4 | 两处 rafId=requestAnimationFrame(frame) + 三处 setTimeout(()=>frame(...),0) | 统一加 if (!__fxBench) 守卫 ⇒ bridge 模式不自驱调度，改由父侧 frameOnce 单次驱动 | 无：__fxBench 为 null 时表达式逐字不变 |
+| H6-5 | worker.onmessage 末支 | worker 的 skipped/failure/bench-sort-rejected ⇒ sort-failed / sort-rejected 事实 + token 置 settled | 无：条件首位为 __fxBench，否则仍为原“忽略”行为 |
+
+事实集合（冻结）：sort-requested, worker-completed, result-received, index-uploaded, index-activated, draw-completed, draw-failed, sort-rejected, sort-failed, barrier-ack, context-lost。depthIndex 字节不进入事实对象、不离开 iframe。
+
+### 独立于 Git 的快照差异审计
+
+快照 C:UsershuangAppDataLocalTemp\flux-main-h1-h5-baseline-20260915.js（sha256 d08e83215d108e970e5c8ef6b4e12bc9938f39dd507daa883d8d2f0d568a9f3f）→ 完成版：
+
+pre 101326 B / 2613 行；post 108564 B / 2743 行（+130 行）
+
+__fxBenchEnabled 0→3, __fxBench 0→36, __fxFact 0→10, __fxAuthorizeUpload 0→2, __FLUXGS_BENCH_SORT__ 0→1, __fxDrawSnap 0→6, frameOnce 0→1, webglcontextlost 0→1, 自驱调度守卫 rafId 0→2 / setTimeout 0→3
+
+全部改动为新增；快照中上述标记零出现。
+
+### 验收
+
+- tools/check_flux_vendor_diff.py（接线后重跑）：EXIT=0，identical=41 lf_only=0 modified=4 missing=4 extra=17
+
+- 默认非 bridge 路径不变量：bench-flux-bridge.test.ts 8 项静态断言 + 7 项 B2 事实驱动断言，EXIT=0（15 passed）
+
+- 仍 pending：真实 Chromium smoke、运行时 Worker 交错采样
+
+### 审计脚本计数分类说明（missing=4 / extra=17 不是零差异）
+
+check_flux_vendor_diff.py 以冻结清单 tools/flux_gh_pages_tree.json 为基线比对 vendor 树：
+
+- identical=41：逐字节一致；lf_only=0：仅行尾差异；modified=4：内容有差异（含 render_shared/main.js，即 H1′–H12 全部改动）；
+- missing=4 / extra=17：基线清单与当前树的结构性差异（清单侧有而工作树无 / 工作树新增而清单无），属已知计划内差异；
+- 脚本对上述计数返回 EXIT=0；两者**不代表无差异**，也不代表验收失败。
+
+### §4 追加：H13（vendor render-only 静态帧）
+
+| Hunk | 位置 | 内容 | 默认路径影响 |
+|---|---|---|---|
+| H13-1 | `frame()` 之前 | 抽出唯一绘制主体 `drawActiveFrame(viewMatrixForDraw, {writeDom})`：返回 boolean；无索引时只 clear；`writeDom=false` 不碰 DOM；内含 H12 的 draw 前快照与 `draw-completed/draw-failed` 事实 | 无（frame() 语义不变） |
+| H13-2 | `frame()` 内原绘制块（62 行） | 改为 `__fxLastActualView = actualViewMatrix` + `drawActiveFrame(...)`；`!drawn ⇒ start = Date.now()+2000` | 逐字等价行为 |
+| H13-3 | bridge 块 + 激活点 | `let __fxLastActualView = null`；active 快照增加 `viewMatrix` | 无（仅 bridge 模式写入） |
+| H13-4 | `window.__FLUXGS_BENCH_SORT__` | 新增 `frameStatic()`（不排序/不改相机/不写 DOM/不调度；单次一 draw）与 `stats()`（`vertexCount>0` 才返回，否则 `null`） | 无（仅 bridge=1 注册） |
+| H13-5 | bridge 块 | 父子 session 一致性：优先读取 `?fxsession=<id>`（父侧下发），缺失才自生成 | 无 |
+
+**`frameStatic()` 负面保证（硬性）**：不调用 `worker.postMessage({view})`、不产生 `sort-requested/sort-completed`、不调用 `gl.bufferData` 上传索引、不更新相机、不写 FPS/benchmark DOM、不安排 rAF/setTimeout；只绘制当前已激活索引与既定 view；draw 返回后产生 `draw-completed`；每次调用恰好一次 controller render call。
+**[H22-A]** 返回值 = **同步归属描述** `{drawn, serial, viewMatrix}`（不再返回裸布尔）：父侧只能在**同一任务**内
+通过跨 realm 调用的返回值得知"本帧真实画了什么"，`draw-completed` 事实保留（审计/幂等确认）但**不再**是
+父侧同步归因的依据。
+
+**`stats()` workload 语义**：仅当 `vertexCount > 0` 返回 `{vertexCount}`，否则 `null`；适配器 `getWorkloadAudit()` 在无有效值时**显式抛错**（禁止用 0/null 冒充有效值，§12.6）。
+
+**`fxsession` 一致性机制**：父侧 `injectBridgeParams(url,w,h,sessionId)` 幂等注入 `bridge=1`/`benchres`/`fxsession`；vendor 以该参数为 session，父子必须一致，否则 Adapter `init()` fail closed。
+
+`missing=4` / `extra=17` 的计数分类说明见上一节（结构性差异，不代表零差异，也不代表验收失败）。
+
+### §4 追加：协议纠错 —— bench 强制排序改为**显式 serial 绑定**（H16）
+
+理由（跨 postMessage 结构化克隆使对象引用同一性恒为假）：
+
+```text
+原判定：main.js `benchPendingView !== null && benchPendingView === viewProj`
+worker 侧：`benchPendingView = e.data.view`（结构化克隆副本）
+⇒ benchForcedThisRun 恒 false ⇒ sortSerial 恒 null ⇒ 父侧 token 永不匹配 ⇒ waitForSortApplied 超时
+```
+
+| Hunk | 位置 | 内容 |
+|---|---|---|
+| H16-1 | worker `runSort` | 判定改为 `typeof benchFrameSerial === "number" && Number.isSafeInteger(benchFrameSerial) && benchPendingSerial !== null && benchFrameSerial === benchPendingSerial`；`benchFrameSerial = null` 一次性消费 |
+| H16-2 | worker `{view}` 分支 | 采集 `benchFrameSerial = typeof e.data.benchSerial === "number" ? e.data.benchSerial : null`（未启用 bridge 时恒 null） |
+| H16-3 | 主线程 `frame()` | 存在待处理 serial 时 `worker.postMessage({ view, benchSerial: __fxBench.pendingSerial })`；否则保持原 `{ view: viewProj }` 逐字不变 |
+| H16-4 | 薄原语 `sortRequested` | 记 token + `pendingSerial` 并**转交 worker**：`{ type: "bench-sort", sortSerial, view, force: true }`（worker 的 benchPendingSerial 只由该分支设置） |
+| H16-5 | 终态清理 | 成功上传 / 上传门失败 / context-lost / dispose / sort-rejected·failed 分支清 `pendingSerial`；迟到或不匹配 serial **不得**清除当前合法 pending |
+
+协议边界不变：单飞（存在 pending 时新请求被 rejected，不覆盖）；默认路径消息形状与排序启发式逐字不变；view 仍用于数据与诊断（`authorizeUpload()` 继续校验 serial + session + token + view）；不匹配 serial 不上传、不推进 accepted/uploaded/active。
+
+静态不变量测试已从"引用同一性"升级为"serial 绑定"（bench-flux-bridge.test.ts #8/#9），并新增默认路径消息形状断言。
+
+
+---
+
+## §4.H19 运行时接线修复：单一视图基线 + 上传门精确诊断 + 终态快速失败
+
+**触发证据（Chromium 烟雾，build `8B-5`）**：`reasons=controller-invalid:exception:waitForSortQuiescence(1) aborted`，
+页面 `diag` 事实日志（末 4 条）：
+
+```
+#1 sort-requested serial=1 ok          ← 父侧登记成功（requestSortOnce）
+#2 sort-requested serial=1 failed      ← vendor 回显事实（父侧 default 分支，不改状态）
+#3 result-received  serial=1 accepted  ← 强制排序真实完成（worker 回传 serial + view）
+#4 sort-failed      serial=1 failed    ← vendor 上传门拒绝 ⇒ 无 index-uploaded ⇒ pending 永不消费 ⇒ 30s 超时
+```
+
+**定位（不需要浏览器的证据）**：把 #1→#3 三条事实在 `FluxBenchBridge` 上逐步重放（真实桥 + 假 transport），
+`authorizeUpload()` 返回 **true** ⇒ **父侧门被排除**（不是失败点）。失败因此只剩 vendor 侧 `__fxAuthorizeUpload()` 的
+四项检查；其中最可能的失败项是**1e-6 逐项比较**：token 内保存的是父侧登记视图（`sortRequested(serial, view16)` 写入
+`{view: viewProj.slice()}`），比较对象却是 vendor 动画 `frame()` 自己重算的 `viewProj = multiply4(projectionMatrix, actualViewMatrix)`
+（`actualViewMatrix` 还经过 `translate4/rotate4(jumpDelta)` + `invert4` 往返）⇒ 两者存在**浮点/动画漂移**，门拒绝上传。
+同序列 `dot ≈ 1`（近乎等价机位）与"漂移"情形一致。
+
+> **（H20 更正）** 上述"最可能的失败项 = vendor 侧 1e-6 逐项比较"**已被 build `8B-6` 的烟雾证伪**：
+> 实际 reason 是 `pre-upload-gate:parent:reject` ⇒ vendor 的 1e-6 舍入比较**通过**了，拒绝发生在**父侧**逐位严格比较。
+> 结论：漂移确实存在，但**门主体选错了视图对象**，而不是 vendor 门太严。详见 §4.H20。
+
+> **证据边界（诚实标注）**：重放只能**排除父侧**、把失败点收敛到 vendor 门；门内究竟是哪一项（`no-token` / `token-settled` /
+> `view-not-16` / `view-drift` / `parent:reject`）需要下一次 Chromium 烟雾的 `pre-upload-gate:<reason>` 才能**直接**读出。
+> H19-1 消除最可能的成因（视图漂移）；H19-3 保证残余成因**自我声明**，不再有"未知原因"。
+
+| Hunk | 位置 | 内容 |
+|---|---|---|
+| H19-1 | 主线程 `frame()` | bridge 模式排序输入改为**登记 token 视图**：`const __fxTok = __fxBench.pending.get(__fxBench.pendingSerial)` → `__fxSortView = __fxTok && Array.isArray(__fxTok.view) && __fxTok.view.length === 16 ? __fxTok.view : viewProj` → `worker.postMessage({ view: __fxSortView, benchSerial: __fxBench.pendingSerial })`；默认路径 `worker.postMessage({ view: viewProj })` 逐字不变 |
+| H19-2 | `__fxBench` 对象 | 新增 `lastAuthReason: null` |
+| H19-3 | `__fxAuthorizeUpload()` | 每条拒绝路径写入精确原因：`vendor:no-token` / `vendor:token-settled` / `vendor:view-not-16` / `vendor:view-drift@<i>=<delta>` / `parent:reject` / `parent:throw` |
+| H19-4 | 上传门失败事实 | `reason: "pre-upload-gate:" + (__fxBench.lastAuthReason || "unknown")`（不再输出 generic 原因，杜绝二次猜测） |
+
+父侧配套（`bench-flux-bridge.ts`，**非** vendor 文件）：`ConditionWaiter` 记录关联 `serial`；`fail()` 在结算单飞 waiter
+**之前**先 `rejectConditionWaiters(serial, reason)` ⇒ 终态事实（rejected / failed / protocol-failure）**立即**以真实原因
+中止 `waitForSortApplied` / `waitForSortQuiescence` / `waitForDrawn`，不再把"精确协议失败"伪装成 30s "aborted"。
+
+不变量保持：严格单飞；session+serial+token+view 五元 fail-closed；`?bridge=1` 之外的默认路径零行为变化；
+depthIndex 字节仍不离开 iframe。
+
+静态/行为锁定测试：`bench-flux-bridge.test.ts` #9（改为断言 token 视图基线，并 `not.toMatch` 旧的 `view: viewProj` 形式）、
+#10（断言上传门精确原因 + `pre-upload-gate:<reason>`）、行为 #8（终态事实必须立即 reject 条件等待者）。
+
+---
+
+## §4.H20 上传门主体纠错：单一规范视图 + 父侧拒绝自证
+
+**触发证据（Chromium 烟雾，build `8B-6`）**：
+
+```
+round=1 method=flux-gs valid=false
+reasons=controller-invalid:exception:pre-upload-gate:parent:reject|pendingSortsAtStart=-1|pendingSortsAtEnd=-1
+        |controllerRenderCalls=0≠30|adapterFrameDelta=2≠30|sort-not-frozen-before-warmup|warmup-draw-not-verified|sort-token-not-proven
+   diag #1 sort-requested serial=1 ok
+   diag #2 sort-requested serial=1 failed
+   diag #3 result-received serial=1 accepted
+   diag #4 sort-failed serial=1 failed
+```
+
+三条结论同时成立：
+1. H19-3/H19-4 **生效**：原因从 generic 变为**精确** `pre-upload-gate:parent:reject`；
+2. H19-5 **生效**：失败**立即**中止（不再是 30s `aborted`）；`controllerRenderCalls=0` 说明轮次在首个 `requestSortOnce`
+   之后即中止，从未进入测量窗口（`adapterFrameDelta=2` = `waitUntilReady` 的 prologue 帧 + 该次排序帧）；
+3. **H19 关于"哪一项检查失败"的猜想被本次证据证伪**：门没有停在 vendor 自己的 1e-6 漂移比较（否则 reason 会是
+   `vendor:view-drift@…`），而是走完了四项 vendor 检查、进入**父侧 validator** 才被拒绝。
+
+**真正的根因（可静态证明）**：两侧比较**语义不同**，而门主体选错了对象。
+
+| 侧 | 比较 | 语义 |
+|---|---|---|
+| vendor `__fxAuthorizeUpload` | `tok.view` vs `viewProj`（1e-6 **四舍五入**） | 宽松：≤ ~5e-7 的漂移**通过** |
+| 父侧 `FluxBenchBridge.authorizeUpload` | `acceptedResults[serial]` vs `viewProj`（`flux-bench-state.sameView`，**逐位 `!==`**） | 严格：任何一位不同即拒 |
+
+调用点传入的是 **frame 局部重算** 的 `viewProj = multiply4(projectionMatrix, actualViewMatrix)`
+（`actualViewMatrix` 经 `translate4/rotate4(jumpDelta)` + `invert4` 往返），而父侧 `acceptedResults` 存的是
+`result-received` 上报的**规范视图** `__fxView`（= 父侧登记视图 = 送 worker 的排序输入视图）。
+⇒ vendor 侧宽松检查通过、父侧严格检查拒绝；两侧**各自都没错**，错的是**把浮点漂移量当成了授权主体**。
+
+> **（H21 更正）** 上述"父侧逐位严格 vs vendor 1e-6 舍入"确实是**真实存在的语义差异**，但**不是本次 `parent:reject` 的成因**：
+> 本分支内的 `viewProj` 其实是 `{ depthIndex, viewProj } = e.data` 解构出的**消息视图**（worker `runSort` 原样回显，
+> 与 `__fxView` **逐位相等**），父侧拒绝它不可能是"视图不一致"，只能是 `acceptedResults` 里**还没有**该 serial ——
+> 即**事实送达时序**问题。§4.H21 给出反证与修复。H20-1（门主体显式写 `__fxView`）作为"身份链一眼可查"的
+> 可读性改动保留，H20-2（`parent:reject@drift=`）作为诊断保留。
+
+| Hunk | 位置 | 内容 |
+|---|---|---|
+| H20-1 | 结果消息处理（`gl.bufferData` **之前**） | 门主体改为**规范视图**：`!__fxAuthorizeUpload(__fxSerial, __fxView)`（此前为 frame 局部 `viewProj`） |
+| H20-2 | `__fxAuthorizeUpload()` 父侧分支 | 裸 `parent:reject` 升级为 `parent:reject@drift=<maxᵢ|tok.view[i]-viewProj[i]|>`：`drift=0` ⇒ 非视图原因（session/单飞/未 force/dispose），`drift>0` ⇒ 视图不一致 |
+
+父侧配套（`bench-flux-bridge.ts` + `bench-flux-adapter.ts`，**非** vendor 文件）：新增 verdict `authorize-rejected`
+与 `FluxBridgeEvent.reason`；`authorizeUpload()` 的**每条**拒绝路径都在事实日志留下精确原因
+（`malformed-serial` / `view-not-16` / `session-mismatch` / `disposed` / `not-in-flight` / `not-forced` / `view-mismatch` / `exception`）；
+`getBridgeEventLog()` 仅在 reason 非空时追加 ` reason=<r>` ⇒ 页面 `diag` 行一次读全
+（例：`#5 sort-rejected serial=1 authorize-rejected reason=not-forced`）；成功路径不写日志，形状不变。
+
+**新增不变量**：授权门的判定主体只能是一个**单一规范视图**，其身份链必须逐位同源：
+`父侧 requestSortOnce(view16)` = `vendor token.view` = `worker 排序输入` = `result-received.viewProj` = `门主体`。
+禁止用"自身重算的浮点近似值"当门主体；也禁止用宽松（1e-6 舍入）比较**替代**父侧的逐位严格门——两者是**不同**的保证。
+
+**已知未闭合（诚实标注）**：绘制路径仍使用 vendor 自身的 `actualViewMatrix`
+（`frameStatic` → `drawActiveFrame(__fxBench.active.viewMatrix)`），它与规范视图只保证"**同一相机 + 浮点噪声**"，
+**不是逐位相等**；噪声量级由 H20-2 在失败路径直接报出，**H22-A 起成功路径也会在同步归属日志里报出**
+（`reason=sync-return drift=<max>`）⇒ 论文协议描述应写成
+"同一相机（float 噪声级）"；若要逐位相等需另开一项（bridge 模式用规范视图覆盖绘制矩阵）。
+**`browser-validated` 仍为 pending**，直到 Chromium 烟雾真正通过。
+
+测试锁定：`bench-flux-bridge.test.ts` #12（静态：门主体必须是 `__fxView`、不得是 `viewProj`；`parent:reject@drift=` 存在
+且裸 `"parent:reject"` 消失）、行为 #11（精确视图 ⇒ `true`；仅低位漂移 `1e-12` ⇒ `false` 且日志
+`authorize-rejected reason=view-mismatch`；`session` / `in-flight` / 长度 / 未 force 四条路径各自自证）。
+
+不变式保持：严格单飞；session+serial+token+view 五元 fail-closed；`?bridge=1` 之外的默认路径零行为变化；
+depthIndex 字节仍不离开 iframe。
+
+---
+
+## §4.H21 同步上传门的时序死角：门不得依赖异步送达的事实
+
+**反证（纯静态推导，无需浏览器即可验证）**：
+
+1. iframe 侧结果处理是**同一任务**内的顺序代码（`main.js` 的 `e.data.depthIndex` 分支）：
+   `__fxFact("result-received")`（postMessage ⇒ **异任务**投递给父侧）→ **同栈**调用
+   `window.parent.__fxbenchAuthorize(...)`（父侧门在 iframe 的**本任务内**同步执行）→ `gl.bufferData`
+   → `__fxFact("index-uploaded")`。
+2. HTML 事件循环保证：任务 T 内 postMessage 的消息只能在 T **之后**的新任务里被父侧处理
+   ⇒ 门执行时父侧**必然**尚未处理 `result-received`。
+3. 于是 `flux-bench-state.acceptedResults` 没有该 serial ⇒ H20 之前的门 `hasAccepted() === false`
+   ⇒ **永远** `parent:reject`（且唯一可能的 reason 就是 `view-mismatch`）。
+4. 排除其余分支：`session` 已由 adapter `init()` 校验一致（不一致会提前抛错）；`forced` 每次请求由 adapter 置位；
+   `inFlight` 只在 `markActive` 释放（在 upload **之后**）；`disposed` 不成立（`sort-failed` 事实仍被父侧入账）。
+   ⇒ 只剩第 3 条。
+
+**协议教训**：跨 realm 的**同步**门只能依据"父侧**同步可达**的知识"（登记 + 单飞 + session + dispose）；
+需要**异步事实**才能建立的知识（"结果已被合法接收"）只能放在**后验**校验点。
+
+| Hunk | 位置 | 内容 |
+|---|---|---|
+| H21-1 | `FluxBenchBridge` 字段 | 新增 `requestedViews: Map<serial, view16>`；`requestSortOnce()` 在 `begin.ok` 之后 `clear()+set()`（严格单飞 ⇒ 至多一条，无无界增长）；`dispose()` 清理 |
+| H21-2 | `authorizeUpload()` | 末项判定由 `state.hasAccepted(serial, view)` 改为**登记表**：`not-registered` / `view-mismatch`（逐位相等，复用 `flux-bench-state.sameView`） |
+| H21-3 | `onFact()` 的 `index-uploaded` / `index-activated` | **后验**校验失败 ⇒ 新增 `abort(serial, reason)`（`markWorkerFailure` + `fail`，立即中止条件等待者）：`protocol-failure:upload-not-accepted` / `protocol-failure:activate-rejected` |
+| H21-4 | `flux-bench-state.ts` | `sameView` 导出，作为"逐位严格"的**唯一**语义权威（禁止各处自造近似比较） |
+| H21-5 | `onFact()` 首次显式处理 `sort-requested` | 该事实在 `FLUX_FACTS` 中**已声明**，但此前落到 `default:` 被记为 `failed` ⇒ diag 里出现**假失败**信号（上轮 `#2 sort-requested serial=1 failed` 即此）。现按"父侧登记 + iframe 回显一致 ⇒ `ok`"处理；顺带补齐"已声明事实必须显式处理"的结构不变量 |
+
+**为什么门没有变松（fail-closed 仍完整）**：
+- 上传**前**：session 一致 ∧ 未 dispose ∧ serial === 当前单飞 ∧ 登记存在 ∧ view 与登记**逐位相等**（否则不触碰 GL）；
+- 上传**后**：`index-uploaded` 处理点（同一 postMessage 队列已**先**处理过 `result-received`）仍要求
+  `acceptedResults[serial]` 与该 view 逐位相等，否则**立即终态**且不得推进 `uploaded/active`；
+- ⇒ "结果合法性"只在**顺序可证**的点校验；非法上传下 `waitForSortQuiescence` 依旧不可能成立。
+
+**布局事实（本轮新澄清，写入文档以免再次误判）**：`render_shared/main.js` 把 `createWorker(self)` 字符串化后
+当 Blob Worker 运行 ⇒ 该文件**同时**含 worker 侧（`runSort`、`self.onmessage`）与页面侧（`frame`、`worker.onmessage`）代码；
+worker `runSort` 的成功消息 **原样回显** `viewProj`（页侧 `e.data.viewProj`）= 本次排序输入视图
+（bridge 模式下 = token 视图 = 父侧登记视图，逐位相等）。
+
+**测试锁定**：`bench-flux-bridge.test.ts` 静态 #12（门主体 = `__fxView`）；行为 #11（逐位严格 + 拒绝自证）、
+#12（**无任何事实**即可授权 = 本时序不变量的关键回归；1e-12 漂移仍拒；随后真实事实序列达静止）、
+#13（后验校验失败 ⇒ 精确原因立即 reject，不是 30s 超时）、#14（`sort-requested` 回显不得记为 failed）、
+#15（`FLUX_FACTS` 每个事实都必须被 `onFact` 显式处理）；#1/#5 依新语义更新（门不再被误建模为"事实驱动"）。
+
+**未改变的不变量**：严格单飞；`?bridge=1` 之外零行为变化；depthIndex 字节不离开 iframe。
+**`browser-validated` 仍 pending**（须由 Chromium 烟雾给出最终判定）；论文主表采集继续禁止。
+
+### 4.H22 —— 两个"跨 realm 同步不可观测"缺陷（H21 之后暴露的下一层）
+
+**触发证据（build `8B-7` Chromium 烟雾，H21 已生效）**：`parent:reject` 与假失败 `sort-requested` 全部消失，
+`controllerRenderCalls=30`、`adapterFrameDelta=30`、`sort-token-not-proven` 也不再出现，只剩：
+
+```
+reasons=controller-invalid:warmup-draw-not-verified|warmup-draw-not-verified|measure-window-audit:changed
+fps=1829.27 frames=30 sortReq=0 sortDone=0 idxUpload=0
+```
+
+两条**互不相同**的根因（都不是"排序/上传/门"的问题）：
+
+1. **H22-A：`lastDraw` 的归因只经异步事实可达，而校验点全是同步读取。**
+   - controller 在 warmup 循环之后**同一任务内**读 `adapter.getSortAudit().lastDrawSortSerial`
+     做 `warmupDrawVerified`；`draw-completed` 事实走 `postMessage` ⇒ 至少晚一个任务
+     ⇒ 该值**恒为 0**（合法轮也判 `warmup-draw-not-verified`）。
+   - adapter 的窗口基线 `windowStartLastDraw` 取在 **`freezeSortRequests()` 时刻**（warmup draw 之前）
+     ⇒ 第 1 轮必然为 0 ⇒ `warmupDrawMissingAtWindowStart=true`（第 2 轮起才"看起来正常"= 更危险的假阳性）。
+   - 单元测试未拦住是因为 fake/`MockAdapter` 在**同一任务**里更新父侧状态（真实跨 realm 不会）。
+2. **H22-B：`finishGpu()` 从未真正同步过 GPU。**
+   `FluxBenchBridge.finishGpu()` 只是 `postMessage({prim:"finish-gpu"})`，而 vendor **没有任何
+   `window.addEventListener("message")`** ⇒ 该消息**无消费者**、finish 静默变成空操作。
+   于是 `totalSyncedMs` 只含 CPU 提交时间：30 帧「1829 fps」≈ 16ms —— 这不是 synchronized throughput，
+   而是**提交吞吐**被贴上了同步 FPS 的标签（比"轮次无效"更危险：它可能让 round **valid=true**）。
+
+**修复原则（与 H21 同一条）**：跨 realm 的**同步**判定只能依据"同一任务内可达"的信息；
+父侧**发起**调用的那一刻，唯一同任务可达的返回通道就是**调用返回值**。
+
+| Hunk | 位置 | 内容 |
+|---|---|---|
+| H22-A-1 | `render_shared/main.js` 的 `frameStatic()` | 返回值由 `boolean` 改为**归属描述** `{drawn, serial, viewMatrix}`（只有 `drawActiveFrame` 真实执行才带 serial/view；`__fxBench.active` 在同任务内不会被替换 ⇒ 归属可信） |
+| H22-A-2 | `FluxBenchState.markDrawnSync(serial)` | 新增**唯一同步**归因入口：只接受"当前 `activeSerial`"（fail-closed），写 `lastDrawSerial` + `drawnResults`；事实路径（`markDrawAttempt`）退化为**幂等确认** |
+| H22-A-3 | `FluxBenchBridge.noteStaticDrawSync(res)` | 解析同步返回值；未 draw／无 serial（旧布尔返回）／serial ≠ active ⇒ **不记账**并留精确原因（`sync-not-drawn` / `sync-no-attribution` / `sync-stale-serial`）；成功时留痕 `draw-completed … ok reason=sync-return[ drift=<max>]`（**每个 serial 只在首次**留痕，其余帧由计数承担，避免 30 行同构日志淹没诊断尾部） |
+| H22-A-4 | `bench-flux-adapter.ts` | `renderStaticFrame()` 消费同步返回值并把**窗口基线**改到 warmup draw **之后**；`warmupDrawMissingAtWindowStart := !同步归因成功 ∨ lastDraw ≠ 冻结时的 active`（与共享 slave 同语义） |
+| H22-A-5 | `FluxBenchBridge.commitDraw()` | **每帧配对**计数：同步归属时记一个"待确认槽位"，随后的 `draw-completed` 事实优先消耗槽位（不计数）⇒ 同步路径与纯事实路径都恰好计 1 次，无双重计数 |
+| H22-B-1 | `render_shared/main.js` 薄原语 | 新增 `finishGpu: () => { gl.finish(); return true; }`（`gl` 只存在于 iframe realm ⇒ 只能跨 realm **同步**调用） |
+| H22-B-2 | `FluxBenchBridge` / `FluxGsAdapter` | **删除** `bridge.finishGpu()`（无人消费的 `prim:"finish-gpu"`）；`FluxGsAdapter.finishGpu()` 改为直连同名原语，**缺失/返回 false ⇒ 抛错**（round 以 `exception:` 失效，而不是悄悄给出不可比的数字） |
+| H22-C | 文档/注释 | 8B 路径的"父 → iframe 驱动"全部走薄原语直接调用；`tx.post({prim:*})` 在本 vendor 中**没有监听者**（保留为既有 API，不参与判定） |
+
+**fail-closed 仍完整**：H22-A 的同步归因只在 vendor 明确回报 `drawn===true ∧ serial===active` 时成立
+（画了别的一代索引、`vertexCount<=0` 的 early return、旧布尔返回一律不记账）；
+H22-B 在缺原语时**拒绝**给出任何 FPS；`?bridge=1` 之外零行为变化。
+
+**测试锁定**：`bench-flux-bridge.test.ts` #16（同步归因：无任何事实即可推进 `lastDraw`；同 serial 多帧只计数不重复留痕；
+异步事实只做确认、不翻倍计）、#17（三类 fail-closed 精确原因）、#18（**结构不变量**：vendor 必须暴露同步 `finishGpu`
+与归属描述、父侧不得再用无人消费的 `prim:"finish-gpu"`）；`bench-flux-adapter.test.ts` #12（**本缺陷的关键回归**：
+freeze 后基线是 fail-closed、warmup draw 之后 `lastDraw` **同步可见**且 `warmupDrawMissingAtWindowStart=false`）、
+#13（缺同步 `finishGpu` ⇒ 抛错；存在 ⇒ 真实调用）；`flux-bench-state.test.ts` #11（`markDrawnSync` 只认 active）。
+
+**运维提示**：烟雾/正式采集必须由**仓库根**提供页面（`gsplat.js/` 为 web root），因为
+`site-dist/flux-gs-project-gh-pages/render_shared/main.js` 是**旧快照**（不含 `frameStatic` / `__fxbenchAuthorize` /
+本次 H22 hunks）；若要公网复测，先 `npm run site:build` 重新生成 site-dist。
+
+**`browser-validated` 仍为 pending**：`8B-7` 的失败已被完整归因，但 H22 结论必须由 build `8B-8` 的 Chromium 烟雾
+（`valid=true`）给出；**在烟雾通过前，论文主表采集继续禁止**（这条禁令不因任何单测变绿而解除）。
+
+

@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Three-way bench — static-render-only-synchronized-throughput-v1</title>
+        <style>
+            body {
+                font: 13px/1.5 ui-monospace, Consolas, monospace;
+                margin: 12px;
+            }
+            /* iframe 生命周期归 Adapter；页面只提供离屏容器（避免影响主线程计时） */
+            #stage iframe {
+                position: absolute;
+                left: -10000px;
+                top: 0;
+            }
+            #status {
+                white-space: pre-wrap;
+                margin-bottom: 8px;
+            }
+            #out {
+                white-space: pre-wrap;
+                border: 1px solid #ccc;
+                padding: 8px;
+                max-height: 60vh;
+                overflow: auto;
+            }
+            button {
+                margin: 4px 0;
+            }
+        </style>
+    </head>
+    <body>
+        <h3>三臂静态吞吐（static-render-only-synchronized-throughput-v1）</h3>
+        <div id="status">准备中…</div>
+        <button id="copy">复制结果</button>
+        <button id="download">下载结果 (.txt)</button>
+        <div id="out"></div>
+        <div id="stage"></div>
+        <script type="module">
+            import { main } from "./bench-three-way.ts";
+
+            /** 复制：安全上下文用 clipboard API；http://<LAN-IP> 下退化为 execCommand。 */
+            async function copyText(text) {
+                if (navigator.clipboard && window.isSecureContext) {
+                    await navigator.clipboard.writeText(text);
+                    return true;
+                }
+                const ta = document.createElement("textarea");
+                ta.value = text;
+                ta.setAttribute("readonly", "");
+                ta.style.position = "fixed";
+                ta.style.top = "-1000px";
+                document.body.appendChild(ta);
+                ta.select();
+                ta.setSelectionRange(0, ta.value.length);
+                let ok = false;
+                try {
+                    ok = document.execCommand("copy");
+                } catch (err) {
+                    ok = false;
+                }
+                document.body.removeChild(ta);
+                return ok;
+            }
+
+            const btn = document.getElementById("copy");
+            btn?.addEventListener("click", async () => {
+                const text = document.getElementById("out")?.textContent || "";
+                if (!text.trim()) {
+                    btn.textContent = "暂无可复制结果";
+                    return;
+                }
+                try {
+                    const ok = await copyText(text);
+                    btn.textContent = ok ? "已复制 ✓" : "复制失败：请用下载按钮";
+                } catch (err) {
+                    btn.textContent = `复制失败：${String(err)}`;
+                }
+                setTimeout(() => {
+                    btn.textContent = "复制结果";
+                }, 2000);
+            });
+
+            document.getElementById("download")?.addEventListener("click", () => {
+                const text = document.getElementById("out")?.textContent || "";
+                const u = new URLSearchParams(location.search).get("u") || "run";
+                const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+                const a = document.createElement("a");
+                a.href = URL.createObjectURL(blob);
+                a.download = `three-way-${u}-${Date.now()}.txt`;
+                a.click();
+                URL.revokeObjectURL(a.href);
+            });
+
+            main().catch((err) => {
+                const s = document.getElementById("status");
+                if (s) s.textContent = `运行失败：${String(err && err.stack ? err.stack : err)}`;
+            });
+        </script>
+    </body>
+</html>
