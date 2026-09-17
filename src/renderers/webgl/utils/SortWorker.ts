@@ -226,7 +226,10 @@ const runSort = () => {
         }
 
         const depthIndex = new Uint32Array(heapU32.buffer, depthIndexPtr, sortData.vertexCount);
-        let detachedDepthIndex = new Uint32Array(depthIndex.slice().buffer);
+        // 显式标注类型：`slice()` 出来的是 Uint32Array<ArrayBufferLike>，而 cullFrustum 的签名
+        // 也是 Uint32Array（= ArrayBufferLike 参数化），不标注时 TS 5.7+ 会把这里的推断收窄成
+        // Uint32Array<ArrayBuffer>，导致下一行赋值报 TS2322。仅类型标注，运行行为不变。
+        let detachedDepthIndex: Uint32Array = new Uint32Array(depthIndex.slice().buffer);
 
         if (cullEnabled) {
             detachedDepthIndex = cullFrustum(detachedDepthIndex);

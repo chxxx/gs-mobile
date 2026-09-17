@@ -13,7 +13,7 @@
 | `bench-flux-camera.json` | 从 Flux-GS 官方渲染器源码抽出的相机（`cam=flux` 用）；由 `tools/extract_flux_camera.py` 生成 |
 | `baseline-scenes.json` | reduced-3DGS 场景清单 |
 | `flux-baseline-scenes.json` | Flux-GS 场景清单 |
-| `flux-gs-project-gh-pages/render_shared/main.js` | Flux-GS 渲染器（仅加测量钩子，见文件内 `[BENCH INSTRUMENTATION]`） |
+| `flux-gs-project-gh-pages/render_shared/main.js` | Flux-GS 渲染器（仅加**测量钩子**，见文件内 `[BENCH INSTRUMENTATION]`：4 个最小入口 + 分辨率覆盖 + 打点，**不含任何计时状态机**） |
 | `flux-gs-project-gh-pages/render_bonsai/` `render_stump/` | 补齐的两个场景页 |
 | `flux-gs-project-gh-pages/scene/*.json` | Flux-GS 13 个场景的压缩模型（约 46MB，**已入库**；部署时同源提供） |
 | `reduced-3dgs-urls.json` | reduced-3DGS 量化模型的下载链接表（可编辑，供 fetch 脚本使用） |
@@ -94,20 +94,25 @@ npm run site:preview
 | `bench-camviews.json` | `bench.html?...&exportPose=1` 的结果 + `tools/make_bench_camviews.py` | 本文机位（`pose=ours` 这种实验路径才用；正式流程不需要） |
 | `bench-camviews-flux.json` | `tools/align_flux_positions.py` | 把本文机位换算到 Flux 坐标系（**已废弃**：两套模型本来同坐标系） |
 | `bench-flux-camera-aligned.json` | `tools/align_flux_positions.py` | 把 Flux 相机对齐到本文坐标系（**已废弃**） |
-| `bench-resolutions.json` | `tools/make_bench_resolutions.py` | 逐场景原生分辨率表；仅在用 `res=table`（Flux 原生分辨率口径）时需要 |
+| `bench-resolutions.json` | `tools/make_bench_resolutions.py` | 逐场景原生分辨率表；**已废弃**（主表改用统一像素协议），仅作历史记录 |
 | `../thesis_project/data/ch7_measurements/**` | 结果卡片复制 + `tools/ch7_baseline_report.py` | 原始结果与报表（在论文仓库侧，已被主仓库 `.gitignore` 忽略） |
 
-## 4. 正式实测（三方严格同视角）
+## 4. 正式实测（三方严格同口径：统一像素协议）
 
 ```text
 本方法：    bench.html?profile=full&rounds=3&cold=1&u=gen3-01&proto=flux&res=1600x1063&cam=flux
 reduced：   bench.html?profile=reduced3dgs&rounds=3&cold=1&u=gen3-01&proto=flux&res=1600x1063&cam=flux
-Flux-GS：   bench-flux.html?profile=full&rounds=3&cold=1&u=gen3-01&warmup=0&force=1600x1063
+Flux-GS：   bench-flux.html?profile=full&rounds=3&cold=1&u=gen3-01&warmup=0
 ```
 
+- **统一像素协议（主表口径）**：三臂画布都是 1600×1063。Flux-GS 臂**不需要写 `force=`**——
+  `bench-flux.ts` 默认就把 `res` 当成它的强制像素附加 `benchres=`（`force=WxH` 可覆盖，`force=native` 才退回其自适应策略）；
 - `proto=flux`：`warmup=0`（无预热）+ `frames=300`，与 Flux-GS 原实现一致；
 - `cam=flux`：使用 `bench-flux-camera.json` 里它自己的 `defaultViewMatrix`（焦距同步 1159.588）；
-- Flux 页通过 `[BENCH INSTRUMENTATION]` 钩子在启动时冻结轮播（`carousel=false`），使视角可复现、且与另外两个方法完全一致。
+- Flux 页通过 `[BENCH INSTRUMENTATION]` 钩子在测帧会话开始（`__FLUXGS_BENCH_BEGIN__`）时冻结轮播（`carousel=false`），
+  统一像素协议下更早在页面 load 时就冻结，使视角可复现。
+- **`force=native` 只在附录出现**：那是它的自适应分辨率（随 dpr 与文件体积变化），各臂不对等、**不可比 FPS**；
+  结果头/逐轮行会写 `res_mode=forced|native`，报表脚本据此过滤。
 - 设备名（`chip=`/`vendor=`）：两个测帧页共用 `bench-chip.ts` 的同一份映射（Adreno→骁龙、Mali/Immortalis→天玑），
   保证两臂结果头写法一致；Flux 臂的 GPU 名由 iframe 内的渲染器**用自己的上下文**上报
   （`render_shared/main.js` 写入 `__FLUXGS_STATS__.glRenderer`），外层**不建任何探测上下文**——

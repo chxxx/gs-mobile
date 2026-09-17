@@ -15,6 +15,12 @@
  * URL：bench.html?mode=bench&profile=quick|full|mip360|tnt|db&rounds=3&cold=1&u=xxx&res=1600x1063
  *      bench.html?mode=view&scene=garden&fpsoverlay=1
  *
+ * 外部测试者（自动回传，2026-09-17 追加）：
+ *   `&report=<url>&rtok=<口令>` → 测完自动把 [RESULT] 文本 POST 到 `<url>?token=<口令>`，
+ *   测试者只需"打开链接 → 等 → 关页面"；`rtok` 由分发链接带入，不写死在代码里（换口令只换链接）。
+ *   接收端 = vite dev server 的 /__ch7/report 中间件（见 vite.config.js），落盘到
+ *   thesis_project/data/ch7_measurements/raw/。口令不符时提交失败，页面会退回"手动复制"按钮。
+ *
  * 诊断/调试参数（都不进任何性能指标）：
  *   ?diag=1          每轮结果里附加 job=/retry=/ctxlost=/iframe_ms=/dispose_ms=/trace=
  *   ?jobtimeout=ms   单轮上限，默认 300000
@@ -22,6 +28,11 @@
  *   ?docjobs=N       一个顶层文档内最多跑几个 job，默认 4（`?perpage=1`=每轮重启、`?perpage=0`=不重启）；
  *                    手机端一个文档累积到 8~9 个 WebGL context 就会拿不到新上下文（getContext=null），
  *                    整页重启是唯一稳定的回收方式；重启在测量之后，不计入任何指标
+ *   ?hop=0           关掉"整页重启必经的零上下文中转页"（默认**开启**，见 bench-shared.hopUrlFor）。
+ *                    中转页 bench-hop.html 不建任何上下文/Worker：先把本页文档整个换掉，在那里停
+ *                    hopms 毫秒（此期间渲染进程里零上下文），再进新页 —— 这一条是"手机端第 2~3 轮
+ *                    建不出上下文"的历史修复，A/B 对照时才关掉
+ *   ?hopms=N         中转页停留时长，默认 1500（上限 5000；`0` 等价于关闭）
  *   ?losectx=1       轮末额外主动 loseContext（**默认关闭**，见 bench-measure.dispose 注释）
  *   ?ctxretry=1      调试：同一文档内对建上下文做 0/400/900ms 三次重试（默认只试一次，失败交给整页重启）
  *   ?ctxlosttest=1   调试：每轮 attempt=0 时在子页面里故意丢失一次上下文，验证"失败 → 销毁旧 iframe → 重试"
@@ -34,11 +45,15 @@
  */
 import {
     ARCHIVE_KEY,
+    BENCH_FADE_LABEL,
+    CAM_FLUX,
     CASE_DISPOSE_TIMEOUT_MS,
     CASE_DOC_RETRY_DELAY_MS,
     CASE_READY_TIMEOUT_MS,
     CASE_RETRY_LIMIT,
+    HOP_PAGE,
     PAGE_RETRY_PARAM,
+    PROTO_FLUX,
     STATE_KEY,
     benchFrameCount,
     buildCasePageUrl,
@@ -47,6 +62,8 @@ import {
     effectiveFocalPx,
     expandProfile,
     fmt,
+    hopDelayMs,
+    hopUrlFor,
     jobsPerDocument,
     jobTimeoutMs,
     loadManifest,
@@ -59,6 +76,9 @@ import {
     sceneById,
     shortDeviceLabel,
     sleep,
+    submitReport,
+    throughputDriver,
+    throughputFields,
     warmupFrames,
 } from "./bench-shared";
 import type { BenchState, CasePhase, CaseToParentMessage, RoundResult, SceneMeta } from "./bench-shared";
@@ -85,6 +105,8 @@ const welcome = $<HTMLElement>("welcome");
 const resultCard = $<HTMLElement>("result-card");
 const rcText = $<HTMLTextAreaElement>("rc-text");
 const rcSummary = $<HTMLElement>("rc-summary");
+/** 结果卡底部那行提示（`report=` 模式下换成"结果会自动回传，无需任何操作"） */
+const rcNote = $<HTMLElement>("rc-note");
 const btnStart = $<HTMLButtonElement>("btn-start");
 const btnStop = $<HTMLButtonElement>("btn-stop");
 const btnStop2 = $<HTMLButtonElement>("btn-stop-2");
@@ -138,10 +160,27 @@ function isCtxUnavailable(r: RoundResult): boolean {
     return /WEBGL2_UNAVAILABLE/.test(r.err ?? "") || /返回 null/.test(r.err ?? "");
 }
 
-/** 保存断点后整页重启（`withDocRetry=true` 表示用掉"整页重试一次"的额度）。 */
+/** 日志里只显示 `bench*.html` 这一段（隐藏局域网主机名与查询串里的随机令牌）。 */
+function shortUrl(u: string): string {
+    return u.replace(/^.*\/(bench[^/?#]*)/, "$1");
+}
+
+/**
+ * 保存断点后整页重启（`withDocRetry=true` 表示用掉"整页重试一次"的额度）。
+ *
+ * **经零上下文的中转页**（`bench-hop.html`）再进新页：本页文档连同它的上下文先被换掉，
+ * 在中转页里停 `hopms`（默认 1500ms，此期间渲染进程里零 WebGL 上下文），然后才建新上下文。
+ * 这一段（以及中转页停留）都在测量区间之外，不计入任何指标；`?hop=0` 退回"本页直接 replace"口径。
+ */
 function restartPage(withDocRetry: boolean): void {
-    const url = restartPageUrl(withDocRetry);
-    logBench("restart", `整页重启 → ${url.replace(/^.*bench\.html/, "bench.html")}`);
+    const target = restartPageUrl(withDocRetry);
+    const url = hopUrlFor(target);
+    logBench(
+        "restart",
+        url === target
+            ? `整页重启（hop=0 直切）→ ${shortUrl(target)}`
+            : `整页重启（经中转页 ${HOP_PAGE}，停 ${hopDelayMs()}ms）→ ${shortUrl(target)}`,
+    );
     location.replace(url);
 }
 /** 父页面自己的生命周期日志：每行都带 jobId，便于把"旧轮清理"和"本轮崩溃"分开 */
@@ -160,6 +199,11 @@ function formatTrace(trace: Array<[string, number]>): string {
  * 只保留"数字 / 字符串 / 布尔"的结果字段。
  * 父页面**绝不能**通过 postMessage 或结果数组持有 Splat / RenderData / ArrayBuffer / TypedArray
  * 这类大对象：它们会把旧轮的模型数据钉在内核里，几轮之后就是显存/内存压力。
+ *
+ * ⚠️ **新增字段必须在本函数里登记**（numKeys / strKeys / 下面的布尔白名单），否则会被**静默丢弃**：
+ * 2026-09-16 的 `fpsCapped` 就是这样丢的 —— 子页面（bench-measure.ts:733）其实判过
+ * `fpsCapped=1`，父页面拿到的却是 undefined、逐轮一律打印 `fps_capped=0`，
+ * 使"帧率已贴驱动地板"的轮次被误当成渲染性能差异（由逐轮 `floor_used_ms=` 自查发现）。
  */
 function sanitizeRoundResult(raw: RoundResult): RoundResult {
     const out: RoundResult = {
@@ -192,6 +236,14 @@ function sanitizeRoundResult(raw: RoundResult): RoundResult {
         "gapMinMs",
         "gapMaxMs",
         "warmupMs",
+        "syncMs",
+        "syncFrames",
+        // 2026-09-17 追加：帧内阻塞耗时（诊断/自检用，不可用于算倍数；口径见 bench-shared.frameMs）——
+        // 与上面两个字段一样，漏登记 = 静默丢弃，结果就是逐轮行 `frame_ms=` 恒为空（本文件顶部警告的同一个坑）。
+        "frameMs",
+        "frameMeanMs",
+        "timerFloorMs",
+        "timerFloorRounds",
         "firstFrameCoveredPct",
         "validateFramesUsed",
         "visibilityInsidePct",
@@ -202,7 +254,22 @@ function sanitizeRoundResult(raw: RoundResult): RoundResult {
             out[key] = value;
         }
     }
-    const strKeys = ["dataset", "err", "gl", "jobId", "prevErr", "trace", "driver", "timeline"] as const;
+    const strKeys = [
+        "dataset",
+        "err",
+        "gl",
+        "jobId",
+        "prevErr",
+        "trace",
+        "driver",
+        "timeline",
+        "timerFloorSrc",
+        "resMode",
+        // 机位口径（2026-09-17 追加）：漏登记就会被**静默丢弃**（见本函数顶部警告），
+        // 结果就是逐轮行 `pose=` 恒为空、报表侧查不出机位差异。
+        "poseKey",
+        "poseSrc",
+    ] as const;
     for (const key of strKeys) {
         const value = raw[key];
         if (typeof value === "string") {
@@ -212,6 +279,9 @@ function sanitizeRoundResult(raw: RoundResult): RoundResult {
     if (typeof raw.drawOk === "boolean") out.drawOk = raw.drawOk;
     if (typeof raw.contextLost === "boolean") out.contextLost = raw.contextLost;
     if (typeof raw.loseCtx === "boolean") out.loseCtx = raw.loseCtx;
+    // 布尔口径字段（**漏登记 = 静默丢弃**，见上面的警示）：fpsCapped 决定"该轮帧率是不是被驱动
+    // 地板卡住"（`1000/fps ≤ floor_used_ms × 1.05`），漏掉它会让本文臂/基线臂的 fps_capped 恒为 0。
+    if (typeof raw.fpsCapped === "boolean") out.fpsCapped = raw.fpsCapped;
     return out;
 }
 /** 用户点了"停止测试" */
@@ -366,11 +436,44 @@ function buildResultText(st: BenchState): string {
     lines.push(`cold=${st.cold ? 1 : 0}`);
     lines.push(`res=${st.resW}x${st.resH}`);
     lines.push(`frames=${st.benchFrames}`);
-    lines.push(`driver=${param("driver", "raf") === "timer" ? "timer" : "raf"}`);
+    // 帧驱动与 FPS 定义：与 Flux-GS 臂**同名字段**（throughputFields 是两页共用的格式函数），
+    // 报表脚本据此核对两臂口径一致；res_mode 用于把非统一像素协议的行挡在主表之外。
+    // timer_floor_ms / sync_ms 取自各轮上报（真实值在子页面测得），取不到时写 "-"。
+    const okRounds = st.results.filter((r) => r.ok);
+    lines.push(
+        ...throughputFields({
+            driver: throughputDriver(),
+            // 本文臂（含 reduced-3DGS 臂）恒为统一像素协议：bench-case 把后备缓冲钉死为 res
+            resMode: "forced",
+            timerFloorMs: median(okRounds.map((r) => r.timerFloorMs ?? 0).filter((v) => v > 0)),
+            timerFloorRounds: okRounds.find((r) => r.timerFloorRounds)?.timerFloorRounds,
+            timerFloorSrc: okRounds.find((r) => r.timerFloorSrc)?.timerFloorSrc,
+            // sync_ms / sync_frames 取各轮中位数（**含 0**：GPU 很快时就是 0.00ms，过滤掉 0 会显示成 "-"）
+            syncMs: median(okRounds.map((r) => r.syncMs).filter((v): v is number => typeof v === "number")),
+            syncFrames: median(okRounds.map((r) => r.syncFrames).filter((v): v is number => typeof v === "number")),
+            // 帧内阻塞耗时（2026-09-17 追加）：**漏传这两个字段就会显示成 `-`**
+            // （与逐轮行同款坑：子页面算了、白名单登记了、拷贝点也拷了，最后在这一处汇总忘传）。
+            frameMs: median(okRounds.map((r) => r.frameMs).filter((v): v is number => typeof v === "number")),
+            frameMeanMs: median(okRounds.map((r) => r.frameMeanMs).filter((v): v is number => typeof v === "number")),
+            fpsCapped: okRounds.some((r) => r.fpsCapped),
+            // bench 模式**不挂 FadeInPass**（两臂架构对等）；Flux 臂没有这个档位，它那边写 n/a。
+            fade: BENCH_FADE_LABEL,
+        }),
+    );
+    // 本文臂载入期口径分解（与逐轮 `parse_ms=` 一一对应；Flux 臂的对应字段是 `decode_ms=`/`tex_ms=`）：
+    //   parse_ms = responseEnd → loadSplat() 返回（PLY 读取 + 低秩解码 worker + 合并），**不含首次深度排序**；
+    //   首次排序 + 首次真实绘制都落在 first_frame_ms 里（子页面 waitForSortedFrame 门禁保证排序已回传）。
+    // 之所以要写明：两臂的"载入期重活"构成不同（本文=解析+排序；基线=解码+纹理上传），
+    // 所以 parse_ms 与 decode_ms **不能直接相减比较**，只能比 first_frame_ms，并把 breakdown 写进表注。
+    lines.push("parse_def=response_end_to_load_complete_depth_sort_excluded");
+    lines.push(`stage=${STAGE_LABEL}`);
     lines.push(`validateframe=${param("validateframe", "1") !== "0" ? 1 : 0}`);
     lines.push(`holdms=${parseInt(param("holdms", "0"), 10) || 0}`);
     lines.push(`proto=${param("proto", "")}`);
-    lines.push(`cam=${param("cam", "") === "flux" ? "flux" : "auto"}`);
+    lines.push(`cam=${CAM_FLUX ? "flux" : "auto"}`);
+    // 机位来源（与 Flux-GS 臂的 `pose_src=` 同名字段）：ch7_baseline_report.py 用它核对
+    // "两臂的机位口径是否同一档"，避免只靠人记得看 cam= 这一个参数
+    lines.push(`pose_src=${CAM_FLUX ? "flux" : "auto"}`);
     lines.push(`warmup=${warmupFrames()}`);
     lines.push(`fx=${Math.round(fx * 1000) / 1000}`);
     lines.push(`ts=${new Date().toISOString()}`);
@@ -399,6 +502,28 @@ function buildResultText(st: BenchState): string {
             `covered=${fmt(r.coveredPct, 1)}%`,
             `kept=${fmt(r.keptPct, 1)}%`,
         ];
+        // 口径字段（**始终打印**，不受 diag 开关影响）：报表脚本要用它们过滤主表
+        // （res_mode=forced 才允许跨方法比较）并核对新加的 GPU 同步诊断。
+        tags.push(
+            `driver=${r.driver ?? ""}`,
+            `res_mode=${r.resMode ?? "forced"}`,
+            `frames=${r.frames ?? ""}`,
+            `elapsed_ms=${fmt(r.elapsedMs, 0)}`,
+            `sync_ms=${fmt(r.syncMs, 2)}`,
+            `sync_frames=${r.syncFrames ?? ""}`,
+            // 帧内阻塞耗时（诊断/自检用）：与 `floor_used_ms` 并排打印，可核对 `cpu_ms ≈ 地板 + frame_ms`；
+            // 但贴地板的轮次两边读数都贴在量化下限上，**不得用它算两臂倍数**（倍数取帧间隔之比）。
+            `frame_ms=${fmt(r.frameMs, 2)}`,
+            `frame_mean_ms=${fmt(r.frameMeanMs, 2)}`,
+            // 判定 fps_capped 时**实际引用**的本轮实测地板：表头 timer_floor_ms= 是各轮中位数，
+            // 与本字段不是同一个数；有了它，`fps_capped` 就能在结果文本里直接用
+            // `1000/fps ≤ floor_used_ms × 1.05` 手算复核，不必再猜。
+            `floor_used_ms=${fmt(r.timerFloorMs, 2)}`,
+            `fps_capped=${r.fpsCapped ? 1 : 0}`,
+        );
+        // 机位口径（**始终打印**，不受 diag 开关影响）：`pose=` 与 Flux-GS 臂逐轮行的同名同格式，
+        // tools/ch7_baseline_report.py 据此跨臂核对"两臂是否同一个机位"。
+        tags.push(`pose=${r.poseKey ?? ""}`, `pose_src=${r.poseSrc ?? ""}`);
         if (diag) {
             // 诊断字段：只描述"这一轮是怎么被隔离执行的"，不参与任何性能指标
             tags.push(
@@ -412,9 +537,6 @@ function buildResultText(st: BenchState): string {
             );
             // 测帧有效性的关键诊断（证明"确实渲染了 N 帧、且持续了合理时间"）
             tags.push(
-                `driver=${r.driver ?? ""}`,
-                `frames=${r.frames ?? ""}`,
-                `elapsed_ms=${fmt(r.elapsedMs, 0)}`,
                 `renders=${r.renders ?? ""}`,
                 `gap_med_ms=${fmt(r.gapMedMs, 2)}`,
                 `gap_min_ms=${fmt(r.gapMinMs, 2)}`,
@@ -454,6 +576,9 @@ function buildResultText(st: BenchState): string {
                 `first_frame_ms_median=${fmt(median(ok.map((r) => r.firstFrameMs ?? NaN).filter((v) => Number.isFinite(v))), 0)}`,
                 `parse_ms_median=${fmt(median(ok.map((r) => r.parseMs ?? NaN).filter((v) => Number.isFinite(v))), 0)}`,
                 `fetch_ms_median=${fmt(median(ok.map((r) => r.fetchMs ?? NaN).filter((v) => Number.isFinite(v))), 0)}`,
+                // 机位指纹（取该场景首个有效轮）：与 flux 臂 summary 行的 `pose=` 同名同格式，
+                // 报表里同场景两行并排即可直接比对机位
+                `pose=${ok[0]?.poseKey ?? ""}`,
             ].join(" "),
         );
     }
@@ -462,10 +587,18 @@ function buildResultText(st: BenchState): string {
 }
 
 // ------------------------------------------------------------------ iframe 生命周期
-/** `?fit=1`：按离屏分辨率等比缩放显示（画面比例正确，但窗口比例不匹配时会有黑边）。
- *  默认（不带该参数）iframe 直接铺满整个渲染区：与旧 bench.html 的画布行为一致，
- *  显示尺寸不影响被测负载——子页面的画布后备缓冲始终由它自己用 `res=WxH` 显式设置。 */
-const FIT_STAGE = param("fit") === "1";
+/**
+ * 台上布局（**1:1 对齐基线**）：
+ *   `fit=1`（`proto=flux` 时默认）：iframe 的**布局尺寸 = res 像素**（于是子页面看到的
+ *   `innerWidth/Height` 与画布一致，和基线 Flux-GS 臂的 `frameHost` 摆法相同），仅用 CSS
+ *   `transform: scale()` 等比缩小显示 —— 缩放只影响观感，不改变被测渲染负载；窗口比例不匹配时留黑边。
+ *   `fit=0`（显式关掉，或非 proto=flux）：iframe 铺满整个渲染区（画布被非等比拉伸显示），
+ *   只有观感/历史数据对照用，**不要**用于正式跨臂采集。
+ * 两种取值都写进结果头 `stage=`，可事后核对。
+ */
+const FIT_STAGE = param("fit", PROTO_FLUX ? "1" : "0") === "1";
+/** 台上布局标签：写进结果头，供 `tools/ch7_baseline_report.py` 核对两臂同构。 */
+const STAGE_LABEL = FIT_STAGE ? "fit1" : "fill";
 
 function layoutCaseStage(): void {
     if (!FIT_STAGE) return;
@@ -791,7 +924,30 @@ async function runCaseJob(meta: SceneMeta, roundNo: number, st: BenchState, atte
         out.gapMinMs = clean.gapMinMs;
         out.gapMaxMs = clean.gapMaxMs;
         out.warmupMs = clean.warmupMs;
+        // 2026-09-16 新增：GPU 同步 / 计时地板 / 是否被地板卡住 / 像素口径
+        out.syncMs = clean.syncMs;
+        out.syncFrames = clean.syncFrames;
+        // 2026-09-17 追加（同一份白名单+拷贝点的坑，第三次登记）：帧内阻塞耗时（诊断/自检用，不可算倍数）
+        out.frameMs = clean.frameMs;
+        out.frameMeanMs = clean.frameMeanMs;
+        out.timerFloorMs = clean.timerFloorMs;
+        out.timerFloorRounds = clean.timerFloorRounds;
+        out.timerFloorSrc = clean.timerFloorSrc;
+        out.fpsCapped = clean.fpsCapped;
+        out.resMode = clean.resMode;
         out.firstFrameCoveredPct = clean.firstFrameCoveredPct;
+        // 2026-09-17 新增：机位口径（逐轮 `pose=` / `pose_src=`）—— 与上面的 `fpsCapped` 同款坑：
+        // 子页面（bench-measure）已经写进结果，但父页面在这里逐字段拷贝，漏登记就等于没这回事。
+        out.poseKey = clean.poseKey;
+        out.poseSrc = clean.poseSrc;
+        // 2026-09-17 补登记（**同款坑的第二次踩**：这三个字段在 sanitizeRoundResult 的白名单里，却漏了
+        // 这里的逐字段拷贝，结果 diag=1 的报告里 `timeline=` 恒为空、`vis_inside=` 恒为 "-%"，
+        // 排查"首帧残缺/时序"时看不到关键证据）：
+        //   validateFramesUsed / visibilityInsidePct ← 渲染存活探针（门禁 2）的结论
+        //   timeline                                 ← 子页面打点时间线（诊断首帧口径的**唯一**绝对时刻证据）
+        out.validateFramesUsed = clean.validateFramesUsed;
+        out.visibilityInsidePct = clean.visibilityInsidePct;
+        out.timeline = clean.timeline;
         if (clean.fx && clean.fx > 0) focalPxReported = clean.fx;
     } else {
         out.ok = false;
@@ -930,6 +1086,20 @@ async function runBench(st: BenchState): Promise<void> {
     }
 }
 
+/** `report=` 模式（外部测试者）结果卡文案的两个状态标记 */
+const REPORT_SUBMITTING = "结果正在自动提交，请勿关闭页面…";
+const REPORT_DONE = "✅ 结果已自动提交，可以关闭此页面。";
+
+/**
+ * `report=` 模式下把「复制结果 / 导出记录」收起来：外部测试者的流程只有"打开链接 → 等 → 关页面"，
+ * 露着手动按钮会让不熟悉流程的人以为还要额外操作。提交失败时再放出来（此时文案明确要求点它），
+ * 保证任何情况下都有人工退路。
+ */
+function setManualExportVisible(visible: boolean): void {
+    btnCopy.classList.toggle("hidden", !visible);
+    btnExport.classList.toggle("hidden", !visible);
+}
+
 function finishBench(st: BenchState, note = "", keepState = false): void {
     try {
         archiveState(st);
@@ -950,9 +1120,14 @@ function finishBench(st: BenchState, note = "", keepState = false): void {
     const text = buildResultText(st);
     rcText.value = text;
     const reportUrl = param("report");
+    const autoReport = reportUrl !== "";
     const head = note ? `${note}：已完成 ${st.results.length} 轮` : "测试完成";
-    rcSummary.textContent = reportUrl
-        ? `${head}：成功 ${okCount}/${st.results.length} 轮。结果将自动提交给测试发起人。`
+    if (autoReport) {
+        setManualExportVisible(false);
+        rcNote.textContent = "结果会自动回传，无需任何操作；看到“已自动提交”即可关闭本页面。";
+    }
+    rcSummary.textContent = autoReport
+        ? `${head}：成功 ${okCount}/${st.results.length} 轮。${REPORT_SUBMITTING}`
         : `${head}：成功 ${okCount}/${st.results.length} 轮。请复制下方文本并发送给测试发起人。`;
     if (ctxExhausted) {
         rcSummary.textContent +=
@@ -974,14 +1149,18 @@ function finishBench(st: BenchState, note = "", keepState = false): void {
                 .join("\n");
     }
     resultCard.style.display = "flex";
-    if (reportUrl) {
-        void fetch(reportUrl, {
-            method: "POST",
-            headers: { "Content-Type": "text/plain;charset=utf-8" },
-            body: text,
-            keepalive: true,
-        }).catch(() => {
-            rcSummary.textContent += "（自动提交失败，请手动复制发送）";
+    if (autoReport) {
+        // 只替换状态标记 / 追加一行提示，不整段重写 rcSummary：
+        // 上面追加的"失败轮次明细""上下文耗尽说明"必须原样保留给测试者看
+        void submitReport(reportUrl, text, param("rtok")).then((ok) => {
+            if (ok) {
+                rcSummary.textContent = rcSummary.textContent.replace(REPORT_SUBMITTING, REPORT_DONE);
+                rcNote.textContent = "结果已回传，无需任何操作。";
+            } else {
+                setManualExportVisible(true);
+                rcSummary.textContent += "\n⚠ 自动提交失败：请点「复制结果」并发送给测试发起人。";
+                rcNote.textContent = "若“复制”按钮无效，请长按文本框手动全选复制。";
+            }
         });
     }
 }

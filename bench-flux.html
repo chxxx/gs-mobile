@@ -48,7 +48,7 @@
         <span class="brand">Flux-GS 对比测帧</span>
         <a href="./bench.html?mode=bench">本方法 / reduced-3DGS 测帧</a>
         <span class="spacer"></span>
-        <span class="hint" id="mode-hint">同源 iframe 驱动 Flux-GS 自带渲染器 · 参考协议＝其原生画布策略</span>
+        <span class="hint" id="mode-hint">同源 iframe 驱动 Flux-GS 自带渲染器 · 统一像素协议 1600×1063（主表口径；`force=native` 为其自适应，仅补充）</span>
     </div>
 
     <div id="statusline">
@@ -103,7 +103,7 @@
                 <button id="btn-copy">复制结果</button>
                 <button id="btn-done" class="ghost">返回测试页</button>
             </div>
-            <div class="note">提示：复制后粘贴发给测试发起人即可。若“复制”按钮无效，请长按文本框手动全选复制。</div>
+            <div class="note" id="rc-note">提示：复制后粘贴发给测试发起人即可。若“复制”按钮无效，请长按文本框手动全选复制。</div>
         </div>
     </div>
 

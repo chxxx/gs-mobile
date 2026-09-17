@@ -1476,12 +1476,20 @@ async function main() {
     };
 
     // ------------------------------------------------------------------
-    // [BENCH INSTRUMENTATION] 第7章对比方法测帧钩子（仅测量用，默认渲染路径不变）
-    //   - ?benchres=1600x1063 时把离屏画布强制为该尺寸，使本仓库 bench.html 与本页可比；
-    //   - window.__FLUXGS_STATS__ 记录 fetch 结束/解码/纹理上传/首帧时刻（iframe 内时间轴）；
-    //   - window.runFluxBenchmark(count) 返回 Promise<{fps,frames,ms,resW,resH}>。
-    //   未带参数时只创建一个空 stats 对象，resize 与渲染行为与原始版本完全一致。
-    //   注意：stats 必须在 fetch 之前创建（fetchStartAt 依赖它）。
+    // [BENCH INSTRUMENTATION] 本文补充的**本地离屏测帧入口**（非 Flux-GS 官方实现；
+    //   上游 main.js 不含本段）。本段只提供 4 个最小入口，**不含任何计时/驱动状态机**：
+    //     __FLUXGS_BENCH_PROBE__()      只读快照（画布像素 / 分辨率档 / 点数 / dpr）
+    //     __FLUXGS_BENCH_BEGIN__(opts)  进入测帧会话：冻结机位 + 复位累计量 + 交出帧驱动
+    //     __FLUXGS_BENCH_FRAME__()      渲染**恰好一帧**，随后 gl.finish()；返回 { t, syncMs }
+    //     __FLUXGS_BENCH_END__()        取回累计量（sync 样本 / 覆盖率 / 画布 / 点数 / 机位）
+    //   计时与"每 tick 一帧"的驱动循环由驱动页的**共享实现**负责（gsplat.js/bench-shared.ts 的
+    //   `driveThroughputFrames`）：本文臂与 Flux-GS 臂用同一个函数，口径不可能分叉。
+    //   - ?benchres=WxH：把离屏画布与投影视口一起钉死为该尺寸（本文的"统一像素协议"）。
+    //     它在 resize() 里**晚于** downsample 的三元式生效，因此画布恒等于 WxH，
+    //     与设备 dpr、场景点数（`>500000 ? 1 : 1/devicePixelRatio`）都无关。
+    //   - window.__FLUXGS_STATS__：fetch/解码/纹理上传/首帧时刻（iframe 内时间轴，与测帧驱动无关）。
+    //   未带参数、且未调用上面入口时，resize 与渲染行为与原始版本完全一致。
+    //   注意：STATS 必须在 fetch 之前创建（fetchStartAt 依赖它）。
     // ------------------------------------------------------------------
     const __fluxBenchRes = (() => {
         const m = /[?&]benchres=(\d+)x(\d+)/.exec(location.search);
@@ -1498,8 +1506,13 @@ async function main() {
         resW: 0,
         resH: 0,
     };
-    let __fluxBenchResolve = null;
-    let __fluxBenchCoveredPct = 0;
+    // [BENCH INSTRUMENTATION] 测帧会话状态（全部由上面的 4 个入口读写；不含任何自身计时）
+    //   __fluxBenchState：BEGIN 创建、END 取走；frames = 已渲染帧数，sync = 逐帧 gl.finish() 耗时样本
+    //   __fluxBenchManual：true = 帧驱动已交给驱动页，本文件的 rAF 链在帧末直接 return（不再自行排帧）
+    //   rafId：提前到此声明（BEGIN 需要能取消本页已排出的 rAF），原本声明在渲染器建立之后
+    let __fluxBenchState = null;
+    let __fluxBenchManual = false;
+    let rafId = null;
     // [BENCH INSTRUMENTATION] ?fluxcam=N：用 Flux-GS 原代码里的第 N 个真实镜头（等价于按数字键 N），
     // 并关掉轮播，使三方机位完全确定、可复现。不传则保持原行为。
     const __fluxCamIdx = (() => {
@@ -1516,6 +1529,87 @@ async function main() {
         // 否则 viewMatrix 每帧按 sin(Date.now()) 动画，每轮测到的姿态都不同，FPS 无法比较。
         carousel = false;
     }
+
+    // [BENCH INSTRUMENTATION] 4 个最小入口（定义在此处 = 下载/建上下文之前就绪，
+    //   因此驱动页可以在 iframe 一 load 就调用 BEGIN 冻结机位；PROBE/FRAME/END 里
+    //   引用的量在更靠后的位置才初始化，故用 try 兜住"过早调用"的情形）。
+    window.__FLUXGS_BENCH_BEGIN__ = (opts) => {
+        const o = opts || {};
+        carousel = false;              // 测帧会话：机位静止（预热与计帧之间也不恢复轮播）
+        __fluxBenchManual = true;      // 帧驱动交给驱动页
+        if (rafId) cancelAnimationFrame(rafId);
+        rafId = null;
+        __fluxBenchState = { frames: 0, sync: [], coveredPct: 0, target: o.frames | 0 };
+        return true;
+    };
+    window.__FLUXGS_BENCH_PROBE__ = () => {
+        const snap = {
+            canvasW: 0,
+            canvasH: 0,
+            dpr: devicePixelRatio,
+            downsample: 0,
+            points: 0,
+            carousel: carousel,
+            manual: __fluxBenchManual,
+            benchRes: __fluxBenchRes ? { w: __fluxBenchRes.w, h: __fluxBenchRes.h } : null,
+        };
+        try { snap.canvasW = gl.canvas.width; snap.canvasH = gl.canvas.height; } catch (e) { /* 上下文尚未建立 */ }
+        try { snap.downsample = downsample; } catch (e) { /* 同上 */ }
+        try { snap.points = vertexCount; } catch (e) { /* 同上 */ }
+        const st = window.__FLUXGS_STATS__;
+        snap.fetchEndAt = st ? st.fetchEndAt : 0;
+        snap.firstFrameAt = st ? st.firstFrameAt : 0;
+        return snap;
+    };
+    window.__FLUXGS_BENCH_FRAME__ = () => {
+        frame(performance.now());      // 恰好渲染一帧（manual 模式下帧末不会自行排帧）
+        const tSync0 = performance.now();
+        try {
+            gl.finish();               // 每帧渲染提交后同步一次（与本文臂逐帧对称）
+        } catch (e) { /* 上下文丢失时忽略 */ }
+        const syncMs = performance.now() - tSync0;
+        if (__fluxBenchState) {
+            __fluxBenchState.frames++;
+            __fluxBenchState.sync.push(syncMs);
+            // 覆盖率先测一次（仅统计，不参与计时）：与本文臂 covered% 对照，判断两臂负载是否同量级
+            if (__fluxBenchState.frames === 1 && __fluxBenchState.coveredPct === 0) {
+                try {
+                    const pw = gl.canvas.width;
+                    const ph = gl.canvas.height;
+                    const px = new Uint8Array(pw * ph * 4);
+                    gl.readPixels(0, 0, pw, ph, gl.RGBA, gl.UNSIGNED_BYTE, px);
+                    let hit = 0;
+                    let total = 0;
+                    for (let y = 0; y < ph; y += 8) {
+                        for (let x = 0; x < pw; x += 8) {
+                            if (px[(y * pw + x) * 4 + 3] > 0) hit++;
+                            total++;
+                        }
+                    }
+                    __fluxBenchState.coveredPct = total > 0 ? (hit / total) * 100 : 0;
+                } catch (e) {
+                    /* readPixels 不可用时忽略 */
+                }
+            }
+        }
+        return { t: performance.now(), syncMs: syncMs };
+    };
+    window.__FLUXGS_BENCH_END__ = () => {
+        const s = __fluxBenchState;
+        const out = {
+            frames: s ? s.frames : 0,
+            syncSamples: s ? s.sync.slice(0) : [],
+            coveredPct: s ? s.coveredPct : 0,
+            canvasW: gl.canvas.width,
+            canvasH: gl.canvas.height,
+            dpr: devicePixelRatio,
+            downsample: downsample,
+            points: vertexCount,
+            view: viewMatrix.map((v) => Math.round(v * 1000) / 1000),
+        };
+        __fluxBenchState = null;
+        return out;
+    };
 
     showProgress(0);
     const params = new URLSearchParams(location.search);
@@ -1688,7 +1782,9 @@ async function main() {
         gl.canvas.width = Math.round(innerWidth / downsample);
         gl.canvas.height = Math.round(innerHeight / downsample);
         if (__fluxBenchRes) {
-            // [BENCH INSTRUMENTATION] 固定离屏分辨率（只影响带 ?benchres= 的测帧会话）
+            // [BENCH INSTRUMENTATION] 统一像素协议：覆盖上面按 downsample 算出的尺寸。
+            // 覆盖**晚于** downsample 生效（顺序不可调换），因此带 ?benchres= 时画布恒等于 WxH，
+            // 与设备 dpr、场景点数（downsample 的三元式）都无关；不带该参数时与上游行为完全一致。
             gl.canvas.width = __fluxBenchRes.w;
             gl.canvas.height = __fluxBenchRes.h;
         }
@@ -2043,11 +2139,7 @@ async function main() {
     let lastFrame = 0;
     let avgFps = 0;
     let start = 0;
-    let isBenchmarking = false;
-    let benchmarkFrameCount = 0;
-    let benchmarkFrameTarget = 300;
-    let benchmarkStartTime = 0;
-    let rafId = null;
+    // [BENCH INSTRUMENTATION] rafId / 测帧状态已提前声明（见 main() 顶部的入口段）
 
     window.addEventListener("gamepadconnected", (e) => {
         const gp = navigator.getGamepads()[e.gamepad.index];
@@ -2265,26 +2357,6 @@ async function main() {
             if (!window.__FLUXGS_STATS__.firstFrameAt) {
                 window.__FLUXGS_STATS__.firstFrameAt = performance.now();
             }
-            // [BENCH INSTRUMENTATION] 测帧首帧顺带统计画面覆盖率（用于跨方法可比性核对）
-            if (isBenchmarking && benchmarkFrameCount === 1 && __fluxBenchCoveredPct === 0) {
-                try {
-                    const pw = gl.canvas.width;
-                    const ph = gl.canvas.height;
-                    const px = new Uint8Array(pw * ph * 4);
-                    gl.readPixels(0, 0, pw, ph, gl.RGBA, gl.UNSIGNED_BYTE, px);
-                    let hit = 0;
-                    let total = 0;
-                    for (let y = 0; y < ph; y += 8) {
-                        for (let x = 0; x < pw; x += 8) {
-                            if (px[(y * pw + x) * 4 + 3] > 0) hit++;
-                            total++;
-                        }
-                    }
-                    __fluxBenchCoveredPct = total > 0 ? (hit / total) * 100 : 0;
-                } catch (e) {
-                    /* readPixels 不可用时忽略 */
-                }
-            }
 
             const drawError = gl.getError();
             if (drawError !== gl.NO_ERROR) {
@@ -2300,43 +2372,10 @@ async function main() {
             camid.innerText = "";
         }
         lastFrame = now;
-        if (isBenchmarking) {
-            if (vertexCount > 0) {
-                if (benchmarkStartTime === 0) benchmarkStartTime = performance.now();
-                benchmarkFrameCount++;
-                if (benchmarkFrameCount < benchmarkFrameTarget) {
-                    setTimeout(() => frame(performance.now()), 0);
-                } else {
-                    const elapsed = (performance.now() - benchmarkStartTime) / 1000;
-                    const fps = benchmarkFrameCount / elapsed;
-                    console.log('Flux-GS Offscreen Benchmark: ' + fps.toFixed(2) + ' FPS (' + benchmarkFrameCount + ' frames in ' + elapsed.toFixed(3) + ' s), resolution: ' + gl.canvas.width + ' x ' + gl.canvas.height);
-                    // [BENCH INSTRUMENTATION] 把结果回传给驱动页面（bench-flux.html）
-                    if (typeof __fluxBenchResolve === 'function') {
-                        const __benchDone = __fluxBenchResolve;
-                        __fluxBenchResolve = null;
-                        __benchDone({
-                            fps: fps,
-                            frames: benchmarkFrameCount,
-                            ms: elapsed * 1000,
-                            resW: gl.canvas.width,
-                            resH: gl.canvas.height,
-                            coveredPct: __fluxBenchCoveredPct,
-                            view: viewMatrix.map((v) => Math.round(v * 1000) / 1000),
-                        });
-                    }
-                    isBenchmarking = false;
-                    benchmarkFrameCount = 0;
-                    benchmarkStartTime = 0;
-                    // 测帧模式下保持静止机位（否则预热与正式计帧之间姿态会漂移）
-                    carousel = __fluxBenchRes ? false : true;
-                    rafId = requestAnimationFrame(frame);
-                }
-            } else {
-                setTimeout(() => frame(performance.now()), 0);
-            }
-        } else {
-            rafId = requestAnimationFrame(frame);
-        }
+        // [BENCH INSTRUMENTATION] manual 模式（BEGIN 之后）：帧驱动交给驱动页的共享驱动函数，
+        // 本文件不再自行排帧；否则保持原行为（每帧续排一次 rAF）。
+        if (__fluxBenchManual) return;
+        rafId = requestAnimationFrame(frame);
     };
 
 /** [BENCH INSTRUMENTATION] 把本文臂导出的视图矩阵注入进来，使 Flux-GS 在**完全相同的机位**下测帧。
@@ -2348,23 +2387,11 @@ async function main() {
         return true;
     };
     window.__FLUXGS_DUMP_XYZ__ = () => window.__FLUXGS_XYZ__ || null;
-    window.runFluxBenchmark = (count = 300) =>
-        new Promise((resolve) => {
-            if (isBenchmarking) {
-                resolve(null);
-                return;
-            }
-            console.log('Starting Flux-GS offscreen benchmark: ' + count + ' frames (waiting for model load)');
-            isBenchmarking = true;
-            benchmarkFrameTarget = count;
-            benchmarkFrameCount = 0;
-            benchmarkStartTime = 0;
-            __fluxBenchResolve = resolve;
-            __fluxBenchCoveredPct = 0;
-            carousel = false;
-            if (rafId) cancelAnimationFrame(rafId);
-            setTimeout(() => frame(performance.now()), 0);
-        });
+    // [BENCH INSTRUMENTATION] 上游的 window.runFluxBenchmark(count) 已删除：本文的测帧驱动
+    //   统一走 bench-shared.ts 的 driveThroughputFrames()（两臂同一个函数），本文件只提供
+    //   上面的 BEGIN/FRAME/END/PROBE 四个入口。原官方入口留下的这段说明便于回溯：
+    //   runFluxBenchmark 曾在本文件内自带 fps 计时与 setTimeout(0) 链（即"参考实现"），
+    //   现改为由驱动页逐帧调用 __FLUXGS_BENCH_FRAME__()（渲染 + gl.finish()），口径仍逐字相同。
 
     frame();
 

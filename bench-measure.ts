@@ -9,8 +9,8 @@
  *     会连带把渲染器/wasm 模块拉进父页面。父页面靠"不导入"来保证 bench 模式下零 WebGL 上下文。
  */
 import * as SPLAT from "./src/index";
-import { CAM_FLUX, PROTO_FLUX, param } from "./bench-shared";
-import type { RoundResult, SceneMeta } from "./bench-shared";
+import { CAM_FLUX, PROTO_FLUX, driveThroughputFrames, param, throughputDriver } from "./bench-shared";
+import type { DriveThroughputStats, RoundResult, SceneMeta, ThroughputDriver } from "./bench-shared";
 
 /** Flux-GS 原相机资产（`bench-flux-camera.json`，由 tools/extract_flux_camera.py 抽出）。 */
 export interface FluxCameraAsset {
@@ -36,28 +36,12 @@ export interface MeasureOptions {
     onMark?: (mark: string, detail?: string) => void;
 }
 
-/** 测帧驱动方式：raf = 每个 requestAnimationFrame 渲染一帧（默认）；timer = 旧的 setTimeout(0) 链 */
-export type ThroughputDriver = "raf" | "timer";
+/** 测帧驱动方式：取值与默认规则见 `bench-shared.throughputDriver()`（timer = 参考协议；raf = 在屏口径）。 */
+export type { ThroughputDriver };
 
-/** 测帧统计（诊断字段；FPS 公式未变：frames / 整段墙钟秒数）。 */
-export interface ThroughputStats {
-    driver: ThroughputDriver;
-    /** 计划帧数（= frames 参数） */
-    frames: number;
-    /** 实际完成的帧数（被取消时会 < frames） */
-    rendered: number;
-    /** 测帧区间内 `frameRender()` 的真实调用次数（应等于 rendered） */
-    renders: number;
-    elapsedMs: number;
-    fps: number;
-    cpuMs: number;
-    gapMinMs: number;
-    gapMedMs: number;
-    gapMaxMs: number;
-    warmupMs: number;
-    aborted: boolean;
-    note: string;
-}
+/** 测帧统计：口径字段**直接来自共享驱动**（`bench-shared.driveThroughputFrames`，两臂同一个函数），
+ *  外加本臂特有的 `renders`（`frameRender()` 的真实调用次数，用来证明每帧都真的画了）。 */
+export type ThroughputStats = DriveThroughputStats & { renders: number };
 
 function emptyThroughput(driver: ThroughputDriver, note: string): ThroughputStats {
     return {
@@ -71,7 +55,15 @@ function emptyThroughput(driver: ThroughputDriver, note: string): ThroughputStat
         gapMinMs: 0,
         gapMedMs: 0,
         gapMaxMs: 0,
+        syncMs: 0,
+        syncFrames: 0,
+        frameMs: 0,
+        frameMeanMs: 0,
         warmupMs: 0,
+        timerFloorMs: 0,
+        timerFloorRounds: 0,
+        timerFloorSrc: "-",
+        fpsCapped: false,
         aborted: true,
         note,
     };
@@ -105,9 +97,19 @@ export class BenchCase {
         this.camera = new SPLAT.Camera();
     }
 
-    /** 创建渲染器（WebGL2 上下文）。失败会抛错，由调用方决定是否换 canvas 重试。 */
-    createRenderer(): SPLAT.WebGLRenderer {
-        this.renderer = new SPLAT.WebGLRenderer(this.canvas);
+    /**
+     * 创建渲染器（WebGL2 上下文）。失败会抛错，由调用方决定是否换 canvas 重试。
+     *
+     * `fadeIn` 由调用方**显式**声明（不给默认值），这是跨臂公平性的一部分：
+     *   - `false` —— bench 测量路径（`bench-case.ts`）：显式传**空数组**，于是**不挂 FadeInPass**。
+     *     渲染器默认行为是"不传 pass 就自动挂 FadeInPass"（每帧 `depthFade += 0.01`，约 100 帧才完全不透明），
+     *     那会让测帧窗口前 ~100 帧的填充负载与常帧**不同构**；基线 Flux-GS 没有这种档位，
+     *     所以两臂必须架构对等——不能依赖"设备恰好贴着计时地板"这个前提（已在桌面 A/B 验证过，
+     *     但换一台不贴地板的手机就可能重新变成真实优势）。结果头写 `fade=none` 记录该配置。
+     *   - `true` —— 展示路径（`bench.html?mode=view` 的 BenchView）：保留淡入观感，产品特性不受影响。
+     */
+    createRenderer(fadeIn: boolean): SPLAT.WebGLRenderer {
+        this.renderer = new SPLAT.WebGLRenderer(this.canvas, fadeIn ? null : []);
         return this.renderer;
     }
 
@@ -161,69 +163,44 @@ export class BenchCase {
     }
 
     /**
-     * 帧率测量。**默认由 requestAnimationFrame 驱动，每个 RAF 恰好 render 一帧**：
-     * 这样每一帧都是"被合成器调度、真正提交"的帧，不可能测成 CPU 提交循环。
-     * `?driver=timer` 可切回旧的 `setTimeout(0)` 链（仅用于与历史数据对照；会被 rAF 的 vsync 影响，
-     * 因此默认口径是 rAF，并在结果头写明 `driver=`）。
+     * 帧率测量。**驱动与计时都用两臂共享的 `bench-shared.driveThroughputFrames()`**
+     * （Flux-GS 臂调用同一个函数，只是把"渲染一帧"换成 iframe 里的 `__FLUXGS_BENCH_FRAME__`）。
+     *   - `timer`（协议值，`proto=flux` 时默认）：每帧一条 `setTimeout(0)`，一个 tick 渲染并计一帧；
+     *   - `raf`：每帧一个 `requestAnimationFrame`（在屏口径，会被刷新率封顶，与基线不可比）。
+     * 本方法只负责"一帧"的定义：`frameRender()` 渲染提交之后立刻 `gl.finish()`，返回其耗时（ms）。
+     * 两臂都在每帧后同步一次 GPU，所以帧间隔包含真实 GPU 执行时间（见 driveThroughputFrames 注释）。
      *
-     * 计时口径不变：FPS = frames / (整段墙钟秒数)，整段墙钟 = 从第一个测帧前的时刻到最后一帧之后的时刻。
+     * 计时口径（2026-09-16 与基线逐字对齐）：
+     *   `fps = frames / (首帧绘制完成 → 末帧绘制完成的墙钟秒数)`，
+     *   起表点在**第 1 个测帧画完之后**——与其原 `runFluxBenchmark` 里 `benchmarkStartTime` 的取点一致。
+     *   `cpuMs` 现为"**含 GPU 同步**的均帧间隔"（= elapsedMs / (rendered-1)），结果头用
+     *   `cpu_def=mean_frame_interval_incl_gpu_sync` 固定标注该语义。
      */
     async runThroughputFrames(frames: number, warmup = 10): Promise<ThroughputStats> {
-        const driver: ThroughputDriver = param("driver", "raf") === "timer" ? "timer" : "raf";
-        const nextFrame = (): Promise<void> =>
-            new Promise<void>((resolve) => {
-                if (driver === "raf") {
-                    requestAnimationFrame(() => resolve());
-                } else {
-                    setTimeout(resolve, 0);
-                }
-            });
-
-        const tWarmup0 = performance.now();
-        for (let i = 0; i < warmup; i++) {
-            if (this.stopped) return emptyThroughput(driver, "warmup 期间被取消");
-            this.frameRender();
-            await nextFrame();
-        }
-        const warmupMs = performance.now() - tWarmup0;
-
-        const t0 = performance.now();
+        const driver: ThroughputDriver = throughputDriver();
+        const gl = this.renderer ? (this.renderer.gl as WebGL2RenderingContext) : null;
         const rendersBefore = this.renderCalls;
-        const gaps: number[] = [];
-        let last = t0;
-        let rendered = 0;
-        let aborted = false;
-        while (rendered < frames) {
-            if (this.stopped) {
-                aborted = true;
-                break;
+        /** 一帧 = 渲染提交 + `gl.finish()`（Flux-GS 臂在 __FLUXGS_BENCH_FRAME__ 里同样每帧同步一次）。 */
+        const renderFrame = (_index: number): number => {
+            this.frameRender();
+            if (!gl) return 0;
+            const t0 = performance.now();
+            try {
+                gl.finish();
+            } catch {
+                return 0;
             }
-            await nextFrame();
-            const now = performance.now();
-            gaps.push(now - last);
-            last = now;
-            this.frameRender(); // 每个 RAF（或每个 timer tick）**只**渲染并统计一帧
-            rendered++;
-        }
-        const t1 = performance.now();
-        const elapsedMs = t1 - t0;
-        const sortedGaps = [...gaps].sort((a, b) => a - b);
-        const medianGapMs = sortedGaps.length > 0 ? sortedGaps[Math.floor(sortedGaps.length / 2)] : 0;
-        return {
-            driver,
-            frames,
-            rendered,
-            renders: this.renderCalls - rendersBefore,
-            elapsedMs,
-            fps: elapsedMs > 0 ? frames / (elapsedMs / 1000) : 0,
-            cpuMs: rendered > 0 ? elapsedMs / rendered : 0,
-            gapMinMs: sortedGaps[0] ?? 0,
-            gapMedMs: medianGapMs,
-            gapMaxMs: sortedGaps[sortedGaps.length - 1] ?? 0,
-            warmupMs,
-            aborted,
-            note: aborted ? "测帧过程中被取消（stopped）" : "",
+            return performance.now() - t0;
         };
+        if (this.stopped) return emptyThroughput(driver, "测帧开始前已被取消");
+        const s = await driveThroughputFrames({
+            frames,
+            warmup,
+            driver,
+            renderFrame,
+            stopped: () => this.stopped,
+        });
+        return { ...s, renders: this.renderCalls - rendersBefore };
     }
 
     /**
@@ -397,6 +374,19 @@ export class BenchCase {
         this.camera.update();
         this.cameraLocked = true;
         return true;
+    }
+
+    /**
+     * 机位指纹：**视图矩阵（列主序）前 6 位**，与 Flux-GS 臂报告里的 `pose=` 同名同格式
+     * （那边取渲染器 `end.view.slice(0, 6)`），因此逐轮结果可跨臂直接核对「是否同一个机位」。
+     * 口径依据：`src/cameras/Camera.fluxParity.test.ts` 已把「位置+四元数复现的视图矩阵」与
+     * Flux-GS 原矩阵的偏差钉在 0.32°（元素级差异 ≤ ~0.006），所以跨臂比对用数值容差而非字符串相等。
+     */
+    viewFingerprint(): string {
+        return this.camera.data.viewMatrix.buffer
+            .slice(0, 6)
+            .map((v) => Number(v.toFixed(6)))
+            .join(",");
     }
 
     glRendererName(): string {
@@ -653,7 +643,11 @@ export async function measureOneRound(
             ctx.frameScene(splat);
         }
         ctx.camera.update();
-        mark("camera-ready", `camLocked=${ctx.cameraLocked}`);
+        // 机位指纹（写进逐轮结果）：与 Flux-GS 臂的 `pose=` 同格式，跨轮/跨臂可直接核对。
+        // 注意在**相机就位之后**取值：frameScene 也会 update 相机，取早了记的是默认机位。
+        base.poseKey = ctx.viewFingerprint();
+        base.poseSrc = ctx.cameraLocked ? "flux" : "auto";
+        mark("camera-ready", `camLocked=${ctx.cameraLocked} pose=${base.poseKey}`);
         opts.onPhase?.("sorting");
         // 让出事件循环等待深度排序回传——此时才产生真实的首帧绘制
         const sorted = await ctx.waitForSortedFrame();
@@ -702,9 +696,10 @@ export async function measureOneRound(
         }
 
         // ---- 门禁 2：**渲染存活探针**（`?validateframe=1` 默认开启；**不是质量门槛**）----
-        // 关键事实：渲染器默认带 FadeInPass（`depthFade` 每帧 +1%，需要 ~100 帧才完全不透明），
-        // 因此"前几帧几乎看不到像素"是**设计行为**，绝不能据此判定失败或机位错误。
         // 这里只回答一个问题：管线到底有没有画出过东西（连续 N 帧像素全空 = 没画）。
+        // 2026-09-17 起 bench 模式**不挂 FadeInPass**（`fade=none`，见 createRenderer 注释），
+        // 所以首帧探针看到的覆盖率为**真实**覆盖率：若 `ff_covered` 仍然很低，那是真没画（红旗），
+        // 不能再归因于"淡入还没到 1.0"。（展示路径仍有淡入，它的低覆盖是观感设计，与本探针无关。）
         // 画面覆盖率以测帧之后的 probeFrameCoverage 为准（与原协议一致）。
         const doValidate = param("validateframe", "1") !== "0";
         let firstFrameCovered = -1;
@@ -741,7 +736,10 @@ export async function measureOneRound(
         }
         mark(
             "throughput-end",
-            `rendered=${perf.rendered} renders=${perf.renders} elapsed=${perf.elapsedMs.toFixed(0)}ms fps=${perf.fps.toFixed(1)} gap(med/min/max)=${perf.gapMedMs.toFixed(2)}/${perf.gapMinMs.toFixed(2)}/${perf.gapMaxMs.toFixed(2)}ms`,
+            `rendered=${perf.rendered} renders=${perf.renders} elapsed=${perf.elapsedMs.toFixed(0)}ms fps=${perf.fps.toFixed(1)} ` +
+                `sync(med)=${perf.syncMs.toFixed(2)}ms floor=${perf.timerFloorMs.toFixed(2)}ms capped=${perf.fpsCapped ? 1 : 0} ` +
+                `frame(med/mean)=${perf.frameMs.toFixed(2)}/${perf.frameMeanMs.toFixed(2)}ms ` +
+                `gap(med/min/max)=${perf.gapMedMs.toFixed(2)}/${perf.gapMinMs.toFixed(2)}/${perf.gapMaxMs.toFixed(2)}ms`,
         );
 
         const probe = ctx.probeFrameCoverage();
@@ -757,6 +755,19 @@ export async function measureOneRound(
         base.gapMinMs = perf.gapMinMs;
         base.gapMaxMs = perf.gapMaxMs;
         base.warmupMs = perf.warmupMs;
+        // 本次新增的诊断口径（与 Flux-GS 臂结果头同名字段）：GPU 同步耗时 / 计时地板 / 是否被地板卡住
+        base.syncMs = perf.syncMs;
+        base.syncFrames = perf.syncFrames;
+        // 帧内阻塞耗时（诊断/自检用）：它只说明"帧内实际被阻塞"的量级，**不是**单帧渲染能力，
+        // 不得用来算两臂倍数——被地板封顶时两边读数都落在 performance.now() 的量化下限上。
+        base.frameMs = perf.frameMs;
+        base.frameMeanMs = perf.frameMeanMs;
+        base.timerFloorMs = perf.timerFloorMs;
+        base.timerFloorRounds = perf.timerFloorRounds;
+        base.timerFloorSrc = perf.timerFloorSrc;
+        base.fpsCapped = perf.fpsCapped;
+        // 本文臂恒为统一像素协议（bench-case 把后备缓冲钉死为 res）
+        base.resMode = "forced";
         base.firstFrameCoveredPct = firstFrameCovered >= 0 ? firstFrameCovered : undefined;
         base.timeline = formatTimeline(timeline);
 

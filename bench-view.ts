@@ -46,7 +46,9 @@ export class BenchView {
 
     /** 建渲染器 + controls + RAF 循环（只有进入 view 模式才会被调用一次）。 */
     start(options: ViewStartOptions): void {
-        this._ctx.createRenderer();
+        // 展示路径：**保留 FadeInPass 淡入**（产品特性/录屏观感）。
+        // 只有 bench 测量路径（bench-case.ts）才传 false 追求两臂架构对等。
+        this._ctx.createRenderer(true);
         this._glName = this._ctx.glRendererName();
         const renderer = this._ctx.renderer;
         renderer?.enableAutoResize();

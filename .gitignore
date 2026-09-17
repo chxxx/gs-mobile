@@ -147,3 +147,13 @@ bench-camviews.json
 bench-camviews-flux.json
 bench-flux-camera-aligned.json
 reduced-3dgs/*.ply
+
+# Python 工具脚本（tools/*.py）的运行缓存
+__pycache__/
+*.py[cod]
+
+# 第7章手机端实测：临时探测工作区（一次性的 .bat/.ps1 片段、cloudflared 隧道二进制、
+# 中间日志与 scratch 输出）。正式产物是 p.html / p.js / bench*.html / tools/*.py。
+_tmp_ch7probe/
+_tidy_out.txt
+

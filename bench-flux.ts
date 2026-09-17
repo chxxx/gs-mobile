@@ -5,21 +5,47 @@
  * （flux-gs-project-gh-pages/render_<scene>/index.html），本仓库的 PLY/QPLY 加载器无法加载它的
  * 压缩格式，因此本页在同源 iframe 里驱动 Flux-GS 渲染器，而不是重写它的解码器。
  *
- * 与 bench.html 对齐的测量口径（论文 7.2.2，参考协议 = Flux-GS 原协议）：
- *   1. 画布分辨率 = **渲染器原生策略**（点数 > 500000 → 1× CSS；否则 CSS × devicePixelRatio），
- *      即"分辨率随设备与场景变化"，与 Flux-GS 论文报告的测帧条件一致；用 `force=WxH` 可强制对照旧口径；
- *   2. 帧率：调用渲染器自带的 window.runFluxBenchmark(frames)，其内部用 setTimeout(0) 链驱动完整帧，
- *      300 帧、**无预热**（与 Flux-GS 原实现一致）；warmup 参数可显式覆盖；
+ * 与 bench.html 对齐的测量口径（论文 7.2.2）：
+ *   1. **统一像素协议（主表口径，缺省）**：iframe 链接默认带 `benchres=`（缺省 = `res`，即 1600×1063），
+ *      把它的离屏画布与投影视口一起钉死为同一组像素 —— 这是**跨方法 FPS 比较唯一允许**的数据来源
+ *      （本文臂/reduced-3DGS 臂用 `res=WxH`，本臂用 `benchres=WxH`，三臂同像素）。
+ *      `force=WxH` 仍可显式指定；`force=native` 才退回它的**原生自适应分辨率**（点数 > 500000 → 1× CSS，
+ *      否则 CSS × devicePixelRatio）——该档各臂分辨率不对等，**不可比 FPS**，只用于说明它在真机上的像素占用。
+ *      两种模式都在结果头/逐轮行写 `res_mode=forced|native`，报表脚本据此过滤；
+ *   2. 帧率：**两臂共用的** `bench-shared.driveThroughputFrames()` 逐帧调用 iframe 内的
+ *      `__FLUXGS_BENCH_FRAME__()`（渲染一帧后立刻 `gl.finish()`），`setTimeout(0)` 链驱动；
+ *      300 帧、**无预热**（与其原实现一致，`warmup=` 可覆盖）；计时区间 = 首个计帧绘制完成 → 末帧绘制完成；
  *   3. 首帧：只计"模型文件获取完成之后"的解码、纹理上传与首个真实绘制帧，不含网络下载段；
  *   4. 冷启动：每轮新建 iframe、追加 ts= 令牌重取模型；整页冷启动刷新由 sessionStorage 续跑。
- *   5. 机位：测帧会话启动即冻结（carousel=false），并在结果里输出 pose= 指纹供核对。
+ *      轮间收尾 = 等 iframe 的 about:blank **真的 load** → 摘节点 → 2 帧；整页冷启动与本文臂①
+ *      一样**经零上下文的中转页** bench-hop.html（默认停 1500ms）再进新页，把"旧上下文销毁"
+ *      与"新上下文创建"确定性地分开（`?hop=0` 关掉中转页、`?hopms=N` 改停留时长）。
+ *   5. 机位：测帧会话启动即冻结（`carousel=false`），并在结果里输出 pose= 指纹供核对。
+ *      注：forced 档在 iframe **load 时**就冻结；native 档只能等首个真实帧之后（BEGIN）冻结。
  *   6. 设备名：GPU 名由 iframe 内的 Flux 页面**用自己的上下文**上报（__FLUXGS_STATS__.glRenderer），
  *      本页不建任何探测上下文——手机端"建了不用 / 丢了不还"的上下文会耗尽上下文名额。
  *
  * URL：bench-flux.html?profile=full|mip360|tnt|db|quick&rounds=3&cold=1&u=xxx&frames=300&warmup=0
- *      bench-flux.html?...&force=1600x1063   （强制分辨率，与旧口径对照）
+ *      bench-flux.html?...&force=native          （原生自适应分辨率，仅作补充、不可跨方法比 FPS）
+ *      bench-flux.html?...&force=800x600         （显式统一像素，覆盖缺省的 res）
+ *
+ * 外部测试者（自动回传，2026-09-17 追加）：与 bench.html 同构 ——
+ *   `&report=<url>&rtok=<口令>` → 测完自动把 [RESULT] 文本 POST 到 `<url>?token=<口令>`，
+ *   测试者只需"打开链接 → 等 → 关页面"；接收端 = vite dev server 的 /__ch7/report 中间件
+ *   （见 vite.config.js），落盘到 thesis_project/data/ch7_measurements/raw/。
  */
 import { guessChip as guessChipFrom } from "./bench-chip";
+import {
+    HOP_PAGE,
+    benchResOverride,
+    driveThroughputFrames,
+    hopDelayMs,
+    hopUrlFor,
+    resolutionMode,
+    submitReport,
+    throughputFields,
+} from "./bench-shared";
+import type { DriveThroughputStats, ResMode } from "./bench-shared";
 
 // ------------------------------------------------------------------ DOM
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -37,6 +63,8 @@ const progressFill = $<HTMLElement>("bar-fill");
 const resultCard = $<HTMLElement>("result-card");
 const rcText = $<HTMLTextAreaElement>("rc-text");
 const rcSummary = $<HTMLElement>("rc-summary");
+/** 结果卡底部那行提示（`report=` 模式下换成"结果会自动回传，无需任何操作"） */
+const rcNote = $<HTMLElement>("rc-note");
 const btnStart = $<HTMLButtonElement>("btn-start");
 const btnCopy = $<HTMLButtonElement>("btn-copy");
 const btnDone = $<HTMLButtonElement>("btn-done");
@@ -69,16 +97,35 @@ interface FluxStats {
     /** GPU renderer 名（由 render_shared/main.js 的埋点用自己的上下文写入，供本页显示设备）。 */
     glRenderer?: string;
 }
-interface FluxBenchResult {
-    fps: number;
+/** `__FLUXGS_BENCH_FRAME__()` 的返回：t = 该帧结束时刻（iframe 内时间轴），syncMs = 该帧 gl.finish() 耗时。 */
+interface FluxBenchFrame {
+    t: number;
+    syncMs: number;
+}
+/** `__FLUXGS_BENCH_END__()` 的返回：测帧会话累计量（由驱动页负责结算，渲染器侧不做计时）。 */
+interface FluxBenchEnd {
     frames: number;
-    ms: number;
-    resW: number;
-    resH: number;
-    /** 测帧首帧的画面覆盖率（由渲染器钩子统计，用于与本文方法做可比性核对） */
-    coveredPct?: number;
-    /** 测帧所用视图矩阵（保留 3 位小数），用于核对每轮机位是否一致 */
-    view?: number[];
+    syncSamples: number[];
+    coveredPct: number;
+    canvasW: number;
+    canvasH: number;
+    dpr: number;
+    downsample: number;
+    points: number;
+    view: number[];
+}
+/** `__FLUXGS_BENCH_PROBE__()` 的只读快照（分辨率核对用，不做任何渲染）。 */
+interface FluxBenchProbe {
+    canvasW: number;
+    canvasH: number;
+    dpr: number;
+    downsample: number;
+    points: number;
+    carousel: boolean;
+    manual: boolean;
+    benchRes: { w: number; h: number } | null;
+    fetchEndAt: number;
+    firstFrameAt: number;
 }
 interface RoundResult {
     scene: string;
@@ -88,6 +135,32 @@ interface RoundResult {
     ok: boolean;
     err?: string;
     fps?: number;
+    /** 该轮实际计入的帧数（= frames 参数，回传自渲染器钩子） */
+    frames?: number;
+    /** 该轮的计时区间毫秒数（回传自共享驱动；fps = frames / (elapsedMs/1000)） */
+    elapsedMs?: number;
+    /** 均帧间隔（含 GPU 同步）：elapsedMs / (frames - 1) */
+    cpuMs?: number;
+    /** 逐帧 gl.finish() 耗时的中位数（诊断：帧率差异是否由 GPU 负载解释） */
+    syncMs?: number;
+    /** 计入 syncMs 的样本数（= 本轮实际帧数） */
+    syncFrames?: number;
+    /** 帧内阻塞耗时中位数/均值（诊断/自检用；不可用于算倍数，语义边界见 bench-shared.DriveThroughputStats.frameMs） */
+    frameMs?: number;
+    frameMeanMs?: number;
+    /** 实测计时地板（空驱动校准，驱动所在文档测得） */
+    timerFloorMs?: number;
+    timerFloorRounds?: number;
+    timerFloorSrc?: string;
+    /** true = 本轮帧率已被驱动地板卡住，不能当渲染极限读 */
+    fpsCapped?: boolean;
+    /** 帧驱动口径（本臂恒为 timer） */
+    driver?: string;
+    /** 本轮像素口径：forced = 统一像素协议（主表）；native = 其自适应分辨率（仅补充） */
+    resMode?: ResMode;
+    /** 本轮画布实测的 dpr / downsample（核对分辨率档是否与预期一致） */
+    dpr?: number;
+    downsample?: number;
     firstFrameMs?: number;
     fetchMs?: number;
     decodeMs?: number;
@@ -104,6 +177,8 @@ interface RoundResult {
     poseInjected?: boolean;
     /** dump=1 时导出的世界坐标点数 */
     dumped?: number;
+    /** 本轮渲染器解码出的真实点数（`__FLUXGS_BENCH_END__.points`）：核对点数档与负载量级 */
+    points?: number;
 }
 interface BenchState {
     v: number;
@@ -188,6 +263,15 @@ function expandProfile(profile: string): string[] {
         return manifest.filter((s) => s.dataset === profile).map((s) => s.id);
     }
     if (profile === "quick") return ["garden", "truck", "drjohnson"].filter((id) => sceneById(id));
+    // 2026-09-17 追加：**直接点名场景**（`profile=garden`，或 `profile=garden,truck`）—— 与本文臂
+    // `bench-shared.expandProfile()` 的同名分支逐字同构（两臂必须同写法，否则操作手册 §11.5 的
+    // 重负载阶梯里"两臂同一条 URL 只换域名"就不成立）。本函数是独立副本，改动请两边一起改。
+    const named = profile
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    const resolved = named.filter((id) => !!sceneById(id));
+    if (named.length > 0 && resolved.length === named.length) return resolved;
     return [];
 }
 
@@ -303,7 +387,11 @@ type FluxWindow = Window & {
     __FLUXGS_STATS__?: FluxStats;
     __FLUXGS_SET_CAM__?: (view16: number[]) => boolean;
     __FLUXGS_DUMP_XYZ__?: () => Float32Array | null;
-    runFluxBenchmark?: (count?: number) => Promise<FluxBenchResult | null> | void;
+    /** [BENCH INSTRUMENTATION] 渲染器侧 4 个最小测帧入口（见 render_shared/main.js 顶部注释）。 */
+    __FLUXGS_BENCH_PROBE__?: () => FluxBenchProbe;
+    __FLUXGS_BENCH_BEGIN__?: (opts?: { frames?: number }) => boolean;
+    __FLUXGS_BENCH_FRAME__?: () => FluxBenchFrame;
+    __FLUXGS_BENCH_END__?: () => FluxBenchEnd;
 };
 
 /** 轮询等待渲染器暴露注入接口并调用（钩子在 main() 里 fetch 之后才定义，需要等一下）。 */
@@ -395,6 +483,37 @@ function waitIframeLoad(iframe: HTMLIFrameElement, timeoutMs = 30000): Promise<v
     });
 }
 
+/**
+ * 把 iframe 导航到 `about:blank` 并**等它 load**（最多 `timeoutMs`，超时也算完成），
+ * 再摘节点 —— 比"设了 src 就在同一个任务里 remove()"更容易让浏览器走完**文档销毁**路径
+ * （旧文档的 WebGL 上下文/显存/解码 Worker 都随之归还）。
+ * 不抛异常：收尾阶段绝不能让调用方再多一条失败路径。
+ */
+function waitIframeBlank(iframe: HTMLIFrameElement, timeoutMs = 1500): Promise<void> {
+    return new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, timeoutMs);
+        iframe.addEventListener(
+            "load",
+            () => {
+                clearTimeout(timer);
+                resolve();
+            },
+            { once: true },
+        );
+        try {
+            iframe.src = "about:blank";
+        } catch {
+            clearTimeout(timer);
+            resolve();
+        }
+    });
+}
+
+/** 等一帧（收尾用）：让"节点移除 / 文档销毁"这一步确定被提交，再继续下一步。 */
+function nextFrame(): Promise<void> {
+    return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+}
+
 /** 渲染器内部错误文案暴露在 #message（main() 的 catch 分支写入）。 */
 function iframeErrorText(cw: FluxWindow): string {
     try {
@@ -457,16 +576,48 @@ function exportXyzDump(cw: FluxWindow, sceneId: string): number {
     return xyz.length / 3;
 }
 
-async function runBenchmark(cw: FluxWindow, frames: number, timeoutMs: number): Promise<FluxBenchResult> {
-    const fn = cw.runFluxBenchmark;
-    if (typeof fn !== "function") {
-        throw new Error("Flux-GS 渲染器未暴露 runFluxBenchmark：请确认已应用 render_shared/main.js 的 benchmark 钩子");
+/**
+ * 用**两臂共享的** `driveThroughputFrames()` 驱动 iframe 内的渲染器测帧（本页不再自己计时）。
+ * 一帧 = iframe 里的 `__FLUXGS_BENCH_FRAME__()`（渲染一帧 + `gl.finish()`），与本文臂逐帧对称；
+ * 计时区间/起表点/帧驱动全在共享实现里，两臂口径逐字相同。
+ */
+async function driveFluxFrames(
+    cw: FluxWindow,
+    frames: number,
+    warmup: number,
+    timeoutMs: number,
+): Promise<{ stats: DriveThroughputStats; end: FluxBenchEnd }> {
+    const begin = cw.__FLUXGS_BENCH_BEGIN__;
+    const step = cw.__FLUXGS_BENCH_FRAME__;
+    const end = cw.__FLUXGS_BENCH_END__;
+    if (typeof begin !== "function" || typeof step !== "function" || typeof end !== "function") {
+        throw new Error(
+            "Flux-GS 渲染器未暴露 __FLUXGS_BENCH_* 入口：请确认 render_shared/main.js 的 [BENCH INSTRUMENTATION] 钩子未被覆盖",
+        );
     }
-    const result = await withTimeout(Promise.resolve(fn.call(cw, frames)), timeoutMs, `runFluxBenchmark(${frames})`);
-    if (!result || !Number.isFinite(result.fps) || result.fps <= 0) {
-        throw new Error("runFluxBenchmark 未返回有效帧率");
+    // BEGIN：冻结机位（carousel=false）、停止渲染器自身的 rAF 链、复位累计量 —— 之后每帧都由本页驱动
+    begin.call(cw, { frames: frames + warmup });
+    const stats = await withTimeout(
+        driveThroughputFrames({
+            frames,
+            warmup,
+            driver: "timer", // 协议值：每帧一条 setTimeout(0)，与本文臂同一条链的语义
+            renderFrame: () => {
+                const r = step.call(cw);
+                return r && Number.isFinite(r.syncMs) ? r.syncMs : 0;
+            },
+        }),
+        timeoutMs,
+        `driveThroughputFrames(${frames})`,
+    );
+    if (!stats || !Number.isFinite(stats.fps) || stats.fps <= 0) {
+        throw new Error("Flux-GS 测帧未返回有效帧率");
     }
-    return result;
+    const tail = end.call(cw);
+    if (stats.rendered !== frames) {
+        throw new Error(`测帧未完成（rendered=${stats.rendered}/${frames}）`);
+    }
+    return { stats, end: tail };
 }
 
 // ------------------------------------------------------------------ measurement
@@ -484,12 +635,15 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
     modelUrl.searchParams.set("ts", token);
     const pageUrl = new URL(meta.page, location.href);
     pageUrl.searchParams.set("url", modelUrl.href);
-    // 参考协议（Flux-GS 原协议）：不干预其画布尺寸，用其原生策略
-    //   点数 > 500000 → 1× CSS；否则 CSS × devicePixelRatio
-    // 仅当显式给出 force=<W>x<H> 时才强制分辨率（用于与 1600×1063 旧口径对照）。
-    const forceRaw = param("force", "");
-    if (/^\d+x\d+$/.test(forceRaw)) {
-        pageUrl.searchParams.set("benchres", forceRaw);
+    // **统一像素协议（主表口径）**：默认就带 `benchres=`（缺省 = res 1600×1063，`force=WxH` 可覆盖），
+    // 使它的画布与投影视口 = 本文臂/基线臂的 res（三臂同像素，才允许跨方法比 FPS）。
+    // 只有显式 `force=native` 才不干预它的自适应策略（点数 > 500000 → 1× CSS；否则 CSS × dpr）——
+    // 那种模式下各臂分辨率不对等，结果行的 `res_mode=native` 会让报表脚本把它挡在主表之外。
+    const forced = benchResOverride();
+    const resMode: ResMode = resolutionMode();
+    base.resMode = resMode;
+    if (forced) {
+        pageUrl.searchParams.set("benchres", `${forced.w}x${forced.h}`);
     }
     // ?fluxcam=N：让它的渲染器使用自己源码里的第 N 个真实镜头（与本文臂 cam=fluxcam:N 完全同一机位）
     const fluxCam = param("fluxcam", "");
@@ -501,11 +655,10 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
     frameHost.dataset.h = String(st.resH);
     frameHost.textContent = "";
     const iframe = document.createElement("iframe");
-    // 参考协议下 iframe 布局 = 设备视口（复刻"整页打开渲染器"的条件）；
-    // 给出 force=WxH 时改为固定尺寸，用于 1600×1063 对照口径。
-    const forceSize = /^\d+x\d+$/.test(forceRaw) ? forceRaw.split("x").map((v) => parseInt(v, 10)) : null;
-    const hostW = forceSize ? forceSize[0] : Math.max(320, window.innerWidth);
-    const hostH = forceSize ? forceSize[1] : Math.max(320, window.innerHeight);
+    // 台上布局：统一像素协议下 iframe 布局尺寸 = 强制像素（与 bench.html 的 stage=fit1 逐字同构，
+    // 且保证渲染器内部 innerWidth/Height 与画布一致）；原生档下退回"iframe 布局 = 本页视口"。
+    const hostW = forced ? forced.w : Math.max(320, window.innerWidth);
+    const hostH = forced ? forced.h : Math.max(320, window.innerHeight);
     iframe.width = String(hostW);
     iframe.height = String(hostH);
     iframe.style.width = `${hostW}px`;
@@ -565,15 +718,39 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
                 ? stats.texUploadDoneAt - stats.decodeDoneAt
                 : undefined;
 
-        if (st.warmupFrames > 0) {
-            await runBenchmark(cw, st.warmupFrames, 120000);
-        }
-        const bench = await runBenchmark(cw, st.benchFrames, 240000);
+        // 测帧：共享驱动（两臂同一个函数）逐帧调 iframe 的 __FLUXGS_BENCH_FRAME__（渲染 + gl.finish()）。
+        // BEGIN 在首个真实帧**之后**调用：native 档下机位就此冻结；forced 档在 load 时已冻结。
+        const { stats: bench, end } = await driveFluxFrames(
+            cw,
+            st.benchFrames,
+            st.warmupFrames,
+            240000 + st.warmupFrames * 2000,
+        );
         base.fps = bench.fps;
-        base.resW = bench.resW || base.resW;
-        base.resH = bench.resH || base.resH;
-        base.coveredPct = bench.coveredPct;
-        base.poseKey = Array.isArray(bench.view) ? bench.view.slice(0, 6).join(",") : undefined;
+        base.frames = bench.rendered;
+        base.elapsedMs = bench.elapsedMs;
+        base.cpuMs = bench.cpuMs;
+        base.driver = bench.driver;
+        base.syncMs = bench.syncMs;
+        base.syncFrames = bench.syncFrames;
+        // 帧内阻塞耗时（诊断/自检用；不可用于算倍数）：
+        // 本臂的 frame_ms / cpu_ms 里多含一层"父页面 → iframe 内钩子"的跨 realm 直接调用
+        // （本文臂是在父页面里直接渲染，没有这一层）。该开销量级远小于 1ms，方向是**对基线略不利**，
+        // 属测量框架常量而非渲染器差异：核对两臂时不必修正，但结论里不把它算作方法优势即可。
+        base.frameMs = bench.frameMs;
+        base.frameMeanMs = bench.frameMeanMs;
+        base.timerFloorMs = bench.timerFloorMs;
+        base.timerFloorRounds = bench.timerFloorRounds;
+        base.timerFloorSrc = bench.timerFloorSrc;
+        base.fpsCapped = bench.fpsCapped;
+        // 画布实测值（统一协议下应恒等于 res；native 档则由其自适应策略决定）
+        base.resW = end.canvasW || base.resW;
+        base.resH = end.canvasH || base.resH;
+        base.dpr = end.dpr;
+        base.downsample = end.downsample;
+        base.points = end.points;
+        base.coveredPct = end.coveredPct;
+        base.poseKey = Array.isArray(end.view) ? end.view.slice(0, 6).join(",") : undefined;
         base.ok = true;
         refreshDeviceLabel(cw); // 首帧已过，GPU 名一定已上报（读的是它在用的上下文，零新建）
         return base;
@@ -582,13 +759,16 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
         return base;
     } finally {
         // 先让 iframe 卸载页面以释放它的 WebGL 上下文，再移除节点：
-        // 手机端 13 个场景连续新建 iframe 会累积上下文名额/显存，导致后面的场景拿不到上下文
-        try {
-            iframe.src = "about:blank";
-        } catch {
-            /* ignore */
-        }
+        // 手机端 13 个场景连续新建 iframe 会累积上下文名额/显存，导致后面的场景拿不到上下文。
+        // 顺序比"设了 src 立刻 remove()"更强：等 about:blank **真的 load**（≤1500ms）→ 摘节点 →
+        // 再让出两帧，确保旧文档走完销毁路径（上下文/显存/解码 Worker 都随之归还），
+        // 而不是把"卸载旧文档"和"新建下一个文档"压在同一个任务里。
+        await waitIframeBlank(iframe);
         iframe.remove();
+        if (currentIframe === iframe) currentIframe = null;
+        frameHost.textContent = "";
+        await nextFrame();
+        await nextFrame();
     }
 }
 
@@ -607,7 +787,40 @@ function buildResultText(st: BenchState): string {
     lines.push(`res=${st.resW}x${st.resH}`);
     lines.push(`frames=${st.benchFrames}`);
     lines.push(`warmup=${st.warmupFrames}`);
-    lines.push(`force=${param("force", "native")}`);
+    // 帧驱动与 FPS 定义：本臂与本文臂走**同一个**共享驱动（bench-shared.driveThroughputFrames，
+    // 逐帧调渲染器的 __FLUXGS_BENCH_FRAME__ = 渲染一帧 + gl.finish()），起表点 = 首个计帧绘制完成之后。
+    // throughputFields() 输出的字段名/格式与 bench.html 结果头**逐字相同**，脚本可直接对齐。
+    const roundStats = st.results.filter((r) => r.ok);
+    lines.push(
+        ...throughputFields({
+            driver: "timer",
+            resMode: resolutionMode(),
+            timerFloorMs: median(roundStats.map((r) => r.timerFloorMs ?? 0).filter((v) => v > 0)),
+            timerFloorRounds: roundStats.find((r) => r.timerFloorRounds)?.timerFloorRounds,
+            timerFloorSrc: roundStats.find((r) => r.timerFloorSrc)?.timerFloorSrc,
+            // sync_ms / sync_frames 取各轮中位数：**包含 0**（GPU 很快时 sync 就是 0.00ms，
+            // 过滤掉 0 会让表头变成 "-" 而逐轮却是 0.00，反而让人以为字段缺失）。
+            syncMs: median(roundStats.map((r) => r.syncMs).filter((v): v is number => typeof v === "number")),
+            syncFrames: median(roundStats.map((r) => r.syncFrames).filter((v): v is number => typeof v === "number")),
+            // 帧内阻塞耗时（诊断/自检用；不可用于算倍数）：与本文臂结果头同名字段，供核对量级与地板关系
+            frameMs: median(roundStats.map((r) => r.frameMs).filter((v): v is number => typeof v === "number")),
+            frameMeanMs: median(roundStats.map((r) => r.frameMeanMs).filter((v): v is number => typeof v === "number")),
+            fpsCapped: roundStats.some((r) => r.fpsCapped),
+            // 本臂没有 FadeInPass 那类"前 N 帧只画一部分"的档位：写 n/a（把本文臂的 `fade=none` 区分开）
+            fade: "n/a",
+        }),
+    );
+    // 本臂载入期口径分解（对应本文臂结果头的 `parse_def=`；**两臂的这两个字段不能直接相减比较**）：
+    //   decode_ms = responseEnd → **解码 + 主纹理上传**完成（render_shared/main.js:1854-1855）
+    //   tex_ms    = 解码完成 → **SH 纹理上传**完成（main.js:1870）
+    // 本文臂不单列纹理上传（首次 render 内的 texImage2D 落在 first_frame_ms 里），
+    // 所以"载入期性能"只能在 first_frame_ms 上比，breakdown 只作脚注解释构成差异。
+    lines.push(`decode_def=response_end_to_decode_complete_incl_main_texture`);
+    lines.push(`tex_def=decode_complete_to_sh_texture_upload_complete`);
+    // 台上布局：本臂始终"iframe 布局尺寸 = 目标像素 + CSS transform 等比缩小"（bench-flux.ts:layoutStage）
+    // 即 bench.html 的 `stage=fit1`，两臂最后一处口径差异由此可核对。
+    lines.push(`stage=fit1`);
+    lines.push(`force=${param("force", "") || `res(${st.resW}x${st.resH})`}`);
     lines.push(`pose_src=${param("pose", "flux")}`);
     lines.push(`ts=${new Date().toISOString()}`);
     lines.push(`ua=${env.ua}`);
@@ -622,13 +835,32 @@ function buildResultText(st: BenchState): string {
             `dataset=${r.dataset}`,
             `round=${r.round}`,
             `ok=${r.ok ? 1 : 0}`,
+            // 逐轮也写 res_mode：报表脚本据此把 native 档的行挡在跨方法主表之外
+            `res_mode=${r.resMode ?? resolutionMode()}`,
             `res=${r.resW ?? ""}x${r.resH ?? ""}`,
+            `dpr=${r.dpr ?? ""}`,
+            `points=${r.points ?? ""}`,
+            `downsample=${r.downsample === undefined ? "" : r.downsample.toFixed(4)}`,
             `bytes=${r.bytes ?? ""}`,
             `fetch_ms=${fmt(r.fetchMs, 0)}`,
             `first_frame_ms=${fmt(r.firstFrameMs, 0)}`,
             `decode_ms=${fmt(r.decodeMs, 0)}`,
             `tex_ms=${fmt(r.texMs, 0)}`,
             `fps=${fmt(r.fps, 1)}`,
+            `frames=${r.frames ?? ""}`,
+            `elapsed_ms=${fmt(r.elapsedMs, 0)}`,
+            `cpu_ms=${fmt(r.cpuMs, 2)}`,
+            `sync_ms=${fmt(r.syncMs, 2)}`,
+            `sync_frames=${r.syncFrames ?? ""}`,
+            // 帧内阻塞耗时（诊断/自检用）：与 `floor_used_ms` 并排，可核对"帧率被地板焊死，
+            // 而帧内实际阻塞是 X ms"（`cpu_ms ≈ 地板 + frame_ms`）；不得用它算两臂倍数。
+            `frame_ms=${fmt(r.frameMs, 2)}`,
+            `frame_mean_ms=${fmt(r.frameMeanMs, 2)}`,
+            `driver=${r.driver ?? "timer"}`,
+            // 判定 fps_capped 时**实际引用**的本轮实测地板（表头 timer_floor_ms= 是各轮中位数，
+            // 与本字段不是同一个数）：两臂逐轮行同名字段，报表脚本据此重算判据自查。
+            `floor_used_ms=${fmt(r.timerFloorMs, 2)}`,
+            `fps_capped=${r.fpsCapped ? 1 : 0}`,
             `covered=${fmt(r.coveredPct, 1)}%`,
             `poseInjected=${r.poseInjected === undefined ? "" : r.poseInjected ? 1 : 0}`,
             `pose=${r.poseKey ?? ""}`,
@@ -711,13 +943,31 @@ async function runBench(st: BenchState): Promise<void> {
         return;
     }
     if (st.cold) {
-        // 整页冷启动：重建 iframe/WebGL 上下文/解码 worker，更接近真实首开
-        await sleep(600);
-        location.reload();
+        // 整页冷启动：重建 iframe/WebGL 上下文/解码 worker，更接近真实首开。
+        // **经零上下文的中转页**（bench-hop.html，默认停 hopms=1500ms）再进新页：
+        // 本页文档（连同刚才销毁的 iframe 上下文/显存）确定走完销毁路径，新页才开始建上下文，
+        // 而不是"本页 sleep 一小段就 location.reload()"（那样新旧上下文的回收/创建会重叠）。
+        // 中转页停留与导航都在测量之外，不计入任何指标；`?hop=0` 退回旧口径（等价于 location.reload()）。
+        await sleep(200);
+        location.replace(hopUrlFor(location.href));
         return;
     }
     await sleep(300);
     await runBench(st);
+}
+
+/** `report=` 模式（外部测试者）结果卡文案的两个状态标记 */
+const REPORT_SUBMITTING = "结果正在自动提交，请勿关闭页面…";
+const REPORT_DONE = "✅ 结果已自动提交，可以关闭此页面。";
+
+/**
+ * `report=` 模式下把「复制结果 / 导出记录」收起来：外部测试者的流程只有"打开链接 → 等 → 关页面"，
+ * 露着手动按钮会让不熟悉流程的人以为还要额外操作。提交失败时再放出来（此时文案明确要求点它），
+ * 保证任何情况下都有人工退路。
+ */
+function setManualExportVisible(visible: boolean): void {
+    btnCopy.classList.toggle("hidden", !visible);
+    btnExport.classList.toggle("hidden", !visible);
 }
 
 function finishBench(st: BenchState): void {
@@ -733,8 +983,28 @@ function finishBench(st: BenchState): void {
     const okCount = st.results.filter((r) => r.ok).length;
     const text = buildResultText(st);
     rcText.value = text;
-    rcSummary.textContent = `测试完成：成功 ${okCount}/${st.results.length} 轮。请复制下方文本并发送给测试发起人。`;
+    const reportUrl = param("report");
+    const autoReport = reportUrl !== "";
+    if (autoReport) {
+        setManualExportVisible(false);
+        rcNote.textContent = "结果会自动回传，无需任何操作；看到“已自动提交”即可关闭本页面。";
+    }
+    rcSummary.textContent = autoReport
+        ? `测试完成：成功 ${okCount}/${st.results.length} 轮。${REPORT_SUBMITTING}`
+        : `测试完成：成功 ${okCount}/${st.results.length} 轮。请复制下方文本并发送给测试发起人。`;
     resultCard.style.display = "flex";
+    if (autoReport) {
+        void submitReport(reportUrl, text, param("rtok")).then((ok) => {
+            if (ok) {
+                rcSummary.textContent = rcSummary.textContent.replace(REPORT_SUBMITTING, REPORT_DONE);
+                rcNote.textContent = "结果已回传，无需任何操作。";
+            } else {
+                setManualExportVisible(true);
+                rcSummary.textContent += "\n⚠ 自动提交失败：请点「复制结果」并发送给测试发起人。";
+                rcNote.textContent = "若“复制”按钮无效，请长按文本框手动全选复制。";
+            }
+        });
+    }
 }
 
 async function copyResult(): Promise<void> {
@@ -849,7 +1119,11 @@ async function main(): Promise<void> {
     }
     applyParamToControls();
     refreshDeviceLabel();
-    stRes.textContent = param("force", "native");
+    // 状态栏显示当前像素口径：forced 显示实际像素，native 显示"其自适应"
+    const forcedNow = benchResOverride();
+    stRes.textContent = forcedNow
+        ? `${forcedNow.w}×${forcedNow.h}（统一像素协议）`
+        : "native（其自适应，仅补充、不可跨方法比 FPS）";
     bindBenchEvents();
     window.addEventListener("resize", layoutStage);
     layoutStage();

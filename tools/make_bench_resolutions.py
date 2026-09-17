@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """从 Flux-GS 臂的实测结果里抽出"逐场景原生画布尺寸"，生成 `bench.js/bench-resolutions.json`。
 
-为什么需要：参考协议（Flux-GS 原协议）的画布尺寸由设备视口与点数决定，逐场景不同。
-本文臂用 `?res=table` 读这张表，就能在**与基线完全相同的像素负载**下测帧，避免"分辨率不同"引发的争议。
+为什么需要（**已废弃，仅作历史记录**）：早期口径采用 Flux-GS 的自适应画布（由设备视口与文件体积决定，逐场景不同），
+本文臂用 `?res=table` 读这张表就能与基线同像素。**2026-09-16 起主表改为"统一像素协议"**
+（三臂一律 1600×1063：本文臂/基线臂 `res=1600x1063`、Flux-GS 臂由 `bench-flux.ts` 自动附加 `benchres=1600x1063`），
+本脚本与 `bench-resolutions.json` 不再参与正式测帧。
 
 用法：
     python gsplat.js/tools/make_bench_resolutions.py            # 读 thesis_project/data/ch7_measurements/raw/*.txt
@@ -80,9 +82,9 @@ def main():
     payload = {
         "version": 1,
         "note": (
-            "逐场景原生画布尺寸，来自 Flux-GS 自带渲染器在参考协议（其原生策略：点数>500000 → 1× CSS，"
-            "否则 CSS × devicePixelRatio）下的实测。本文臂可用 ?res=table 按场景匹配同一像素负载；"
-            "换设备测后需重新生成本表。"
+            "逐场景原生画布尺寸（**历史口径，已废弃**），来自 Flux-GS 自带渲染器在其自适应策略"
+            "（`len/32 > 500000 → 1× CSS，否则 CSS × devicePixelRatio`）下的实测。"
+            "2026-09-16 起主表使用统一像素协议（三臂 1600×1063），本表仅供回溯旧数据。"
         ),
         "device": device,
         "resolutions": {k: {"w": v[0], "h": v[1]} for k, v in sorted(found.items())},

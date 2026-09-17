@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+    <title>第七章 手机端实测入口</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 16px 14px 40px;
+            font: 16px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: #14161a;
+            color: #e8eaed;
+            -webkit-text-size-adjust: 100%;
+        }
+
+        h1 { font-size: 19px; margin: 4px 0 6px; }
+
+        h2 {
+            font-size: 16px;
+            margin: 22px 0 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid #2c3038;
+            color: #9ecbff;
+        }
+
+        p, li { font-size: 14px; color: #b9bec7; }
+
+        .warn {
+            background: #3a2b12;
+            border: 1px solid #7a5c1e;
+            border-radius: 10px;
+            padding: 10px 12px;
+            color: #ffd989;
+            font-size: 13.5px;
+        }
+
+        a.leg {
+            display: block;
+            margin: 9px 0;
+            padding: 14px;
+            border-radius: 12px;
+            background: #1d2128;
+            border: 1px solid #303643;
+            color: #e8eaed;
+            text-decoration: none;
+            font-size: 15px;
+            font-weight: 600;
+        }
+
+        a.leg:active { background: #2a3140; }
+
+        a.leg span {
+            display: block;
+            margin-top: 4px;
+            font-size: 12.5px;
+            font-weight: 400;
+            color: #8f96a3;
+            word-break: break-all;
+        }
+
+        a.leg b.tag {
+            display: inline-block;
+            margin-right: 8px;
+            padding: 1px 7px;
+            border-radius: 6px;
+            background: #2f3a4d;
+            font-size: 12px;
+            color: #cfe2ff;
+        }
+
+        .pending { opacity: 0.55; pointer-events: none; }
+
+        code { background: #232830; padding: 1px 5px; border-radius: 5px; font-size: 12.5px; }
+
+        ol { padding-left: 22px; }
+
+        .big { font-size: 15px; color: #ffd989; font-weight: 600; }
+    </style>
+</head>
+
+<body>
+    <h1>第七章 · 手机端实测入口</h1>
+    <p id="origin-line">服务地址：<code id="origin"></code></p>
+
+    <div class="warn">
+        <b>开跑前</b>：插上电源、关掉省电模式、<b>保持屏幕常亮</b>、把其它 App 从后台清掉；全程<b>不要切后台、不要锁屏、不要旋转</b>。
+        每条腿跑完页面会显示"✅ 结果已自动提交"，此时<b>按返回键回到本页</b>，再点下一条。
+        <span class="big">同一批必须用同一个浏览器</span>（Gen3 主测环境是微信内置浏览器，Gen2 / 天玑 9400 用 Chrome）。
+    </div>
+
+    <h2>Phase A · 渐进加负载探测（garden 61 万点，rounds=1，约 8–12 分钟）</h2>
+    <p>目的：看 <code>fps_capped</code> 在哪个像素档从 1 变成 0。两臂<b>同一 <code>res</code> 必须成对跑</b>，
+        顺序：A1① → A1③ → A2① → A2③ → A3① → A3③（每对之间歇 30 秒降温）。</p>
+    <div id="phaseA"></div>
+    <p>若 A3 之后两臂仍全部 <code>fps_capped=1</code>，再试 L3（6.9× 像素；若出现 CONTEXT_LOST 就<b>放弃</b> L3，不要反复重试）：</p>
+    <div id="phaseA3"></div>
+
+    <h2>Phase B · 正式口径（<b>先别跑</b>，等 Phase A 的结论）</h2>
+    <p>Phase A 定出"两臂都不贴地板"的负载档后，正式数据（① 臂 mip360 / tnt / db，rounds=3；③ 臂同样三个 profile）
+        要用<b>那个档</b>重跑。这一节的链接由我按 Phase A 结果确认后再生成，避免把"贴地板的数据"存进 <code>raw/</code>。</p>
+    <div id="phaseB" class="pending"></div>
+
+    <h2>怎么算跑对了</h2>
+    <ol>
+        <li>结果头里 <code>chip=</code> 每次都必须一样（同设备）；<code>res=</code> 与你点的那条腿一致；</li>
+        <li>逐轮行 <code>ok=1</code>、<code>drawOk=1</code>、<code>covered=</code> 不为 0；</li>
+        <li>本轮判定只看两个字段：<code>fps_capped=</code>（该轮是否贴到驱动地板）与 <code>frame_ms=</code>
+            （帧内阻塞耗时，<b>只作诊断</b>：核对 <code>cpu_ms ≈ 地板 + frame_ms</code>；跨臂倍数只看
+            <code>1000/fps</code> 的帧间隔之比，贴地板的一侧只能给下界）。</li>
+    </ol>
+    <p>自动回传文件名形如 <code>hl-ours-r1600_20260917_XXXXXX.txt</code>，落在
+        <code>thesis_project/data/ch7_measurements/raw/</code>；跑完告诉我一声，我直接读文件出结论。</p>
+
+    <script src="p.js"></script>
+</body>
+
+</html>

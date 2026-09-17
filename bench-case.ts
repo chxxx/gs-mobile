@@ -201,7 +201,9 @@ async function createCaseWithRenderer(first: HTMLCanvasElement): Promise<BenchCa
         if (i > 0) target = freshCanvas(target);
         try {
             const ctx = new BenchCase(target);
-            ctx.createRenderer();
+            // bench 测量路径：**不挂 FadeInPass**（两臂架构对等，结果头 fade=none）。
+            // 原因见 bench-measure.BenchCase.createRenderer 的注释；展示路径（bench-view）传 true。
+            ctx.createRenderer(false);
             canvas = target;
             log("boot", `WebGL2 上下文创建成功（第 ${i + 1}/${CTX_ATTEMPTS} 次，等待 ${delay}ms）`);
             return ctx;
