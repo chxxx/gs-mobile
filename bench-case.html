@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <title>单轮测试（iframe 子页面）</title>
+    <style>
+        :root { --bg:#0d1117; --line:#2b3340; --text:#e6edf3; --muted:#8b98a8; --accent:#e3b341; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { height: 100%; overflow: hidden; }
+        body { background: var(--bg); color: var(--text); font: 13px/1.5 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+        /* canvas 的**后备缓冲尺寸**由渲染器按父页面的 res=WxH 显式设置，
+           这里的 100% 只影响显示尺寸（纯缩放），不改变任何被测负载。 */
+        #case-canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
+        #case-status { position: absolute; left: 8px; top: 8px; font-size: 12px; color: #fff; text-shadow: 0 1px 3px #000; background: rgba(0,0,0,.45); padding: 3px 8px; border-radius: 6px; }
+        #case-status b { color: var(--accent); }
+    </style>
+  <script type="module" crossorigin src="./assets/benchCase-DKlOsowc.js"></script>
+  <link rel="modulepreload" crossorigin href="./assets/modulepreload-polyfill-B5Qt9EMX.js">
+  <link rel="modulepreload" crossorigin href="./assets/OrbitControls-D23J7oqU.js">
+  <link rel="modulepreload" crossorigin href="./assets/bench-shared-C_R4gMHD.js">
+  <link rel="modulepreload" crossorigin href="./assets/bench-measure-Clx1wukS.js">
+</head>
+<body>
+    <!--
+      单轮测试子页面（bench.html 每轮新建、用完即销毁）：
+        - 只做一轮测量；结果通过 postMessage 上报，收到 bench-case-dispose 后释放全部资源并回报 disposed。
+        - 本页自己持有 canvas / WebGLRenderer / Scene / Camera / Worker，因此父页面在 bench 模式下
+          完全不碰 WebGL。销毁 iframe 就等于销毁这一轮的上下文、显存、Worker、WASM 堆与 RAF，
+          于是"旧上下文归还"和"新上下文创建"是两个确定性事件（手机端不再出现第二轮 context lost）。
+        - 计时口径与旧 bench.ts 的单轮测量逐行一致（见 bench-measure.ts 的 measureOneRound）。
+    -->
+    <canvas id="case-canvas"></canvas>
+    <div id="case-status">阶段：<b id="case-phase">启动中…</b></div>
+</body>
+</html>
