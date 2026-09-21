@@ -301,7 +301,8 @@ def cmd_run(args):
 def cmd_count(args):
     """委托给 ch7_verify.verify（数量 / 必填字段 / 资产对账 三重校验）。"""
     return V.cmd_verify(argparse.Namespace(root=args.root, manifest=args.manifest, groups=args.groups,
-                                           platforms=args.platforms, write_index=args.write_index))
+                                           platforms=args.platforms, write_index=args.write_index,
+                                           bytes_tol=getattr(args, "bytes_tol", 1024)))
 
 
 def build_parser():
@@ -340,6 +341,7 @@ def build_parser():
     p4.add_argument("--groups", default="main,load,res")
     p4.add_argument("--platforms", default=",".join(C.PLATFORMS))
     p4.add_argument("--write-index", default="")
+    p4.add_argument("--bytes-tol", type=int, default=1024)
     p4.set_defaults(func=cmd_count)
     return parser
 

@@ -182,7 +182,7 @@ def cmd_verify(args):
     platforms = [p for p in args.platforms.split(",") if p]
     table, total_expected = C.expected_files()
 
-    missing, short_fields, asset_bad, index_rows = [], [], [], []
+    missing, short_fields, asset_bad, asset_notes, mixed, index_rows = [], [], [], [], [], []
     protocol_id = ""
     if os.path.isfile(C.PROTOCOL_SNAPSHOT):
         try:
@@ -204,6 +204,7 @@ def cmd_verify(args):
         for key in C.scene_keys(grp, plat):
             scene = key.split("-")[0]
             arm = key.split("-", 1)[1] if grp == C.GRP_LOAD else "r7"
+            key_capped = []
             for n in range(1, C.ROUNDS + 1):
                 rel = "%s/%s/round%d.json" % (plat, key, n)
                 path = os.path.join(args.root, plat, key, "round%d.json" % n)
@@ -221,16 +222,21 @@ def cmd_verify(args):
                     short_fields.append("%s：缺必填字段 %s" % (rel, ",".join(blank)))
                 if rnd.get("fps_capped") == 1:
                     capped += 1
+                key_capped.append(rnd.get("fps_capped"))
                 row = lookup.get((scene, arm))
                 if grp == C.GRP_RES:
                     row = lookup.get((scene, "r7"))
                 if row:
                     exp_points = _int_or_none(row.get("points"))
                     exp_bytes = _int_or_none(row.get("bytes"))
+                    got_bytes = _int_or_none(rnd.get("bytes"))
                     if exp_points is not None and rnd.get("points") not in (None, exp_points):
                         asset_bad.append("%s：points=%s ≠ 登记 %d" % (rel, rnd.get("points"), exp_points))
-                    if exp_bytes is not None and rnd.get("bytes") not in (None, exp_bytes):
-                        asset_bad.append("%s：bytes=%s ≠ 登记 %d" % (rel, rnd.get("bytes"), exp_bytes))
+                    if exp_bytes is not None and got_bytes is not None and got_bytes != exp_bytes:
+                        delta = got_bytes - exp_bytes
+                        tol = max(getattr(args, "bytes_tol", 1024), int(exp_bytes * 0.005))
+                        line = "%s：bytes=%d ≠ 登记 %d（差 %+d）" % (rel, got_bytes, exp_bytes, delta)
+                        (asset_notes if abs(delta) <= tol else asset_bad).append(line)
                 else:
                     asset_bad.append("%s：资产登记里没有 %s/%s" % (rel, scene, arm))
                 index_rows.append({
@@ -241,13 +247,18 @@ def cmd_verify(args):
                     "bytes": rnd.get("bytes"), "sync_ms": rnd.get("sync_ms"),
                     "ts": header.get("ts", ""), "sha256": C.hash_file(path),
                 })
+            if len(set(key_capped)) > 1:                 # 协议 §6.4：跳变不得自行取舍，须上报
+                mixed.append("%s/%s/%s：逐轮 fps_capped = %s"
+                             % (grp, plat, key, ",".join(str(v) for v in key_capped)))
         got_total += got
         print("%s %-4s / %-7s 实收 %2d / 应收 %2d   贴地板轮次 %d/%d"
               % ("✓" if got == exp else "✗", grp, plat, got, exp, capped, max(got, 1)))
     print("-" * 78)
     print("合计 实收 %d / 应收 %d（统计范围：组=%s 平台=%s；协议全量 %d）"
           % (got_total, exp_total, ",".join(groups), ",".join(platforms), total_expected))
-    for title, items in (("缺失文件", missing), ("字段/解析问题", short_fields), ("资产对账不一致", asset_bad)):
+    for title, items in (("缺失文件", missing), ("字段/解析问题", short_fields),
+                         ("资产对账不一致", asset_bad),
+                         ("fps_capped 跳变（须上报，不得自行取舍）", mixed)):
         if items:
             print("✗ %s（%d）：" % (title, len(items)))
             for line in items[:60]:
@@ -257,6 +268,18 @@ def cmd_verify(args):
     if args.write_index and index_rows:
         C.write_csv(args.write_index, ROUND_INDEX_FIELDS, index_rows)
         print("已写入轮次索引（可入库）：%s（%d 行）" % (args.write_index, len(index_rows)))
+    if asset_notes:
+        print("ℹ 字节数在容差内但不相等（%d 条，以点数为准；差值需确认来源，"
+              "例：页面 bytes 可能含传输层附加量）：" % len(asset_notes))
+        for line in asset_notes[:20]:
+            print("   - %s" % line)
+        if len(asset_notes) > 20:
+            print("   … 其余 %d 条省略" % (len(asset_notes) - 20))
+    ok = not (missing or short_fields or asset_bad or mixed)
+    print("结论：%s" % ("全部通过" if ok else "未通过，需补齐/重跑后再继续"))
+    return 0 if ok else 1
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="第 7 章测量协议：资产登记与批次校验")
     sub = parser.add_subparsers(dest="cmd")
@@ -273,6 +296,8 @@ def build_parser():
     p2.add_argument("--groups", default="main,load,res")
     p2.add_argument("--platforms", default=",".join(C.PLATFORMS))
     p2.add_argument("--write-index", default="", help="把逐轮索引写到指定 CSV（建议 %s）" % C.RAW_INDEX)
+    p2.add_argument("--bytes-tol", type=int, default=1024,
+                    help="资产字节数容差（默认 1024 B，另叠加 0.5%% 相对容差；超出即判为资产不一致）")
     p2.set_defaults(func=cmd_verify)
     return parser
 
