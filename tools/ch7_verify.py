@@ -9,10 +9,12 @@
   # 2) 校验原始数据是否齐全、字段是否完整、资产是否对得上（协议 §4.2 / §6）
   python gsplat.js/tools/ch7_verify.py verify --write-index
 
-期望文件数（协议 §4.2，合计 186）：
-  main：13 场景 × 4 平台 × 3 轮 = 156
-  load：3 场景 × 2 臂 × 3 轮 = 18（platform=gen3）
+期望文件数（协议 §4.2，核心合计 393）：
+  main：13 场景 × 5 平台 × 3 轮 = 195（gen2 双内核各一组：gen2-xweb / gen2-chrome）
+  load：3 场景 × 2 臂 × 5 轮 = 30（platform=gen3）
   res ：4 档分辨率 × 3 轮 = 12（platform=rtx4060，表 7-8）
+  flux：13 场景 × 4 平台 × 3 轮 = 156（Flux-GS 基线；gen2-chrome 的 39 轮为"仅取证"，不计入核心）
+另：Flux-GS 资产不在本文 `scenes_manifest.csv` 内，故 flux 组**不做资产对账**（协议 §5.5）。
 
 退出码：0=全部通过；1=有缺失/字段不全/资产不一致；2=参数或前置条件错误。
 """
@@ -123,8 +125,8 @@ def cmd_manifest(args):
 
 # --------------------------------------------------------------------------- 批次校验
 
-ROUND_INDEX_FIELDS = ["protocol_id", "group", "platform", "scene_key", "round", "scene",
-                      "fps", "cpu_ms", "frame_ms", "fps_capped", "floor_used_ms",
+ROUND_INDEX_FIELDS = ["protocol_id", "group", "platform", "kernel", "engine", "scene_key", "round",
+                      "scene", "fps", "cpu_ms", "frame_ms", "fps_capped", "floor_used_ms",
                       "points", "bytes", "sync_ms", "ts", "sha256"]
 
 
@@ -205,7 +207,7 @@ def cmd_verify(args):
             scene = key.split("-")[0]
             arm = key.split("-", 1)[1] if grp == C.GRP_LOAD else "r7"
             key_capped = []
-            for n in range(1, C.ROUNDS + 1):
+            for n in range(1, C.rounds_for(grp) + 1):
                 rel = "%s/%s/round%d.json" % (plat, key, n)
                 path = os.path.join(args.root, plat, key, "round%d.json" % n)
                 if not os.path.isfile(path):
@@ -223,9 +225,11 @@ def cmd_verify(args):
                 if rnd.get("fps_capped") == 1:
                     capped += 1
                 key_capped.append(rnd.get("fps_capped"))
-                row = lookup.get((scene, arm))
-                if grp == C.GRP_RES:
-                    row = lookup.get((scene, "r7"))
+                row = None
+                if grp != C.GRP_FLUX:                 # Flux-GS 资产不在本文登记内（协议 §5.5）
+                    row = lookup.get((scene, arm))
+                    if grp == C.GRP_RES:
+                        row = lookup.get((scene, "r7"))
                 if row:
                     exp_points = _int_or_none(row.get("points"))
                     exp_bytes = _int_or_none(row.get("bytes"))
@@ -237,10 +241,12 @@ def cmd_verify(args):
                         tol = max(getattr(args, "bytes_tol", 1024), int(exp_bytes * 0.005))
                         line = "%s：bytes=%d ≠ 登记 %d（差 %+d）" % (rel, got_bytes, exp_bytes, delta)
                         (asset_notes if abs(delta) <= tol else asset_bad).append(line)
-                else:
+                elif grp != C.GRP_FLUX:
                     asset_bad.append("%s：资产登记里没有 %s/%s" % (rel, scene, arm))
                 index_rows.append({
-                    "protocol_id": protocol_id, "group": grp, "platform": plat, "scene_key": key,
+                    "protocol_id": protocol_id, "group": grp, "platform": plat,
+                    "kernel": C.platform_kernel(plat), "engine": header.get("engine", ""),
+                    "scene_key": key,
                     "round": n, "scene": scene, "fps": rnd.get("fps"), "cpu_ms": rnd.get("cpu_ms"),
                     "frame_ms": rnd.get("frame_ms"), "fps_capped": rnd.get("fps_capped"),
                     "floor_used_ms": rnd.get("floor_used_ms"), "points": rnd.get("points"),
@@ -251,11 +257,12 @@ def cmd_verify(args):
                 mixed.append("%s/%s/%s：逐轮 fps_capped = %s"
                              % (grp, plat, key, ",".join(str(v) for v in key_capped)))
         got_total += got
-        print("%s %-4s / %-7s 实收 %2d / 应收 %2d   贴地板轮次 %d/%d"
-              % ("✓" if got == exp else "✗", grp, plat, got, exp, capped, max(got, 1)))
+        print("%s %-4s / %-9s 实收 %2d / 应收 %2d（%d 轮）  贴地板轮次 %d/%d"
+              % ("✓" if got == exp else "✗", grp, plat, got, exp, C.rounds_for(grp), capped, max(got, 1)))
     print("-" * 78)
-    print("合计 实收 %d / 应收 %d（统计范围：组=%s 平台=%s；协议全量 %d）"
-          % (got_total, exp_total, ",".join(groups), ",".join(platforms), total_expected))
+    print("合计 实收 %d / 应收 %d（统计范围：组=%s 平台=%s；协议核心 %d；Flux-GS 取证轮另计 %s）"
+          % (got_total, exp_total, ",".join(groups), ",".join(platforms), total_expected,
+             ", ".join("%s×%d" % (p, n) for p, n in sorted(C.evidence_files().items()))))
     for title, items in (("缺失文件", missing), ("字段/解析问题", short_fields),
                          ("资产对账不一致", asset_bad),
                          ("fps_capped 跳变（须上报，不得自行取舍）", mixed)):
@@ -293,7 +300,7 @@ def build_parser():
     p2 = sub.add_parser("verify", help="校验原始数据齐全性、必填字段、与资产登记的一致性")
     p2.add_argument("--root", default=C.RAW_ROOT)
     p2.add_argument("--manifest", default=C.MANIFEST)
-    p2.add_argument("--groups", default="main,load,res")
+    p2.add_argument("--groups", default="main,load,res,flux")
     p2.add_argument("--platforms", default=",".join(C.PLATFORMS))
     p2.add_argument("--write-index", default="", help="把逐轮索引写到指定 CSV（建议 %s）" % C.RAW_INDEX)
     p2.add_argument("--bytes-tol", type=int, default=1024,

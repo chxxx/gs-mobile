@@ -4,8 +4,13 @@
 子命令
   plan    只生成跑批计划与 `protocol.json` 快照（不启动任何浏览器）
   run     桌面通道：用 `_tmp_ch7probe/cdp.mjs` 起无头 Edge 跑 bench 页，页面文本拆成逐轮 JSON
-  ingest  人工通道：把手机页面「复制结果」文本拆成逐轮 JSON（手机端无需 adb）
+  ingest  人工通道：把手机/远程页面「复制结果」文本拆成逐轮 JSON（手机端无需 adb）
   count   只做数量/字段/资产校验（委托给 ch7_verify.verify）
+  link    远程协助：生成可直接发给测试者的链接（含 report= 自动回传与 rtok= 口令，协议 §12）
+
+为什么远程协助用 dev server（`npm run dev`，5173）而非静态站：
+  结果自动回传端点 `/__ch7/report` 只存在于 vite dev server；静态托管下页面会退化成
+  "提交失败 → 请手动复制发送"（见 bench.ts / bench-flux.ts 的失败分支）。
 
 落盘（协议 §4.1，唯一合法位置）
   thesis_project/data/ch7_measurements/raw/{platform}/{scene_key}/round{n}.json
@@ -84,7 +89,8 @@ def protocol_id(gs_head, params):
 
 def build_snapshot():
     params = dict(C.PROTO_PARAMS)
-    params["rounds"] = C.ROUNDS
+    params.pop("report", None)                  # 回传端点是分发时才填的，不进协议指纹
+    params["rounds"] = {g: C.rounds_for(g) for g in C.GROUPS}
     gs_head = git_head(C.GS_REPO)
     main_head = git_head(C.PROJECT_ROOT)
     return {
@@ -94,10 +100,15 @@ def build_snapshot():
         "main_head": main_head,
         "params": params,
         "platforms": list(C.PLATFORMS),
+        "kernel": {p: C.platform_kernel(p) for p in C.PLATFORMS},
+        "rounds_by_group": {g: C.rounds_for(g) for g in C.GROUPS},
         "scenes": C.scene_ids(),
         "load_scenes": list(C.LOAD_SCENES),
         "load_arms": list(C.LOAD_ARMS),
         "res_tiers": list(C.RES_TIERS),
+        "flux_scenes": C.flux_scene_ids(),
+        "flux_platforms": list(C.FLUX_PLATFORMS),
+        "flux_evidence": C.evidence_files(),
         "expected": {("%s/%s" % k): v for k, v in C.expected_files()[0].items()},
         "protocol_doc": os.path.relpath(C.PROTOCOL_DOC, C.PROJECT_ROOT).replace("\\", "/"),
     }
@@ -132,8 +143,12 @@ def current_protocol_id():
 
 
 def scene_key_for(group, scene, header, arm=None):
-    """逐轮行 → raw/ 下的一级子目录名（协议 §4.1）。"""
-    if group == C.GRP_MAIN:
+    """逐轮行 → raw/ 下的一级子目录名（协议 §4.1）。
+
+    main / flux 都是 13 个场景 id 本体；flux 臂靠 `engine=fluxgs` 与 platform 目录区分，
+    因此**不需要**在 scene_key 里再带 `-flux` 后缀（避免与资产命名混淆）。
+    """
+    if group in (C.GRP_MAIN, C.GRP_FLUX):
         return scene
     if group == C.GRP_LOAD:
         return "%s-%s" % (scene, arm or "r7")
@@ -150,12 +165,22 @@ def backup_existing(path):
     os.replace(path, old)
 
 
-def ingest_text(text, platform, group, arm=None, tag="", root=None):
-    """把整页结果文本拆成逐轮 JSON 落盘。返回 (写入条数, {scene_key: 轮次数})。"""
+def ingest_text(text, platform, group=None, arm=None, tag="", root=None):
+    """把整页结果文本拆成逐轮 JSON 落盘。返回 (写入条数, {scene_key: 轮次数})。
+
+    `group=None`/`"auto"` 时按结果头 `engine=` 自动判组（协议 §5.5）：
+    `engine=fluxgs` → flux 组；`engine=gsplat` → main 组。load/res 两组无法从结果头推断
+    （它们的 scene_key 带臂名/档位后缀），必须显式 `--group load --arm std45` 之类。
+    """
     root = root or C.RAW_ROOT
     header, rounds = C.parse_result_text(text)
     if not rounds:
         return 0, {}
+    if group in (None, "", "auto"):
+        group = C.GRP_FLUX if C.is_flux_engine(header.get("engine")) else C.GRP_MAIN
+        print("ℹ 未指定 --group：按结果头 engine=%s 判为 %s 组" % (header.get("engine", "?"), group))
+    elif C.is_flux_engine(header.get("engine")) and group != C.GRP_FLUX:
+        print("⚠ 结果头 engine=fluxgs，但显式指定 group=%s：按显式值落盘（请确认这是有意为之）" % group)
     pid = current_protocol_id()
     dataset_map = C.scene_datasets()
     counts = {}
@@ -181,6 +206,7 @@ def ingest_text(text, platform, group, arm=None, tag="", root=None):
         key = scene_key_for(group, scene, header, arm)
         obj = {
             "protocol_id": pid, "group": group, "platform": platform, "scene_key": key,
+            "kernel": C.platform_kernel(platform), "engine": header.get("engine", ""),
             "scene": scene, "dataset": item.get("dataset") or dataset_map.get(scene, ""),
             "round": n, "source": "page-text", "written_at": now_iso(),
             "raw_line": item.get("raw_line", ""),
@@ -195,7 +221,7 @@ def ingest_text(text, platform, group, arm=None, tag="", root=None):
         counts[key] = counts.get(key, 0) + 1
     for line in duplicated:
         print("⚠ 重复轮次（已按后出现的一条落盘，旧文件已备份为 .superseded.*）：%s" % line)
-    return len(rounds), counts
+    return sum(counts.values()), counts        # 实际落盘条数（跳过的行不算"已落盘"）
 
 
 # --------------------------------------------------------------------------- 子命令
@@ -208,14 +234,21 @@ def cmd_plan(args):
           % (snap["protocol_id"], (snap["gsplat_head"] or "-")[:12], (snap["main_head"] or "-")[:12]))
     print("-" * 78)
     table, total = C.expected_files()
-    for (grp, plat), exp in sorted(table.items()):
+    for (grp, plat), exp in sorted(table.items(), key=lambda kv: (C.GROUPS.index(kv[0][0]), kv[0][1])):
         keys = C.scene_keys(grp, plat)
-        print("%-4s / %-7s 场景 %2d 个 × %d 轮 = 期望文件 %3d   示例 URL：\n        %s"
-              % (grp, plat, len(keys), C.ROUNDS, exp,
+        print("%-4s / %-9s（%s 内核）场景 %2d 个 × %d 轮 = 期望文件 %3d\n        示例 URL：%s"
+              % (grp, plat, C.platform_kernel(plat), len(keys), C.rounds_for(grp), exp,
                  C.build_url(args.base, grp, keys[0], platform=plat,
                              u="%s-%s-%s" % (plat, grp, keys[0]))))
     print("-" * 78)
-    print("协议全量期望文件数：%d（协议 §4.2）" % total)
+    print("[%s]" % ("×".join(C.GROUPS)))
+    print("协议核心期望文件数：%d（协议 §4.2）" % total)
+    ev = C.evidence_files()
+    if ev:
+        print("另有 Flux-GS 取证轮（渲染异常，只留档、不进表）：%s"
+              % ", ".join("%s×%d" % (p, n) for p, n in sorted(ev.items())))
+        print("按目录全量落地时磁盘上应为 %d 份（核心 %d + 取证 %d）"
+              % (total + sum(ev.values()), total, sum(ev.values())))
     print("提示：跑批落盘根目录 = %s" % C.RAW_ROOT)
     return 0
 
@@ -223,6 +256,9 @@ def cmd_plan(args):
 def cmd_ingest(args):
     with open(args.text, "r", encoding="utf-8", errors="replace") as fh:
         text = fh.read()
+    if args.group == C.GRP_LOAD and not args.arm:
+        print("✗ 表 7-5 是两臂实验：--group load 必须同时给 --arm r7 或 --arm std45")
+        return 2
     written, counts = ingest_text(text, args.platform, args.group, arm=args.arm,
                                   tag=args.tag or os.path.splitext(os.path.basename(args.text))[0],
                                   root=args.root)
@@ -233,11 +269,58 @@ def cmd_ingest(args):
           % (args.text, written, args.root, args.platform))
     for key in sorted(counts):
         print("   %-24s %d 轮" % (key, counts[key]))
-    print("下一步：python gsplat.js/tools/ch7_batch.py count --platforms %s" % args.platform)
+    print("下一步：python gsplat.js/tools/ch7_batch.py count --platforms %s --groups %s"
+          % (args.platform, args.group))
     return 0
 
 
-DEFAULT_BASE = "http://localhost:4173"      # npm run site:preview（site-dist/）
+DEFAULT_BASE = "http://localhost:5173"      # `npm run dev`（dev server）——远程协助的隧道也指向它，
+                                            # 因为结果自动回传端点 /__ch7/report 只存在于 dev server（协议 §12）
+
+
+def cmd_link(args):
+    """远程协助分发（协议 §12）：生成可直接发给测试者的链接。
+
+    - 链接自带 `report=`（自动回传端点）与 `rtok=`（回传口令），测试者只需「打开 → 等 → 关页面」；
+    - `--subset` 可只跑部分场景并合成**一条**链接（远程协助者分片跑）；
+      不给 `--subset` 时逐场景一条链接（单场景一键跑完该组全部轮次）；
+    - `--name` 写进 `u=`，用于溯源（谁交的、哪台设备）；回传文件名也用 `--name` 前缀。
+    """
+    group = args.group
+    keys = C.scene_keys(group, args.platform)
+    if not keys:
+        print("✗ 组 %s 在平台 %s 上没有场景（见协议 §4.1 分组规则）" % (group, args.platform))
+        return 2
+    subset = ",".join([s for s in args.subset.split(",") if s]) if args.subset else ""
+    arm = args.arm
+    if group == C.GRP_LOAD and not arm:
+        arm = "r7"
+        print("ℹ 表 7-5 是两臂实验：本次按 arm=%s 生成；标准臂请再跑一次 --arm std45" % arm)
+    report = "/__ch7/report?name=" + args.name
+    print("平台 = %-11s 内核 = %-6s 组 = %-4s 轮次 = %d   回传端点 = %s"
+          % (args.platform, C.platform_kernel(args.platform), group, C.rounds_for(group), report))
+    print("回传口令 rtok = %s（与 vite.config.js 的 CH7_REPORT_TOKEN 一致；换口令只需换链接）" % args.token)
+    print("-" * 78)
+
+    def make(key, profile_subset=""):
+        return C.build_url(args.base, group, key, platform=args.platform, report=report,
+                           rtok=args.token, subset=profile_subset,
+                           u="%s-%s-%s" % (args.name, args.platform, key))
+
+    if subset:
+        print("分片模式（一条链接跑 %d 个场景）：" % len(subset.split(",")))
+        print("  %s" % make(keys[0], profile_subset=subset))
+    else:
+        for key in keys:
+            print("  %-24s %s" % (key, make(key)))
+    print("-" * 78)
+    print("发给协助测试者的话术（可直接复制）：")
+    print("  1) 用手机浏览器打开（Gen2 上的 Flux-GS 臂必须用微信内置浏览器）；")
+    print("  2) 打开后会自动开跑，请保持屏幕常亮、不要切后台、不要锁屏；一轮约 3–10 分钟；")
+    print("  3) 跑完页面会自动回传，看到「已回传」就能关页面。若提示提交失败，")
+    print("     请点页面上的「复制结果」把文本原样发回给我（我这边 ingest 落盘）。")
+    print("  ⚠ 隧道地址每次重启都会变：若链接打不开，说明我在重启隧道，请等我发新链接。")
+    return 0
 
 
 def cmd_run(args):
@@ -315,7 +398,7 @@ def build_parser():
 
     p2 = sub.add_parser("run", help="桌面通道跑批（默认 dry-run，加 --yes 才真跑）")
     p2.add_argument("--platform", required=True, choices=list(C.PLATFORMS))
-    p2.add_argument("--group", default=C.GRP_MAIN, choices=[C.GRP_MAIN, C.GRP_LOAD, C.GRP_RES])
+    p2.add_argument("--group", default=C.GRP_MAIN, choices=list(C.GROUPS))
     p2.add_argument("--arm", default=None, choices=[None, "r7", "std45"], help="仅表 7-5 需要")
     p2.add_argument("--base", default=DEFAULT_BASE)
     p2.add_argument("--timeout", type=int, default=1800, help="单场景超时秒数（13 场景×3 轮≈15–25 分钟）")
@@ -329,7 +412,8 @@ def build_parser():
     p3 = sub.add_parser("ingest", help="人工通道：把页面「复制结果」文本拆成逐轮 JSON")
     p3.add_argument("--platform", required=True, choices=list(C.PLATFORMS))
     p3.add_argument("--text", required=True)
-    p3.add_argument("--group", default=C.GRP_MAIN, choices=[C.GRP_MAIN, C.GRP_LOAD, C.GRP_RES])
+    p3.add_argument("--group", default="auto", choices=["auto"] + list(C.GROUPS),
+                    help="auto = 按结果头 engine= 自动判组（fluxgs→flux，否则 main）")
     p3.add_argument("--arm", default=None, choices=[None, "r7", "std45"])
     p3.add_argument("--tag", default="")
     p3.add_argument("--root", default=C.RAW_ROOT, help="落盘根目录（测试时可指到临时目录）")
@@ -338,11 +422,21 @@ def build_parser():
     p4 = sub.add_parser("count", help="只做数量/字段/资产校验")
     p4.add_argument("--root", default=C.RAW_ROOT)
     p4.add_argument("--manifest", default=C.MANIFEST)
-    p4.add_argument("--groups", default="main,load,res")
+    p4.add_argument("--groups", default="main,load,res,flux")
     p4.add_argument("--platforms", default=",".join(C.PLATFORMS))
     p4.add_argument("--write-index", default="")
     p4.add_argument("--bytes-tol", type=int, default=1024)
     p4.set_defaults(func=cmd_count)
+
+    p5 = sub.add_parser("link", help="远程协助分发：生成带自动回传的链接（协议 §12）")
+    p5.add_argument("--platform", required=True, choices=list(C.PLATFORMS))
+    p5.add_argument("--group", default=C.GRP_MAIN, choices=list(C.GROUPS))
+    p5.add_argument("--base", default=DEFAULT_BASE, help="隧道地址或本机地址（默认 dev server）")
+    p5.add_argument("--name", default="helper", help="测试者标识（进 u= 与回传文件名）")
+    p5.add_argument("--token", default=os.environ.get("CH7_REPORT_TOKEN", "ch7-2026-phase4"))
+    p5.add_argument("--subset", default="", help="只跑这些场景（逗号分隔，合成一条链接）")
+    p5.add_argument("--arm", default=None, choices=[None, "r7", "std45"], help="仅表 7-5 需要")
+    p5.set_defaults(func=cmd_link)
     return parser
 
 
