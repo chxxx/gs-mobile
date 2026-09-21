@@ -143,6 +143,18 @@ def collect(scene_stats, header, rounds):
                 # 与逐轮实测的 res=。native 行**不得进跨方法主表**（各臂分辨率不对等）。
                 "res_modes": set(),
                 "ress": set(),
+                # 动态相机挡位（2026-09-17 追加）：`spin=`（rate = deg/帧、swing = 摆幅，0 = 静止协议）
+                # 与 `spin_pivot=` / `spin_mode=`。
+                # **`spin != 0` 的轮次一律不进主表**：那是"相机在测量窗口内转动"的效度自查数据
+                # （见 bench-shared 顶部"动态相机挡位"与三臂手册），与静止协议的论文口径不同源。
+                "spins": set(),
+                "spin_pivots": set(),
+                "spin_modes": set(),
+                # 内容量扫描（2026-09-17 追加）：`sweep_cov_mean=` 逐姿态**真实渲染**覆盖率均值、
+                # `sweep_seen_mean=` 逐姿态**裁剪盒内**高斯比例均值。它们是"两臂是否在看同量级的内容"
+                # 的直接证据（fps 差异能否归因于实现，取决于这一列对齐）。
+                "sweep_cov_mean": [],
+                "sweep_seen_mean": [],
                 "sync_ms": [],
                 "fps_capped": set(),
                 # 计时地板（2026-09-16 追加）：逐轮行的 floor_used_ms= 是**判定 fps_capped 时实际引用**
@@ -180,6 +192,22 @@ def collect(scene_stats, header, rounds):
             slot["res_modes"].add(header["res_mode"])
         if r.get("res"):
             slot["ress"].add(r["res"])
+        # 动态相机挡位（逐轮优先，缺字段时退回表头；旧数据两者都没有 → 视为静止协议 spin=0）
+        spin = r.get("spin", header.get("spin", "0"))
+        if spin is not None:
+            slot["spins"].add(str(spin))
+        spin_pivot = r.get("spin_pivot", header.get("spin_pivot", ""))
+        if spin_pivot:
+            slot["spin_pivots"].add(str(spin_pivot))
+        # 轨迹模式（2026-09-17 追加）：`rate`（`spin=` 是 deg/帧）| `swing`（`spin=` 是摆幅）
+        spin_mode = r.get("spin_mode", header.get("spin_mode", ""))
+        if spin_mode:
+            slot["spin_modes"].add(str(spin_mode))
+        # 内容量扫描（2026-09-17 追加）：逐姿态实测的覆盖率 / 裁剪盒内高斯比例（均值）
+        for metric, field in (("sweep_cov_mean", "sweep_cov_mean"), ("sweep_seen_mean", "sweep_seen_mean")):
+            value = num(r, field)
+            if value is not None:
+                slot[metric].append(value)
         sync_ms = num(r, "sync_ms")
         if sync_ms is not None:
             slot["sync_ms"].append(sync_ms)
@@ -305,6 +333,14 @@ def build_per_scene(scene_stats, r3dgs_manifest, flux_manifest):
                 # 像素口径：forced=统一像素协议（主表口径）；native=Flux 自适应（仅附录）
                 "res_mode": "/".join(sorted(slot.get("res_modes") or [])) or "-",
                 "res": "/".join(sorted(slot.get("ress") or [])) or "-",
+                # 动态相机挡位（2026-09-17 追加）：0 = 静止协议（论文口径）；非 0 = 效度自查数据
+                "spin": "/".join(sorted(slot.get("spins") or [])) or "0",
+                "spin_pivot": "/".join(sorted(slot.get("spin_pivots") or [])) or "-",
+                # 轨迹模式（`rate` = `spin` 是 deg/帧；`swing` = `spin` 是摆幅）
+                "spin_mode": "/".join(sorted(slot.get("spin_modes") or [])) or "rate",
+                # 内容量扫描（动态轮才有）：逐姿态实测覆盖率的均值（中位数）
+                "sweep_cov_mean_median": med_of("sweep_cov_mean"),
+                "sweep_seen_mean_median": med_of("sweep_seen_mean"),
                 "sync_ms_median": round(med(slot["sync_ms"]), 2) if slot["sync_ms"] else None,
                 "fps_capped": "1" in (slot.get("fps_capped") or set()),
                 # 帧内阻塞耗时（2026-09-17 追加）：中位数 + 逐轮值 + 均值口径。
@@ -466,6 +502,27 @@ def render_comparability(per_scene):
             flags.append(
                 f"{row['scene_name']}/{row['arm']}：res={row['res']} ≠ 统一像素协议 1600x1063"
                 "（该行不可与主表其它行直接比较）"
+            )
+        # 动态相机（2026-09-17 追加）：`?spin=` 是"相机在测量窗口内转动"的**效度自查**挡位。
+        # 论文主表口径是静止协议（spin=0）；两者混在一起会把"每帧排不排序"的差别算进方法差距里，
+        # 所以这里与 res_mode=native 同样处理：**明确标出、不得进跨方法主表**。
+        spins = [s for s in str(row.get("spin") or "").split("/") if s and s.strip() not in ("0", "0.000", "0.0")]
+        if spins:
+            modes = "/".join(sorted(set(str(row.get("spin_mode") or "rate").split("/"))))
+            flags.append(
+                f"{row['scene_name']}/{row['arm']}：含动态相机数据（mode={modes}，"
+                f"spin={'/'.join(sorted(spins))}{' deg/帧' if modes == 'rate' else ' deg(摆幅)'}，"
+                f"pivot={row.get('spin_pivot') or '-'}）—— 这是效度自查口径，**不得进跨方法主表**"
+                "（主表口径为静止协议 spin=0；动态数据见 §7.9 的效度验证小节）"
+                # 内容量扫描（2026-09-17 追加）：判断该行 fps 差异能否归因于实现的**前提**是两臂看着
+                # 同量级的内容；这里把该行的实测值摆出来，跨臂核对时直接比大小。
+                + (
+                    f"；本行内容量扫描 sweep_cov_mean={row['sweep_cov_mean_median']}%、"
+                    f"sweep_seen_mean={row['sweep_seen_mean_median']}%（请与另一臂同挡位对照："
+                    "差值大说明画面内容量不同，该挡位的 fps 差异不能只归因于实现）"
+                    if row.get("sweep_cov_mean_median") is not None
+                    else ""
+                )
             )
         if row.get("fps_capped"):
             fmed = row.get("frame_ms_median")

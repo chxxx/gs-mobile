@@ -76,10 +76,17 @@ import {
     sceneById,
     shortDeviceLabel,
     sleep,
+    spinRoundTags,
     submitReport,
+    sweepRoundTags,
     throughputDriver,
     throughputFields,
     warmupFrames,
+    // 结果字段法表 + 唯一的清洗/逐字段合并实现（见 bench-shared 顶部说明：这四处不再手工同步）
+    copyRoundResultFields,
+    sanitizeRoundResult,
+    sceneBoundsRoundTags,
+    sortLagRoundTags,
 } from "./bench-shared";
 import type { BenchState, CasePhase, CaseToParentMessage, RoundResult, SceneMeta } from "./bench-shared";
 // 仅类型导入：view 模式的实现（含渲染器代码）由 main() 动态 import，bench 模式下不会被加载
@@ -196,94 +203,13 @@ function formatTrace(trace: Array<[string, number]>): string {
 }
 
 /**
- * 只保留"数字 / 字符串 / 布尔"的结果字段。
- * 父页面**绝不能**通过 postMessage 或结果数组持有 Splat / RenderData / ArrayBuffer / TypedArray
- * 这类大对象：它们会把旧轮的模型数据钉在内核里，几轮之后就是显存/内存压力。
- *
- * ⚠️ **新增字段必须在本函数里登记**（numKeys / strKeys / 下面的布尔白名单），否则会被**静默丢弃**：
- * 2026-09-16 的 `fpsCapped` 就是这样丢的 —— 子页面（bench-measure.ts:733）其实判过
- * `fpsCapped=1`，父页面拿到的却是 undefined、逐轮一律打印 `fps_capped=0`，
- * 使"帧率已贴驱动地板"的轮次被误当成渲染性能差异（由逐轮 `floor_used_ms=` 自查发现）。
+ * 结果字段的清洗与逐字段合并**都在 bench-shared.ts**（唯一实现）：
+ *   - 清洗：sanitizeRoundResult()  —— 只保留数字/字符串/布尔，绝不放行 Splat/RenderData/ArrayBuffer；
+ *   - 合并：copyRoundResultFields() —— 遍历同一批字段表，把子页面上报的字段并进本轮结果。
+ * 本文件里曾经各写一份（白名单一份 + 收尾逐字段拷贝一份），两处手工同步，2026-09-16~17 连续丢了四次
+ * 字段（fpsCapped / frameMs / timeline / spinMode / sweep*），每次都是静默丢弃。现在字段只登记在
+ * bench-shared 的 ROUND_RESULT_BASE/NUM/STR/BOOL_KEYS 四张表里，漏登记由编译期闸门 MissingResultKeys 拦住。
  */
-function sanitizeRoundResult(raw: RoundResult): RoundResult {
-    const out: RoundResult = {
-        scene: typeof raw.scene === "string" ? raw.scene : "",
-        round: typeof raw.round === "number" ? raw.round : 0,
-        ts: typeof raw.ts === "string" ? raw.ts : new Date().toISOString(),
-        ok: raw.ok === true,
-    };
-    const numKeys = [
-        "coveredPct",
-        "keptPct",
-        "points",
-        "bytes",
-        "fetchMs",
-        "parseMs",
-        "firstFrameMs",
-        "fps",
-        "cpuMs",
-        "fx",
-        "resW",
-        "resH",
-        "retryCount",
-        "disposeMs",
-        "iframeCreateMs",
-        "ctxCreate",
-        "frames",
-        "elapsedMs",
-        "renders",
-        "gapMedMs",
-        "gapMinMs",
-        "gapMaxMs",
-        "warmupMs",
-        "syncMs",
-        "syncFrames",
-        // 2026-09-17 追加：帧内阻塞耗时（诊断/自检用，不可用于算倍数；口径见 bench-shared.frameMs）——
-        // 与上面两个字段一样，漏登记 = 静默丢弃，结果就是逐轮行 `frame_ms=` 恒为空（本文件顶部警告的同一个坑）。
-        "frameMs",
-        "frameMeanMs",
-        "timerFloorMs",
-        "timerFloorRounds",
-        "firstFrameCoveredPct",
-        "validateFramesUsed",
-        "visibilityInsidePct",
-    ] as const;
-    for (const key of numKeys) {
-        const value = raw[key];
-        if (typeof value === "number" && Number.isFinite(value)) {
-            out[key] = value;
-        }
-    }
-    const strKeys = [
-        "dataset",
-        "err",
-        "gl",
-        "jobId",
-        "prevErr",
-        "trace",
-        "driver",
-        "timeline",
-        "timerFloorSrc",
-        "resMode",
-        // 机位口径（2026-09-17 追加）：漏登记就会被**静默丢弃**（见本函数顶部警告），
-        // 结果就是逐轮行 `pose=` 恒为空、报表侧查不出机位差异。
-        "poseKey",
-        "poseSrc",
-    ] as const;
-    for (const key of strKeys) {
-        const value = raw[key];
-        if (typeof value === "string") {
-            out[key] = value;
-        }
-    }
-    if (typeof raw.drawOk === "boolean") out.drawOk = raw.drawOk;
-    if (typeof raw.contextLost === "boolean") out.contextLost = raw.contextLost;
-    if (typeof raw.loseCtx === "boolean") out.loseCtx = raw.loseCtx;
-    // 布尔口径字段（**漏登记 = 静默丢弃**，见上面的警示）：fpsCapped 决定"该轮帧率是不是被驱动
-    // 地板卡住"（`1000/fps ≤ floor_used_ms × 1.05`），漏掉它会让本文臂/基线臂的 fps_capped 恒为 0。
-    if (typeof raw.fpsCapped === "boolean") out.fpsCapped = raw.fpsCapped;
-    return out;
-}
 /** 用户点了"停止测试" */
 let stopRequested = false;
 /** bench 模式是否正在跑（用于按钮禁用与"不允许两个活动 iframe"的断言） */
@@ -456,6 +382,18 @@ function buildResultText(st: BenchState): string {
             frameMs: median(okRounds.map((r) => r.frameMs).filter((v): v is number => typeof v === "number")),
             frameMeanMs: median(okRounds.map((r) => r.frameMeanMs).filter((v): v is number => typeof v === "number")),
             fpsCapped: okRounds.some((r) => r.fpsCapped),
+            // 动态相机（`?spin=`，效度自查）：与 Flux-GS 臂结果头同名字段，取各轮上报的**实际**应用量
+            spinDeg: okRounds.find((r) => r.spinDeg)?.spinDeg,
+            // 轨迹模式与峰值角速度（2026-09-17 追加）：`spin=` 的语义由 `spin_mode=` 决定
+            // （rate = deg/帧；swing = 摆幅）—— 漏传就会让结果头与逐轮行自相矛盾。
+            spinMode: okRounds.find((r) => r.spinMode)?.spinMode,
+            spinPeriod: okRounds.find((r) => typeof r.spinPeriod === "number")?.spinPeriod,
+            spinPeakDeg: okRounds.find((r) => typeof r.spinPeakDeg === "number")?.spinPeakDeg,
+            spinPivot: okRounds.find((r) => r.spinPivot)?.spinPivot,
+            spinErr: okRounds.find((r) => typeof r.spinErr === "number")?.spinErr,
+            spinNote: okRounds.find((r) => r.spinNote)?.spinNote,
+            // 排序次数（效度自查）：取首个有值的轮次
+            sortResults: okRounds.find((r) => typeof r.sortResults === "number")?.sortResults,
             // bench 模式**不挂 FadeInPass**（两臂架构对等）；Flux 臂没有这个档位，它那边写 n/a。
             fade: BENCH_FADE_LABEL,
         }),
@@ -524,6 +462,25 @@ function buildResultText(st: BenchState): string {
         // 机位口径（**始终打印**，不受 diag 开关影响）：`pose=` 与 Flux-GS 臂逐轮行的同名同格式，
         // tools/ch7_baseline_report.py 据此跨臂核对"两臂是否同一个机位"。
         tags.push(`pose=${r.poseKey ?? ""}`, `pose_src=${r.poseSrc ?? ""}`);
+        // 动态相机（`?spin=`，效度自查）：`spin=0` = 静止协议（`pose=` 即全程机位）；
+        // `spin>0` 时 `pose=` 只代表第 0 帧起始机位，`spin_err=` 是本轮轨迹对账误差（> 1e-3 = 两臂轨迹不一致）。
+        // 标签由**两臂共用**的 spinRoundTags() 生成（`spin_mode=` 决定 `spin=` 的语义：rate=deg/帧，swing=摆幅）。
+        tags.push(...spinRoundTags(r));
+        // 内容量扫描（`?sweep=`，动态轮缺省 9 个姿态）：逐姿态的实测覆盖率 / 裁剪盒内高斯数 / 提交实例数。
+        // 它回答"这几个挡位的 fps 能不能拿来比较两臂"——两臂看着同量级的内容，fps 差才归因于实现。
+        tags.push(...sweepRoundTags(r));
+        // 模型包围盒中心（世界坐标）：只在动态相机轮有意义（`?spin=0` 时为 "-"），
+        // 物体型场景要用"绕模型公转"时，把它抄进 `?pivot=` 即可复现同一条轨迹。
+        if (r.sceneCenter) tags.push(`scene_center=${r.sceneCenter}`);
+        if (r.spinNote) tags.push(`spin_note=${r.spinNote.replace(/\s+/g, "_")}`);
+        // 点集包围盒（世界坐标）+ 对角线长度：把"两臂基准机位相差多少单位"换算成**相对场景尺度的比例**
+        // （`scene_diag=` 是分母，比例由报表/分析侧算），不再只有一句"真实几何、不是 bug"。
+        tags.push(...sceneBoundsRoundTags(r));
+        // 排序滞后核对（`?sortlag=1`，本文臂专用探针）：排序完成节奏 + 逐帧滞后 + 陈旧序 vs 新鲜序的
+        // 画面差异（及其截图）。它是"动态视角下省掉的那些排序有没有让画面出错"的唯一直接证据。
+        tags.push(...sortLagRoundTags(r));
+        // 排序次数（效度自查）：静止协议下应 ≈1，动态下应 ≈frames —— 这是"两臂在窗口里是否做了等量工作"的直接证据
+        if (r.sortResults !== undefined) tags.push(`sort_results=${r.sortResults}`);
         if (diag) {
             // 诊断字段：只描述"这一轮是怎么被隔离执行的"，不参与任何性能指标
             tags.push(
@@ -897,57 +854,10 @@ async function runCaseJob(meta: SceneMeta, roundNo: number, st: BenchState, atte
     if (run.result) {
         // 只接受基本类型字段：Splat / RenderData / ArrayBuffer / TypedArray 之类对象绝不进入结果数组
         const clean = sanitizeRoundResult(run.result);
-        out.ok = clean.ok;
-        out.err = clean.err;
-        out.dataset = clean.dataset ?? out.dataset;
-        out.drawOk = clean.drawOk;
-        out.coveredPct = clean.coveredPct;
-        out.keptPct = clean.keptPct;
-        out.points = clean.points;
-        out.bytes = clean.bytes;
-        out.fetchMs = clean.fetchMs;
-        out.parseMs = clean.parseMs;
-        out.firstFrameMs = clean.firstFrameMs;
-        out.fps = clean.fps;
-        out.cpuMs = clean.cpuMs;
-        out.fx = clean.fx;
-        out.resW = clean.resW;
-        out.resH = clean.resH;
-        out.gl = clean.gl;
-        out.ctxCreate = clean.ctxCreate;
-        out.loseCtx = clean.loseCtx;
-        out.driver = clean.driver;
-        out.frames = clean.frames;
-        out.elapsedMs = clean.elapsedMs;
-        out.renders = clean.renders;
-        out.gapMedMs = clean.gapMedMs;
-        out.gapMinMs = clean.gapMinMs;
-        out.gapMaxMs = clean.gapMaxMs;
-        out.warmupMs = clean.warmupMs;
-        // 2026-09-16 新增：GPU 同步 / 计时地板 / 是否被地板卡住 / 像素口径
-        out.syncMs = clean.syncMs;
-        out.syncFrames = clean.syncFrames;
-        // 2026-09-17 追加（同一份白名单+拷贝点的坑，第三次登记）：帧内阻塞耗时（诊断/自检用，不可算倍数）
-        out.frameMs = clean.frameMs;
-        out.frameMeanMs = clean.frameMeanMs;
-        out.timerFloorMs = clean.timerFloorMs;
-        out.timerFloorRounds = clean.timerFloorRounds;
-        out.timerFloorSrc = clean.timerFloorSrc;
-        out.fpsCapped = clean.fpsCapped;
-        out.resMode = clean.resMode;
-        out.firstFrameCoveredPct = clean.firstFrameCoveredPct;
-        // 2026-09-17 新增：机位口径（逐轮 `pose=` / `pose_src=`）—— 与上面的 `fpsCapped` 同款坑：
-        // 子页面（bench-measure）已经写进结果，但父页面在这里逐字段拷贝，漏登记就等于没这回事。
-        out.poseKey = clean.poseKey;
-        out.poseSrc = clean.poseSrc;
-        // 2026-09-17 补登记（**同款坑的第二次踩**：这三个字段在 sanitizeRoundResult 的白名单里，却漏了
-        // 这里的逐字段拷贝，结果 diag=1 的报告里 `timeline=` 恒为空、`vis_inside=` 恒为 "-%"，
-        // 排查"首帧残缺/时序"时看不到关键证据）：
-        //   validateFramesUsed / visibilityInsidePct ← 渲染存活探针（门禁 2）的结论
-        //   timeline                                 ← 子页面打点时间线（诊断首帧口径的**唯一**绝对时刻证据）
-        out.validateFramesUsed = clean.validateFramesUsed;
-        out.visibilityInsidePct = clean.visibilityInsidePct;
-        out.timeline = clean.timeline;
+        // 逐字段并进本轮结果：**遍历 bench-shared 的共享字段表**（不再逐字段手抄）。
+        // 这里正是历史上漏拷四次的位置（fpsCapped / frameMs / timeline / spinMode / sweep* 被静默丢弃，
+        // 导致逐轮行恒印默认值）——改成遍历字段表后，结构上不可能再漏。见文件顶部说明。
+        copyRoundResultFields(out, clean);
         if (clean.fx && clean.fx > 0) focalPxReported = clean.fx;
     } else {
         out.ok = false;

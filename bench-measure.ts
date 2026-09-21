@@ -9,8 +9,64 @@
  *     会连带把渲染器/wasm 模块拉进父页面。父页面靠"不导入"来保证 bench 模式下零 WebGL 上下文。
  */
 import * as SPLAT from "./src/index";
-import { CAM_FLUX, PROTO_FLUX, driveThroughputFrames, param, throughputDriver } from "./bench-shared";
-import type { DriveThroughputStats, RoundResult, SceneMeta, ThroughputDriver } from "./bench-shared";
+// 排序耗时来自渲染器内部的 perf 采样（`sort.worker.ms` / `sort.latency.ms`）：只在排序滞后探针里
+// 临时打开（`perf.enableWindowDebug()`），跑完立即关掉，不影响其它任何测量。
+import { perf } from "./src/utils/PerfDebug";
+import {
+    CAM_FLUX,
+    PROTO_FLUX,
+    camSpinDegPerFrame,
+    clipInsideRatio,
+    driveThroughputFrames,
+    fmt,
+    formatTriple,
+    maxMatrixDiff,
+    median,
+    orbitViewMatrix,
+    param,
+    positionsBounds,
+    resolveSpinSpec,
+    spinPeakDegPerFrame,
+    spinPivotParam,
+    spinPose,
+    spinSampleFrames,
+    spinYawDegAt,
+    summarizeSweep,
+    sweepSampleCount,
+    throughputDriver,
+} from "./bench-shared";
+import type {
+    DriveThroughputStats,
+    RoundResult,
+    SceneBounds,
+    SceneMeta,
+    SpinSpec,
+    SweepResult,
+    SweepSample,
+    ThroughputDriver,
+} from "./bench-shared";
+
+/** 动态相机（`?spin=`）在本轮的实际配置：基准位姿 + 旋转参数 + 轨迹对账结果。 */
+interface SpinState {
+    /** 轨迹的解析结果（模式/摆幅或速度/周期）：两臂唯一的轨迹定义，见 bench-shared.spinYawDegAt */
+    spec: SpinSpec;
+    /** 每帧绕竖直轴转的角度（deg）；正数 = 俯视顺时针（绕 +Y）。`swing` 模式下它是**摆幅** */
+    degPerFrame: number;
+    /** 竖直轴经过的世界坐标点 */
+    pivot: [number, number, number];
+    /** 轴心来源：param（`?pivot=`）| cam（相机自身位置＝原地转头，缺省） */
+    pivotSrc: string;
+    /** 模型包围盒中心（世界坐标，仅作诊断/复现用：物体型场景想要"绕模型公转"时把 `?pivot=` 设成它） */
+    sceneCenter: [number, number, number] | null;
+    /** 第 0 帧的相机位置 / 姿态 / 视图矩阵（此后每帧由共享实现算出位姿） */
+    p0: [number, number, number];
+    q0: [number, number, number, number];
+    v0: number[];
+    /** 第 1 帧实际视图矩阵 vs `orbitViewMatrix` 目标视图矩阵的最大元素偏差（null = 尚未取到） */
+    err: number | null;
+    /** 已应用过的帧数（含预热） */
+    frames: number;
+}
 
 /** Flux-GS 原相机资产（`bench-flux-camera.json`，由 tools/extract_flux_camera.py 抽出）。 */
 export interface FluxCameraAsset {
@@ -40,8 +96,9 @@ export interface MeasureOptions {
 export type { ThroughputDriver };
 
 /** 测帧统计：口径字段**直接来自共享驱动**（`bench-shared.driveThroughputFrames`，两臂同一个函数），
- *  外加本臂特有的 `renders`（`frameRender()` 的真实调用次数，用来证明每帧都真的画了）。 */
-export type ThroughputStats = DriveThroughputStats & { renders: number };
+ *  外加本臂特有的 `renders`（`frameRender()` 的真实调用次数，用来证明每帧都真的画了）与
+ *  `sortResults`（本臂 sort worker **完成排序**的次数，见 `runThroughputFrames` 里的说明）。 */
+export type ThroughputStats = DriveThroughputStats & { renders: number; sortResults?: number };
 
 function emptyThroughput(driver: ThroughputDriver, note: string): ThroughputStats {
     return {
@@ -69,6 +126,120 @@ function emptyThroughput(driver: ThroughputDriver, note: string): ThroughputStat
     };
 }
 
+/** readPixels 得到的一帧像素（RGBA8，行序自下而上，与 GL 一致）。 */
+interface RGBAFrame {
+    w: number;
+    h: number;
+    px: Uint8Array;
+}
+
+/**
+ * 两帧像素差异统计（**同一姿态、只有深度序不同**时用它比较"陈旧序 vs 新鲜序"）：
+ *   - `pct8` / `pct32`：通道差 > 8/255 与 > 32/255 的像素占比 %（基数是"两帧里任一被高斯覆盖"的像素，
+ *     8/255 是人类在平坦区域能察觉的量级，32/255 是明显不同）；
+ *   - `max` / `mean`：通道差的最大值 / 均值（0..255）；
+ *   - `box`：差异显著（>32）像素的包围盒（用于把截图裁到"差异发生的地方"，而不是缩略图看不清）。
+ */
+function diffRGBA(
+    a: RGBAFrame,
+    b: RGBAFrame,
+): {
+    pct8: number;
+    pct32: number;
+    max: number;
+    mean: number;
+    covered: number;
+    box: { x0: number; y0: number; x1: number; y1: number };
+} {
+    const n = Math.min(a.px.length, b.px.length);
+    let covered = 0;
+    let hit8 = 0;
+    let hit32 = 0;
+    let max = 0;
+    let sum = 0;
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
+    const w = a.w;
+    for (let i = 0; i < n; i += 4) {
+        if (a.px[i + 3] === 0 && b.px[i + 3] === 0) continue;
+        covered++;
+        const d = Math.max(
+            Math.abs(a.px[i] - b.px[i]),
+            Math.abs(a.px[i + 1] - b.px[i + 1]),
+            Math.abs(a.px[i + 2] - b.px[i + 2]),
+        );
+        sum += d;
+        if (d > max) max = d;
+        if (d > 8) hit8++;
+        if (d > 32) {
+            hit32++;
+            const p = i / 4;
+            const x = p % w;
+            const y = Math.floor(p / w);
+            if (x < x0) x0 = x;
+            if (y < y0) y0 = y;
+            if (x > x1) x1 = x;
+            if (y > y1) y1 = y;
+        }
+    }
+    return {
+        pct8: covered > 0 ? (hit8 / covered) * 100 : 0,
+        pct32: covered > 0 ? (hit32 / covered) * 100 : 0,
+        max,
+        mean: covered > 0 ? sum / covered : 0,
+        covered,
+        box: { x0, y0, x1, y1 },
+    };
+}
+
+/** 差异热图 / 裁剪块的编码尺寸（像素）：够看清细节，又是 JPEG 可压的小块（结果文本要放得下）。 */
+const SHOT_BOX = { w: 480, h: 320 };
+
+/**
+ * 把一块裁剪区域编码成 JPEG data URL（`data:image/jpeg;base64,…`）。
+ * `mode`：
+ *   - `raw`：直接给像素（用于"陈旧序/新鲜序"两张对照图）；
+ *   - `diff8`：把两帧的通道差放大 8 倍当亮度（`min(255, 8·|Δ|)`，全黑 = 完全一致）→ 差异位置一眼可见。
+ * 注意 readPixels 的行序自下而上（GL 约定），这里统一翻转成自下而上的正向图。
+ */
+function encodeCrop(src: RGBAFrame, box: { x: number; y: number; w: number; h: number }, b: RGBAFrame | null): string {
+    const cw = Math.max(1, Math.min(box.w, src.w - box.x));
+    const ch = Math.max(1, Math.min(box.h, src.h - box.y));
+    const canvas = document.createElement("canvas");
+    canvas.width = cw;
+    canvas.height = ch;
+    const g = canvas.getContext("2d");
+    if (!g) return "";
+    const img = g.createImageData(cw, ch);
+    for (let y = 0; y < ch; y++) {
+        const sy = src.h - 1 - (box.y + y);
+        for (let x = 0; x < cw; x++) {
+            const si = (sy * src.w + box.x + x) * 4;
+            const di = (y * cw + x) * 4;
+            if (b) {
+                const d = Math.max(
+                    Math.abs(src.px[si] - b.px[si]),
+                    Math.abs(src.px[si + 1] - b.px[si + 1]),
+                    Math.abs(src.px[si + 2] - b.px[si + 2]),
+                );
+                const v = Math.min(255, d * 8);
+                img.data[di] = v;
+                img.data[di + 1] = v;
+                img.data[di + 2] = v;
+            } else {
+                img.data[di] = src.px[si];
+                img.data[di + 1] = src.px[si + 1];
+                img.data[di + 2] = src.px[si + 2];
+            }
+            img.data[di + 3] = 255;
+        }
+    }
+    g.putImageData(img, 0, 0);
+    return canvas.toDataURL("image/jpeg", 0.92);
+}
+
 /**
  * 一个测量会话持有的全部对象：canvas / renderer / scene / camera / controls。
  * 生命周期由调用方控制：`createRenderer()` → `measureOneRound()` → `dispose()`。
@@ -90,6 +261,8 @@ export class BenchCase {
     renderCalls = 0;
 
     private _fluxCamera: FluxCameraAsset | null = null;
+    /** 动态相机（`?spin=`）本轮配置；null = 静止协议（历史口径，机位全程不变） */
+    private _spin: SpinState | null = null;
 
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
@@ -140,6 +313,581 @@ export class BenchCase {
         this.renderer?.render(this.scene, this.camera);
     }
 
+    /**
+     * 模型包围盒中心（**世界坐标**）＝动态相机的缺省轴心：绕经过它的竖直轴转弯时，视线始终朝向模型中心，
+     * 因此画面里的内容量基本不变（原地转头会把模型转出去，那测出来的"变快"是负载变小，不是性能好）。
+     *
+     * ⚠️ `splat.data.positions` 是**局部坐标**：shader 里合成的是 `viewProj * transform * position`
+     * （`Object3D.transform`，见 `Matrix4.Compose`），所以必须再把局部包围盒中心乘上对象的世界矩阵。
+     * 曾经的教训（2026-09-17 首次跑 spin 就撞上）：漏乘这一层时 garden 的轴心从世界原点附近
+     * 跑到 `(18.7, 3.4, 26.9)`，相机绕着 39 单位外的点公转 90° 后画面覆盖从 99.8% 掉到 68.6% ——
+     * 负载变了，这一轮就不能用。逐轮结果里的 `covered=` 正是用来暴露这种失败的自查字段。
+     */
+    modelCenter(splat: SPLAT.Splat): [number, number, number] | null {
+        try {
+            const p = splat.data.positions;
+            const n = splat.data.vertexCount;
+            if (!p || n <= 0) return null;
+            let minX = Infinity;
+            let minY = Infinity;
+            let minZ = Infinity;
+            let maxX = -Infinity;
+            let maxY = -Infinity;
+            let maxZ = -Infinity;
+            for (let i = 0; i < n; i++) {
+                const x = p[i * 3];
+                const y = p[i * 3 + 1];
+                const z = p[i * 3 + 2];
+                if (x < minX) minX = x;
+                if (y < minY) minY = y;
+                if (z < minZ) minZ = z;
+                if (x > maxX) maxX = x;
+                if (y > maxY) maxY = y;
+                if (z > maxZ) maxZ = z;
+            }
+            if (!Number.isFinite(minX) || !Number.isFinite(maxX)) return null;
+            const local: [number, number, number] = [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2];
+            const m = splat.transform?.buffer;
+            if (!m || m.length !== 16) return local; // 没有变换信息时退回局部中心（通常是恒等变换）
+            // 列主序：out = M · local（平移在 m[12..14]）
+            return [
+                m[0] * local[0] + m[4] * local[1] + m[8] * local[2] + m[12],
+                m[1] * local[0] + m[5] * local[1] + m[9] * local[2] + m[13],
+                m[2] * local[0] + m[6] * local[1] + m[10] * local[2] + m[14],
+            ];
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * 设置动态相机（`?spin=`）：记下基准位姿与轴心，之后每帧由 `applySpinFrame()` 驱动。
+     * **必须在相机就位之后、测帧之前调用**（见 `measureOneRound` 里紧跟 `pose=` 取指纹之后那一处）。
+     * `spin=0`（缺省）时本函数什么都不做 —— 静止协议与历史数据逐字不变。
+     *
+     * 轨迹模式（`?spin_mode=`，见 bench-shared.spinYawDegAt）：
+     *   - `rate`（缺省）：绕竖直轴**匀速**转 `spin` deg/帧（历史口径）；
+     *   - `swing`：在基准朝向 ±`spin`（摆幅）内按正弦**往复摆动**，周期 `spin_period` 帧（缺省 = 整个窗口）。
+     *     **内容量对齐用**：相机位置不动、朝向只在基准机位附近 ±A° 内摆动 → 整段窗口始终看着与静止轮
+     *     同一片内容，从构造上排除"转到空白区、要画的东西变少"这一解释（逐姿态的实测内容量见
+     *     `contentSweep()` 输出的 `sweep_cov=` / `sweep_seen=`）。
+     *
+     * 轴心（竖直轴过哪个点）：
+     *   - 缺省 = **相机自身位置**（`spin_pivot=cam`）：相机原地转头，视线扫过四周——这就是"用户转动视角"
+     *     的直接类比，对 **360 采集场景**（mip360 的 garden/bicycle/…：相机本来就在点云内部）内容量不变；
+     *   - `?pivot=x,y,z` = 绕该点**公转**（相机位置与朝向一起绕轴刚性旋转）：物体型场景要配 `swing` 小摆幅
+     *     使用，否则会把物体转出画面、测出来的是"负载变小"。模型包围盒中心每轮都会写进 `scene_center=`
+     *     （世界坐标）；两臂必须传**同一个** pivot。
+     * 内容量是否真的没变，由逐轮 `sweep_*`（逐姿态实测覆盖率/裁剪盒内高斯数）回答，不再靠 `covered=` 猜。
+     */
+    setupSpin(splat: SPLAT.Splat | null, windowFrames: number): void {
+        this._spin = null;
+        const spec = resolveSpinSpec(windowFrames);
+        if (!spec) return;
+        const p = this.camera.position;
+        const r = this.camera.rotation;
+        const p0: [number, number, number] = [p.x, p.y, p.z];
+        const pivotParam = spinPivotParam();
+        this._spin = {
+            spec,
+            degPerFrame: spec.deg,
+            pivot: pivotParam ?? p0,
+            pivotSrc: pivotParam ? "param" : "cam",
+            sceneCenter: splat ? this.modelCenter(splat) : null,
+            p0,
+            q0: [r.x, r.y, r.z, r.w],
+            v0: Array.from(this.camera.data.viewMatrix.buffer),
+            err: null,
+            frames: 0,
+        };
+    }
+
+    /**
+     * 把相机放到"第 `index` 帧"应有的位姿（含预热帧计数）：yaw 角由**两臂共享**的
+     * `bench-shared.spinYawDegAt(spec, index)` 给出（`rate` = 匀速累加；`swing` = ±摆幅正弦往复），
+     * 位姿由同样共享的 `spinPose()` 给出；第 1 帧再用 `orbitViewMatrix()`（基线臂实际注入的那条式子）
+     * 对账一次，写进 `spin_err=`。
+     */
+    private applySpinFrame(index: number): void {
+        const s = this._spin;
+        if (!s) return;
+        const deg = spinYawDegAt(s.spec, index);
+        const pose = spinPose(s.p0, s.q0, deg, s.pivot);
+        this.camera.position = new SPLAT.Vector3(pose.position[0], pose.position[1], pose.position[2]);
+        this.camera.rotation = new SPLAT.Quaternion(
+            pose.quaternion[0],
+            pose.quaternion[1],
+            pose.quaternion[2],
+            pose.quaternion[3],
+        );
+        // 渲染器内部（RenderProgram._render）也会 update 相机；这里先 update 一次是为了**取到实际视图矩阵**
+        // 做对账，不在测量预算之外做任何改动（update 只是矩阵重建，幂等）。
+        this.camera.update();
+        s.frames = index + 1;
+        if (index === 1) {
+            // 只对账一次：既避免每帧分配数组扰动测帧窗口，又刚好覆盖"已经开始转动"的第一帧
+            s.err = maxMatrixDiff(this.camera.data.viewMatrix.buffer, orbitViewMatrix(s.v0, deg, s.pivot));
+        }
+    }
+
+    /** 把相机放回**基准位姿**（第 0 帧的位姿；`spin=0` 时是 no-op）：给测帧后的探针用。
+     *  为什么需要它：测帧窗口结束时相机已经转到别处，若不还原，`covered=` 量的是"转完后的那个朝向"
+     *  （同一场景不同挡位读数忽高忽低），与静止轮/另一臂**不同义**——2026-09-17 的 `covered` 异常即此因。
+     *  还原到基准位姿后，`covered=` 在所有轮次里都表示"基准机位的画面覆盖率"，可与静止轮直接对照。 */
+    private restoreBasePose(): void {
+        const s = this._spin;
+        if (!s) return;
+        this.camera.position = new SPLAT.Vector3(s.p0[0], s.p0[1], s.p0[2]);
+        this.camera.rotation = new SPLAT.Quaternion(s.q0[0], s.q0[1], s.q0[2], s.q0[3]);
+        this.camera.update();
+    }
+
+    /** 读一帧像素统计覆盖率（%）：`renderFrame()` + `gl.finish()` + 全幅 readPixels + stride=8 稀疏采样
+     *  （`alpha > 0` 即视为被高斯覆盖）。`covered=` 与 `sweep_cov=` 共用这一个量法，口径不可能分叉。 */
+    private readCoveragePct(): number {
+        const renderer = this.renderer;
+        if (!renderer) return 0;
+        const gl = renderer.gl as WebGL2RenderingContext;
+        const w = renderer.canvas.width || 1;
+        const h = renderer.canvas.height || 1;
+        this.frameRender();
+        try {
+            gl.finish(); // 等 GPU 真正画完再读（在计时区间之外）
+        } catch {
+            /* ignore */
+        }
+        let covered = 0;
+        let samples = 0;
+        try {
+            const buf = new Uint8Array(w * h * 4);
+            gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+            const stride = 8;
+            for (let y = 0; y < h; y += stride) {
+                for (let x = 0; x < w; x += stride) {
+                    if (buf[(y * w + x) * 4 + 3] > 0) covered++;
+                    samples++;
+                }
+            }
+        } catch {
+            /* readPixels 不可用时忽略 */
+        }
+        return samples > 0 ? (covered / samples) * 100 : 0;
+    }
+
+    /** 本轮该臂"提交绘制的实例数"（= 排序索引长度）与该臂点云总点数：
+     *  本文臂 `RenderProgram` 每帧 `drawArraysInstanced(..., depthIndex.length)`，**剔除默认关闭**
+     *  （`?cull=1` 才开）→ 这个数**不随视角变**；它的用处正是把"要画的点数是否变少"这件事摆到台面上。 */
+    private drawnInstances(): number {
+        const cull = this.renderer?.renderProgram?.cullStats;
+        if (!cull || cull.total <= 0) return 0;
+        return cull.keptRatio < 1 ? Math.round(cull.total * cull.keptRatio) : cull.total;
+    }
+
+    /**
+     * **内容量扫描**（`?sweep=<k>`，动态轮缺省 9 个姿态；静止轮缺省关闭）：沿**本轮同一条轨迹**取 k 个姿态，
+     * 逐个姿态记录（写进逐轮 `sweep_*` 字段，两臂同名字段同格式）：
+     *   - `sweep_cov`：真实渲染覆盖率 %（readPixels，与 `covered=` 同一个量法）；
+     *   - `sweep_seen`：裁剪盒内的高斯点比例 %（`clipInsideRatio`，用**本臂渲染器自己的 viewProj**）；
+     *   - `sweep_drawn`：该姿态提交绘制的实例数（不随视角变 = "要画的东西没变少"的直接证据）；
+     *   - `sweep_yaw` / `sweep_pos` / `sweep_frm`：逐姿态的轨迹（角度、相机世界位置、帧号）。
+     *
+     * 这段在**测帧窗口之后**执行，不进任何计时区间；跑完把相机还原到基准位姿，不影响后续读法。
+     */
+    contentSweep(): SweepResult | null {
+        const s = this._spin;
+        if (!s) return null;
+        const k = sweepSampleCount(true);
+        if (k <= 0) return null;
+        const samples: SweepSample[] = [];
+        for (const frame of spinSampleFrames(s.spec, k)) {
+            this.applySpinFrame(frame);
+            const coveredPct = this.readCoveragePct();
+            const vp = this.camera.data.viewProj.buffer as unknown as ArrayLike<number>;
+            let sampled = 0;
+            let inside = 0;
+            let total = 0;
+            for (const object of this.scene.objects) {
+                if (!(object instanceof SPLAT.Splat)) continue;
+                const p = object.data.positions;
+                const n = object.data.vertexCount;
+                total += n;
+                if (!p || n === 0) continue;
+                const r = clipInsideRatio(p, n, vp, 4000);
+                sampled += r.sampled;
+                inside += r.inside;
+            }
+            const pos = this.camera.position;
+            samples.push({
+                frame,
+                yaw: Math.round(spinYawDegAt(s.spec, frame) * 100) / 100,
+                pos: [pos.x, pos.y, pos.z],
+                coveredPct,
+                seenPct: sampled > 0 ? (inside / sampled) * 100 : 0,
+                seenCount: inside,
+                drawn: this.drawnInstances() || total,
+            });
+        }
+        this.restoreBasePose();
+        return { samples };
+    }
+
+    /**
+     * 点集**包围盒**（世界坐标）与对角线长度（写进 `scene_min=` / `scene_max=` / `scene_diag=`）。
+     * 与 `modelCenter()` 同一层变换：`splat.data.positions` 是**局部坐标**，必须乘对象世界矩阵；
+     * 这里把局部包围盒的 8 个角都变换后再取包围盒（对 AABB 做仿射变换的紧上界）。
+     *
+     * 为什么要有这个数：两臂的基准机位不完全重合（实测相差 0.039 世界单位），要判断这个偏差
+     * 是不是可以忽略，必须拿**场景尺度**当分母（`0.039 / scene_diag`），不能只说"真实几何"。
+     */
+    sceneBounds(splat: SPLAT.Splat): SceneBounds | null {
+        try {
+            const p = splat.data.positions;
+            const n = splat.data.vertexCount;
+            if (!p || n <= 0) return null;
+            const local = positionsBounds(p, n);
+            if (!local) return null;
+            const m = splat.transform?.buffer;
+            if (!m || m.length !== 16) return local;
+            const flat = new Float32Array(24);
+            let k = 0;
+            for (const x of [local.min[0], local.max[0]]) {
+                for (const y of [local.min[1], local.max[1]]) {
+                    for (const z of [local.min[2], local.max[2]]) {
+                        flat[k * 3] = m[0] * x + m[4] * y + m[8] * z + m[12];
+                        flat[k * 3 + 1] = m[1] * x + m[5] * y + m[9] * z + m[13];
+                        flat[k * 3 + 2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+                        k++;
+                    }
+                }
+            }
+            return positionsBounds(flat, 8) ?? local;
+        } catch {
+            return null;
+        }
+    }
+
+    /** 本臂 sort worker **已完成排序**的次数（每排完一次回一次消息 → `cullStats.samples`）。 */
+    private sortSamples(): number {
+        return this.renderer?.renderProgram?.cullStats.samples ?? -1;
+    }
+
+    /**
+     * 等 worker 把**当前姿态**排完（`samples` 增加即视为完成），返回等待耗时 ms（超时返回 null）。
+     * 每次循环都 `frameRender()`：RenderProgram 每帧都会把当前 `viewProj` 发给 worker，
+     * 而 worker 只在"收到的 viewProj 与上一次不同"时才置 dirty 重排 —— 所以必须持续喂新姿态。
+     *
+     * ⚠️ 因此**光调用它是不够的**：若当前姿态恰好与上一次投喂的姿态相同，worker 永远不会重排，
+     * 这里会一路等到超时（首版探针就栽在这里：`sortlag_*` 字段全空、时间线上留下 6.2s 空档）。
+     * 需要"把当前姿态的深度序刷新到最新"时，请用下面的 `refreshSortOrderAt()`。
+     */
+    private async waitForSortTick(timeoutMs = 5000): Promise<number | null> {
+        const before = this.sortSamples();
+        if (before < 0) return null;
+        const t0 = performance.now();
+        while (performance.now() - t0 < timeoutMs) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            this.frameRender();
+            if (this.sortSamples() > before) return performance.now() - t0;
+        }
+        return null;
+    }
+
+    /**
+     * 把深度序**确定性地刷新到 `frame` 姿态**：先跳到同一条轨迹上的一个相邻帧（保证 viewProj 变化 →
+     * worker 置 dirty 重排），等它排完，再跳回 `frame` 并等它排完。返回第二次等待的耗时（≈ 单次排序耗时）。
+     *
+     * `avoid` = 上一次投喂过的帧号（相邻帧不能选它，否则又不变化）；`maxFrame` = 允许的帧号上限。
+     * 之所以用"同一条轨迹的相邻帧"而不是随便造一个姿态：相邻帧一定产生不同的 viewProj，且不会把
+     * 深度序污染成"不属于本轨迹"的东西（第二步会把它纠正回 `frame`）。
+     */
+    private async refreshSortOrderAt(frame: number, avoid: number, maxFrame: number): Promise<number | null> {
+        const neighbour = [frame - 1, frame + 1].find((f) => f >= 0 && f <= maxFrame && f !== frame && f !== avoid);
+        if (neighbour !== undefined && neighbour !== frame) {
+            this.applySpinFrame(neighbour);
+            if ((await this.waitForSortTick()) === null) return null;
+        }
+        this.applySpinFrame(frame);
+        return await this.waitForSortTick();
+    }
+
+    /**
+     * 渲染一帧并读回全幅像素（`gl.finish()` + `readPixels`，全同步、**不 await**）。
+     *
+     * 关键性质（A/B 对比的确定性来源）：整个过程在**同一个任务**里完成 → SortWorker 的
+     * `onmessage`（排序结果回传）是宏任务，不可能插进来 → 这一帧用的就是**进来之前就已经在
+     * 缓冲里的那份深度序**。因此"陈旧序渲染"是可以精确复现的，不靠运气抓时序。
+     */
+    private captureRGBA(): RGBAFrame | null {
+        const renderer = this.renderer;
+        if (!renderer) return null;
+        const gl = renderer.gl as WebGL2RenderingContext;
+        const w = renderer.canvas.width || 1;
+        const h = renderer.canvas.height || 1;
+        this.frameRender();
+        try {
+            gl.finish(); // 等 GPU 真正画完（同步返回）
+        } catch {
+            /* 上下文丢失时忽略 */
+        }
+        try {
+            const px = new Uint8Array(w * h * 4);
+            gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+            return { w, h, px };
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * **排序滞后核对**（`?sortlag=1`，只跑动态轮；`?sortlag=shot` 时把对照截图一并编码进结果）。
+     *
+     * 要回答的问题（§7.9 那句"权衡"必须有实测支撑）：动态视角下若深度序更新频率低于逐帧，
+     * 画面会不会出现结构性（非随机）的前后关系错误？Gaussian Splatting 的半透明混合依赖深度序
+     * （本渲染器 `gl.disable(DEPTH_TEST)` + `blendFuncSeparate(ONE_MINUS_DST_ALPHA, ONE, …)`
+     * 即"前到后顺序合成"），顺序写错 → 合成结果必然变化，量级必须实测。
+     *
+     * 做法（全部在测帧窗口**之外**，不进任何性能指标）：
+     *   1) 沿本轮同一条轨迹连续渲染 frames 帧，逐帧记 (帧号, yaw, 已完成排序次数)；
+     *   2) 由"排序完成"的帧号序列算出：完成节奏（每几帧更新一次深度序）、逐帧滞后帧数、
+     *      单次排序耗时（折算成帧）→ 得到**真实滞后档 R** = 最差帧滞后 + 排序耗时；
+     *   3) 在最差帧 f* 上做**确定性 A/B**（同一姿态、同一内容，唯一变量是深度序）：
+     *        A（陈旧序）：先把相机放到 f*−L、等 worker 排完（缓冲里即该姿态的深度序），
+     *                     再把相机跳到 f* 并在**同一个任务**里渲染+readPixels（排序回传进不来）；
+     *        B（新鲜序）：保持 f*，等 worker 排完 f* 的深度序，再渲染+readPixels；
+     *      敏感度：L = 1/2/4/8 各测一次（"滞后多少帧才会看出来"）+ 真实档 R；
+     *   4) 参考线：相邻两帧（都新鲜序）的差异 = 正常帧间变化有多大（伪影可见性的分母）；
+     *   5) `sortlag=shot`：把 L=1 与 L=R 两档的 A/B/差异热图裁成 480×320 JPEG 带回来人工核对。
+     */
+    async sortLagProbe(splat: SPLAT.Splat, frames: number): Promise<Partial<RoundResult> | null> {
+        const s = this._spin;
+        const renderer = this.renderer;
+        if (!s || !renderer) return null;
+        const withShots = param("sortlag", "") === "shot";
+        const n = Math.max(2, frames);
+        // ---- 1) 用**与测帧窗口同一个驱动**沿同一条轨迹再跑一遍，逐帧记录"已完成排序次数" ----
+        // ⚠️ 两个坑都必须在代码里写明：
+        //   (a) 必须**逐帧让出事件循环**：SortWorker 的排序回传是**宏任务**，同步 for 循环里 300 帧一次都
+        //       收不到（首版探针就是这样：`sorts=0/300`、`frame_ms` 只有 0.09ms → 整段数据无效）；
+        //   (b) 必须用**同一个驱动函数**（`bench-shared.driveThroughputFrames`，timer 链 + 逐帧 gl.finish），
+        //       否则帧间隔与测帧窗口不同 → 排序完成节奏也不可比。
+        // 打开 `perf`（缺省不采样）以便直接读**worker 自报的排序耗时** `sort.worker.ms`：
+        // "单次排序要几帧"这个关键量就不再靠墙钟估计，而是 worker 自己的 measurements。
+        perf.enableWindowDebug();
+        perf.reset();
+        const trace: Array<{ frame: number; yaw: number; sorts: number }> = [];
+        let spinIndex = 0;
+        const glProbe = this.renderer ? (this.renderer.gl as WebGL2RenderingContext) : null;
+        const drive = await driveThroughputFrames({
+            frames: n,
+            warmup: 0,
+            driver: throughputDriver(),
+            renderFrame: (): number => {
+                const frame = spinIndex++;
+                this.applySpinFrame(frame);
+                this.frameRender();
+                trace.push({ frame, yaw: spinYawDegAt(s.spec, frame), sorts: this.sortSamples() });
+                if (!glProbe) return 0;
+                const tSync = performance.now();
+                try {
+                    glProbe.finish();
+                } catch {
+                    return 0;
+                }
+                return performance.now() - tSync;
+            },
+            stopped: () => this.stopped,
+        });
+        const perfRows = perf.summarize(true);
+        (window as unknown as { __PERF_DEBUG__?: boolean }).__PERF_DEBUG__ = false;
+        if (this.stopped || drive.rendered < n) return null;
+        const frameMs = drive.cpuMs; // 与测帧窗口同口径（mean frame interval incl. sync）
+        const workerRow = perfRows.find((row) => row.phase === "sort.worker.ms");
+        const latencyRow = perfRows.find((row) => row.phase === "sort.latency.ms");
+        const workerMs = workerRow && workerRow.count > 0 ? workerRow.avgMs : NaN;
+        const latencyMs = latencyRow && latencyRow.count > 0 ? latencyRow.avgMs : NaN;
+        const done: number[] = [];
+        let prev = trace[0].sorts;
+        for (const t of trace) {
+            if (t.sorts > prev) done.push(t.frame);
+            if (t.sorts !== prev) prev = t.sorts;
+        }
+        // 逐帧"深度序滞后帧数"：该帧最后一次**完成**排序距今多少帧（此前回退到窗口开始，即基准姿态那一份）
+        const lag = trace.map((t) => {
+            let last = -1;
+            for (const f of done) {
+                if (f <= t.frame) last = f;
+                else break;
+            }
+            return last < 0 ? 0 : t.frame - last;
+        });
+        const deg = trace.map((t, i) => Math.abs(t.yaw - trace[Math.max(0, t.frame - lag[i])].yaw));
+        const cadences: number[] = [];
+        for (let i = 1; i < done.length; i++) cadences.push(done[i] - done[i - 1]);
+        let hot = 0;
+        for (let i = 1; i < trace.length; i++) {
+            if (deg[i] > deg[hot] || (deg[i] === deg[hot] && lag[i] > lag[hot])) hot = i;
+        }
+        // ---- 2) worker 单次排序耗时（折算成帧）：换一个姿态，量"喂进去到排完"的墙钟 ----
+        // `posted` = 上一次投喂给 worker 的帧号：worker 只在 viewProj 变化时重排，刷新时必须避开它。
+        const maxFrame = n - 1;
+        let posted = trace[trace.length - 1].frame;
+        const refresh = async (frame: number): Promise<number | null> => {
+            const ms = await this.refreshSortOrderAt(frame, posted, maxFrame);
+            posted = frame; // 该函数结束时投喂/停留的姿态一定是 frame
+            return ms;
+        };
+        const pipeProbeMs = (await refresh(Math.max(0, trace[hot].frame - 1))) ?? NaN;
+        // 单次排序占几帧：优先用 **worker 自报**的排序耗时（`sort.worker.ms`，见本次新增的 perf 采样），
+        // 退化时才用"投喂→回传"的墙钟等待（后者含 setTimeout(0) 的 ~1–4ms 量化误差）。
+        const pipeMs = Number.isFinite(workerMs) ? workerMs : pipeProbeMs;
+        const pipeFrames = Number.isFinite(pipeMs) && frameMs > 0 ? pipeMs / frameMs : 0;
+        const realLag = Math.max(1, Math.round(lag[hot] + pipeFrames));
+        // 到此"滞后"这一半已经量完（完成节奏 / 逐帧滞后 / 单次排序耗时 / 真实档 R）。把它先装起来：
+        // A/B 那一半万一失败，仍然要把这一半报出去，并在 `sortlag_note=` 里写明失败原因 ——
+        // 探针失败**绝不能**又变成一次"字段静默消失"（首版就是返回 null → 整轮 `sortlag_*` 全空）。
+        const lagFields: Partial<RoundResult> = {
+            sortLagOn: true,
+            sortLagFrames: n,
+            sortLagCadenceMed: median(cadences) ?? 0,
+            sortLagCadenceMax: cadences.length > 0 ? Math.max(...cadences) : 0,
+            sortLagLagMed: median(lag) ?? 0,
+            sortLagLagMax: Math.max(...lag),
+            sortLagHotFrame: trace[hot].frame,
+            sortLagHotLag: lag[hot],
+            sortLagHotDeg: deg[hot],
+            sortLagLagList: lag.join(","),
+            // worker 自报的单次排序耗时（ms；`sort.worker.ms`）与"投喂→回传"延迟（ms；`sort.latency.ms`）
+            sortLagWorkerMs: Number.isFinite(workerMs) ? Math.round(workerMs * 100) / 100 : undefined,
+            sortLagLatencyMs: Number.isFinite(latencyMs) ? Math.round(latencyMs * 100) / 100 : undefined,
+        };
+        const bail = (reason: string): Partial<RoundResult> => {
+            lagFields.sortLagNote = `probe_failed_${reason}__lag-only`;
+            this.restoreBasePose();
+            return lagFields;
+        };
+        // ---- 3) 最差帧上的确定性 A/B（L=1/2/4/8 敏感度档 + 真实档 R）----
+        const levels = Array.from(new Set([1, 2, 4, 8, realLag]))
+            .filter((v) => v >= 1 && v <= 60)
+            .sort((a, b) => a - b);
+        const stats = new Map<number, { pct8: number; pct32: number; max: number; mean: number }>();
+        const keepFrames = new Map<number, { a: RGBAFrame; b: RGBAFrame }>();
+        let realBox = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+        let freshHot: RGBAFrame | null = null;
+        for (const L of levels) {
+            const from = Math.max(0, trace[hot].frame - L);
+            // A（陈旧序）：先把深度序确定性地刷成 `from` 姿态的
+            if ((await refresh(from)) === null) return bail("refresh_from");
+            // 再把相机跳到 f* 并**在同一个任务里**渲染 + readPixels（worker 回传是宏任务，插不进来）
+            this.applySpinFrame(trace[hot].frame);
+            posted = trace[hot].frame;
+            const stale = this.captureRGBA();
+            if (!stale) return bail("capture_stale");
+            // B（新鲜序）：等 worker 把 f* 姿态自己的深度序排完
+            if ((await refresh(trace[hot].frame)) === null) return bail("refresh_fresh");
+            const fresh = this.captureRGBA();
+            if (!fresh) return bail("capture_fresh");
+            const d = diffRGBA(stale, fresh);
+            stats.set(L, { pct8: d.pct8, pct32: d.pct32, max: d.max, mean: d.mean });
+            if (L === realLag) realBox = d.box;
+            if (withShots && (L === 1 || L === realLag)) keepFrames.set(L, { a: stale, b: fresh });
+            freshHot = fresh;
+            if (this.stopped) return bail("stopped");
+        }
+        // ---- 4) 参考线：相邻两帧都用**新鲜序**（正常帧间变化有多大）----
+        let refPct8 = NaN;
+        let refMax = NaN;
+        if (freshHot) {
+            if ((await refresh(trace[hot].frame + 1)) !== null) {
+                const next = this.captureRGBA();
+                if (next) {
+                    const d = diffRGBA(freshHot, next);
+                    refPct8 = d.pct8;
+                    refMax = d.max;
+                }
+            }
+        }
+        // ---- 5) 截图：裁到"差异真正发生的地方"（没差异时取画面中心）----
+        const firstShot = keepFrames.values().next().value as { a: RGBAFrame; b: RGBAFrame } | undefined;
+        let box = { x: 0, y: 0, w: 0, h: 0 };
+        if (firstShot) {
+            const src = firstShot.a;
+            box.w = Math.min(SHOT_BOX.w, src.w);
+            box.h = Math.min(SHOT_BOX.h, src.h);
+            const hasDiff = Number.isFinite(realBox.x0) && Number.isFinite(realBox.x1);
+            const cx = hasDiff ? (realBox.x0 + realBox.x1) / 2 : src.w / 2;
+            const cy = hasDiff ? (realBox.y0 + realBox.y1) / 2 : src.h / 2;
+            box.x = Math.max(0, Math.min(src.w - box.w, Math.round(cx - box.w / 2)));
+            box.y = Math.max(0, Math.min(src.h - box.h, Math.round(cy - box.h / 2)));
+        }
+        const out: Partial<RoundResult> = {
+            ...lagFields,
+            sortLagPipeFrames: Math.round(pipeFrames * 100) / 100,
+            sortLagRealLag: realLag,
+            sortLagRefPct8: refPct8,
+            sortLagRefMax: refMax,
+            sortLagDiff8x1: stats.get(1)?.pct8,
+            sortLagDiff8x2: stats.get(2)?.pct8,
+            sortLagDiff8x4: stats.get(4)?.pct8,
+            sortLagDiff8x8: stats.get(8)?.pct8,
+            sortLagDiff8Real: stats.get(realLag)?.pct8,
+            sortLagDiffMax1: stats.get(1)?.max,
+            sortLagDiffMax2: stats.get(2)?.max,
+            sortLagDiffMax4: stats.get(4)?.max,
+            sortLagDiffMax8: stats.get(8)?.max,
+            sortLagDiffMaxReal: stats.get(realLag)?.max,
+            sortLagNote:
+                `frames=${n} frame_ms=${frameMs.toFixed(2)} trace_fps=${fmt(1 / Math.max(1e-6, frameMs / 1000), 1)} ` +
+                `hot=frame${trace[hot].frame} lag=${lag[hot]}f pipe=${pipeFrames.toFixed(1)}f real=${realLag}f ` +
+                `sorts=${done.length}/${n} worker_ms=${fmt(workerMs, 2)} latency_ms=${fmt(latencyMs, 2)} ` +
+                `ref=adjacent_fresh_pair`,
+        };
+        for (const [L, fr] of keepFrames) {
+            const a = encodeCrop(fr.a, box, null);
+            const b = encodeCrop(fr.b, box, null);
+            const d = encodeCrop(fr.a, box, fr.b);
+            if (L === 1) {
+                out.sortLagShotA1 = a;
+                out.sortLagShotB1 = b;
+                out.sortLagShotD1 = d;
+            } else {
+                out.sortLagShotAR = a;
+                out.sortLagShotBR = b;
+                out.sortLagShotDR = d;
+            }
+        }
+        this.restoreBasePose();
+        return out;
+    }
+    /** 本轮动态相机的实际应用参数（写进逐轮结果；`spinDeg=0` = 静止协议）。 */
+    spinInfo(): {
+        spinDeg: number;
+        spinMode?: string;
+        spinPeriod?: number;
+        spinPeakDeg?: number;
+        spinPivot?: string;
+        spinPivotSrc?: string;
+        spinErr?: number;
+        spinFrames?: number;
+        sceneCenter?: string;
+    } {
+        const s = this._spin;
+        if (!s) return { spinDeg: 0 };
+        return {
+            spinDeg: s.degPerFrame,
+            // 轨迹模式（`rate` | `swing`）与峰值角速度：`spin=` 的语义由它们决定（swing 下是摆幅）
+            spinMode: s.spec.mode,
+            spinPeriod: s.spec.mode === "swing" ? s.spec.period : undefined,
+            spinPeakDeg: spinPeakDegPerFrame(s.spec),
+            // `cam` 时 pivot 就是相机位置本身，跨臂不可比，直接写来源标记（而不是伪装成一个坐标）
+            spinPivot: s.pivotSrc === "cam" ? "cam" : s.pivot.map((v) => Math.round(v * 1000) / 1000).join(","),
+            spinPivotSrc: s.pivotSrc,
+            spinErr: s.err === null ? undefined : s.err,
+            spinFrames: s.frames,
+            // 模型包围盒中心（世界坐标）：物体型场景想改成"绕模型公转"时，把它抄进 `?pivot=` 即可复现
+            sceneCenter: s.sceneCenter ? s.sceneCenter.map((v) => Math.round(v * 1000) / 1000).join(",") : undefined,
+        };
+    }
+
     /** 画布/后缓冲的实际尺寸（用于证明"测的就是 1600×1063"）。 */
     canvasStats(): { cssW: number; cssH: number; bufW: number; bufH: number; glW: number; glH: number } {
         const gl = this.renderer?.gl as WebGL2RenderingContext | undefined;
@@ -180,8 +928,19 @@ export class BenchCase {
         const driver: ThroughputDriver = throughputDriver();
         const gl = this.renderer ? (this.renderer.gl as WebGL2RenderingContext) : null;
         const rendersBefore = this.renderCalls;
+        /**
+         * 本臂 sort worker **完成排序**的次数（`cullStats.samples` 就是"每完成一次真实排序回一次消息"的计数）：
+         * 静止相机下 `viewProj` 逐值不变 → worker 的 `.includes()` 判定不置 `dirty` → **整轮只排一次**；
+         * 相机一动就每帧都排。两臂都报这个字段（基线由 render_shared/main.js 的 worker 计数），
+         * "测量窗口里两臂是否做了等量工作"才有直接证据，而不是靠推测。
+         */
+        const sortsBefore = this.renderer?.renderProgram?.cullStats?.samples ?? -1;
         /** 一帧 = 渲染提交 + `gl.finish()`（Flux-GS 臂在 __FLUXGS_BENCH_FRAME__ 里同样每帧同步一次）。 */
+        // 动态相机（`?spin=`）：帧号从**预热第一帧**起连续计数（index=0 = 基准位姿那一帧），
+        // 使预热与计帧落在同一条匀速转动的轨迹上，起表点处不会跳一下。
+        let spinIndex = 0;
         const renderFrame = (_index: number): number => {
+            this.applySpinFrame(spinIndex++);
             this.frameRender();
             if (!gl) return 0;
             const t0 = performance.now();
@@ -200,7 +959,7 @@ export class BenchCase {
             renderFrame,
             stopped: () => this.stopped,
         });
-        return { ...s, renders: this.renderCalls - rendersBefore };
+        return { ...s, renders: this.renderCalls - rendersBefore, sortResults: this.sortResultsSince(sortsBefore) };
     }
 
     /**
@@ -253,34 +1012,23 @@ export class BenchCase {
         }
     }
 
-    /** 读一帧像素，统计画面中被高斯覆盖的像素比例；同时读取视锥剔除后的保留比例，用于诊断测帧画面是否"空转"。 */
+    /**
+     * 读一帧像素，统计画面中被高斯覆盖的像素比例；同时读取视锥剔除后的保留比例，用于诊断测帧画面是否"空转"。
+     *
+     * **2026-09-17 修正（口径对称性）**：动态轮先 `restoreBasePose()` 再读。此前探针直接在"测帧窗口结束后"
+     * 的朝向读像素，而动态轮的窗口结束时相机已经转到别处 → 同一场景不同挡位读出 99.8%/47.0%/38.1%/100.0%
+     * 这种忽高忽低的数（`rate` 30°/帧 转满 9000°≡0° 才回到 100%）。那是**探针时机**的问题，不是渲染内容问题；
+     * 还原到基准位姿后，本字段在所有轮次里都表示"基准机位的画面覆盖率"，与静止轮、与另一臂同义可比。
+     * 画面内容随轨迹如何变化，由 `contentSweep()` 的逐姿态 `sweep_cov=` / `sweep_seen=` 负责回答。
+     */
     probeFrameCoverage(): { coveredPct: number; keptPct: number } {
         const renderer = this.renderer;
         if (!renderer) return { coveredPct: 0, keptPct: 0 };
-        const gl = renderer.gl as WebGL2RenderingContext;
-        const w = renderer.canvas.width || 1;
-        const h = renderer.canvas.height || 1;
-        this.frameRender();
-        gl.finish();
-        let covered = 0;
-        let samples = 0;
-        try {
-            const buf = new Uint8Array(w * h * 4);
-            gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
-            const stride = 8;
-            for (let y = 0; y < h; y += stride) {
-                for (let x = 0; x < w; x += stride) {
-                    const idx = (y * w + x) * 4;
-                    if (buf[idx + 3] > 0) covered++;
-                    samples++;
-                }
-            }
-        } catch {
-            /* readPixels 不可用时忽略 */
-        }
+        this.restoreBasePose();
+        const coveredPct = this.readCoveragePct();
         const cull = renderer.renderProgram?.cullStats;
         const keptPct = cull && cull.total > 0 ? cull.keptRatio * 100 : 0;
-        return { coveredPct: samples > 0 ? (covered / samples) * 100 : 0, keptPct };
+        return { coveredPct, keptPct };
     }
 
     /**
@@ -406,6 +1154,13 @@ export class BenchCase {
         return this.renderer?.renderProgram?.cullStats?.total ?? -1;
     }
 
+    /** 测帧窗口内 sort worker **完成排序**的次数（`before` = 窗口开始前的计数；任一取不到时返回 undefined）。 */
+    sortResultsSince(before: number): number | undefined {
+        const now = this.renderer?.renderProgram?.cullStats?.samples ?? -1;
+        if (before < 0 || now < 0) return undefined;
+        return Math.max(0, now - before);
+    }
+
     /**
      * CPU 侧可见性探针（**与 GPU、时序、淡入无关**）：
      * 用渲染器正在用的 `viewProj` 对模型顶点做与顶点着色器**同一套**裁剪盒测试
@@ -426,20 +1181,11 @@ export class BenchCase {
             const p = object.data.positions;
             const n = object.data.vertexCount;
             if (!p || n === 0) continue;
-            const stride = Math.max(1, Math.floor(n / 2000)); // 最多采样 ~2000 点
-            for (let i = 0; i < n; i += stride) {
-                const x = p[3 * i];
-                const y = p[3 * i + 1];
-                const z = p[3 * i + 2];
-                // 与 SortWorker.cullFrustum / 顶点着色器同构：clip = viewProj * (x,y,z,1)
-                const cw = vp[3] * x + vp[7] * y + vp[11] * z + vp[15];
-                const cx = vp[0] * x + vp[4] * y + vp[8] * z + vp[12];
-                const cy = vp[1] * x + vp[5] * y + vp[9] * z + vp[13];
-                const cz = vp[2] * x + vp[6] * y + vp[10] * z + vp[14];
-                const clip = 1.2 * cw;
-                sampled++;
-                if (!(cz < -cw || cz > cw || cx < -clip || cx > clip || cy < -clip || cy > clip)) inside++;
-            }
+            // 与 bench-shared.clipInsideRatio **同一个函数**（同一套裁剪盒、同一个采样密度）：
+            // 逐姿态扫描（contentSweep）与本探针因此可比，两臂也可比。
+            const r = clipInsideRatio(p, n, vp, 2000);
+            sampled += r.sampled;
+            inside += r.inside;
         }
         return { sampled, inside, insidePct: sampled > 0 ? (inside / sampled) * 100 : 0 };
     }
@@ -490,6 +1236,11 @@ export class BenchCase {
         } catch {
             /* ignore */
         }
+        this.clearSpin();
+    }
+    /** 清掉动态相机配置（每轮开头 `resetScene()` 与 `dispose()` 都会走到；幂等）。 */
+    clearSpin(): void {
+        this._spin = null;
     }
 
     /**
@@ -648,6 +1399,26 @@ export async function measureOneRound(
         base.poseKey = ctx.viewFingerprint();
         base.poseSrc = ctx.cameraLocked ? "flux" : "auto";
         mark("camera-ready", `camLocked=${ctx.cameraLocked} pose=${base.poseKey}`);
+        // ---- 动态相机（`?spin=`，效度自查；`spin=0` 时下面全是 no-op）----
+        // 必须在机位就位之后、测帧之前：`pose=` 记的仍是第 0 帧机位，此后每帧由共享实现转动。
+        // 窗口长度（预热 + 计帧）传进去：`swing` 档的摆动周期缺省 = 整个窗口，内容量扫描的采样帧号也用它。
+        ctx.setupSpin(splat, opts.frames + (opts.warmup ?? 0));
+        const spin = ctx.spinInfo();
+        base.spinDeg = spin.spinDeg;
+        base.spinMode = spin.spinMode;
+        base.spinPeriod = spin.spinPeriod;
+        base.spinPeakDeg = spin.spinPeakDeg;
+        base.spinPivot = spin.spinPivot;
+        base.spinPivotSrc = spin.spinPivotSrc;
+        base.sceneCenter = spin.sceneCenter;
+        if (spin.spinDeg !== 0) {
+            mark(
+                "spin-setup",
+                `spin=${spin.spinDeg}${spin.spinMode === "swing" ? "deg(amp)" : "deg/frame"} ` +
+                    `mode=${spin.spinMode} period=${spin.spinPeriod ?? "-"} peak=${fmt(spin.spinPeakDeg, 2)}deg/frame ` +
+                    `pivot=${spin.spinPivot ?? "-"} src=${spin.spinPivotSrc ?? "-"}`,
+            );
+        }
         opts.onPhase?.("sorting");
         // 让出事件循环等待深度排序回传——此时才产生真实的首帧绘制
         const sorted = await ctx.waitForSortedFrame();
@@ -751,6 +1522,9 @@ export async function measureOneRound(
         base.frames = perf.rendered;
         base.elapsedMs = perf.elapsedMs;
         base.renders = perf.renders;
+        // 排序次数（效度自查）：静止协议下本文臂整轮只排一次；相机一动就每帧都排。
+        // 与基线臂逐轮行的 `sort_results=` 同名同义（那边由 render_shared/main.js 的 worker 计数）。
+        base.sortResults = perf.sortResults;
         base.gapMedMs = perf.gapMedMs;
         base.gapMinMs = perf.gapMinMs;
         base.gapMaxMs = perf.gapMaxMs;
@@ -769,7 +1543,66 @@ export async function measureOneRound(
         // 本文臂恒为统一像素协议（bench-case 把后备缓冲钉死为 res）
         base.resMode = "forced";
         base.firstFrameCoveredPct = firstFrameCovered >= 0 ? firstFrameCovered : undefined;
+        // 动态相机的轨迹对账（`spin=0` 时 undefined）：实际视图矩阵 vs 共享实现目标视图矩阵的最大偏差。
+        // 大偏差（> 1e-3）＝本轮的相机轨迹与基线臂注入的不是同一条，跨臂相除不成立，结果里必须看得见。
+        base.spinErr = ctx.spinInfo().spinErr;
         base.timeline = formatTimeline(timeline);
+        // ---- 内容量扫描（`?sweep=<k>`，动态轮缺省 9 个姿态）：测帧窗口**之后**逐姿态实测内容量 ----
+        // 回答的问题："这几个挡位的 fps 能不能用来比较两臂？"——只有两臂在整条轨迹上看着同量级的内容，
+        // 帧率差异才归因于实现而不是"要画的东西多寡"。见 bench-shared.clipInsideRatio 与 contentSweep()。
+        const sweep = ctx.contentSweep();
+        if (sweep) {
+            const sum = summarizeSweep(sweep);
+            base.sweepK = sum.k;
+            base.sweepCoveredMean = sum.covMean;
+            base.sweepCoveredMin = sum.covMin;
+            base.sweepCoveredMax = sum.covMax;
+            base.sweepSeenMean = sum.seenMean;
+            base.sweepSeenMin = sum.seenMin;
+            base.sweepSeenMax = sum.seenMax;
+            base.sweepDrawnMin = sum.drawnMin;
+            base.sweepDrawnMax = sum.drawnMax;
+            base.sweepFrames = sum.frames;
+            base.sweepYaws = sum.yaws;
+            base.sweepPoses = sum.poses;
+            base.sweepCoveredList = sum.covList;
+            base.sweepSeenList = sum.seenList;
+            base.sweepDrawnList = sum.drawnList;
+            mark(
+                "content-sweep",
+                `k=${sum.k} frames=${sum.frames} yaws=${sum.yaws} cov(mean/min/max)=` +
+                    `${sum.covMean.toFixed(1)}/${sum.covMin.toFixed(1)}/${sum.covMax.toFixed(1)}% ` +
+                    `seen=${sum.seenMean.toFixed(1)}/${sum.seenMin.toFixed(1)}/${sum.seenMax.toFixed(1)}% ` +
+                    `drawn=${sum.drawnMin}${sum.drawnMin === sum.drawnMax ? " (与视角无关)" : `~${sum.drawnMax}`}`,
+            );
+        }
+        // ---- 点集包围盒（世界坐标）+ 对角线：把"两臂基准机位相差多少单位"换成**相对场景尺度的比例** ----
+        // 这是"0.039 单位到底算不算可忽略"的唯一判据（`offset / scene_diag`），两臂各算自己的点集。
+        const bounds = ctx.sceneBounds(splat);
+        if (bounds) {
+            base.sceneMin = formatTriple(bounds.min);
+            base.sceneMax = formatTriple(bounds.max);
+            base.sceneDiag = bounds.diag;
+            mark(
+                "scene-bounds",
+                `min=${base.sceneMin} max=${base.sceneMax} diag=${bounds.diag.toFixed(4)} 世界单位（${bounds.count} 点）`,
+            );
+        }
+        // ---- 排序滞后核对（`?sortlag=1`；`?sortlag=shot` 额外带回对照截图）----
+        // 回答"动态视角下省掉的那些排序有没有让画面出错"：见 sortLagProbe 与 sortLagRoundTags 的说明。
+        if (param("sortlag", "") !== "") {
+            const lagInfo = await ctx.sortLagProbe(splat, opts.frames);
+            if (lagInfo) {
+                Object.assign(base, lagInfo);
+                mark(
+                    "sortlag-probe",
+                    `sorts=${lagInfo.sortLagLagList ? lagInfo.sortLagLagList.split(",").length : "?"}帧 lag(med/max)=` +
+                        `${fmt(lagInfo.sortLagLagMed, 2)}/${lagInfo.sortLagLagMax}帧 hot=frame${lagInfo.sortLagHotFrame}` +
+                        `(${fmt(lagInfo.sortLagHotDeg, 2)}deg) real=${lagInfo.sortLagRealLag}帧 ` +
+                        `diff(pct8,真实档)=${fmt(lagInfo.sortLagDiff8Real, 3)}% ref=${fmt(lagInfo.sortLagRefPct8, 3)}%`,
+                );
+            }
+        }
 
         // ---- 人工确认用：测完之后先保持画面 holdms 毫秒再上报（默认 0，不进任何指标）----
         const holdMs = Math.max(0, parseInt(param("holdms", "0"), 10) || 0);

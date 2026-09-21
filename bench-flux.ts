@@ -38,14 +38,33 @@ import { guessChip as guessChipFrom } from "./bench-chip";
 import {
     HOP_PAGE,
     benchResOverride,
+    camSpinDegPerFrame,
+    clipInsideRatio,
     driveThroughputFrames,
     hopDelayMs,
     hopUrlFor,
+    maxMatrixDiff,
+    mulMat4,
+    orbitViewMatrix,
     resolutionMode,
+    resolveSpinSpec,
+    // 包围盒（世界坐标）+ 逐轮标签：与本文臂同一实现/同一字段名，"0.039 单位占场景尺度多少"两臂可直接对照
+    formatTriple,
+    positionsBounds,
+    sceneBoundsRoundTags,
+    spinPeakDegPerFrame,
+    spinPivotParam,
+    spinRoundTags,
+    spinSampleFrames,
+    spinYawDegAt,
     submitReport,
+    summarizeSweep,
+    sweepRoundTags,
+    sweepSampleCount,
     throughputFields,
+    viewCameraPosition,
 } from "./bench-shared";
-import type { DriveThroughputStats, ResMode } from "./bench-shared";
+import type { DriveThroughputStats, ResMode, SpinSpec, SweepResult, SweepSample } from "./bench-shared";
 
 // ------------------------------------------------------------------ DOM
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -102,6 +121,18 @@ interface FluxBenchFrame {
     t: number;
     syncMs: number;
 }
+/** `__FLUXGS_BENCH_SWEEP__(view16)` 的返回：在**指定姿态**渲染一帧后的内容量读数（不进任何计时区间）。
+ *  `proj` = 渲染器自己的投影矩阵（列主序 16 项）：驱动页用 `mulMat4(proj, view)` 复现它的 viewProj，
+ *  再调**两臂共享的** `clipInsideRatio` 算"裁剪盒内点数"，与本文臂的同一个量法。 */
+interface FluxBenchSweep {
+    coveredPct: number;
+    /** 该姿态实际提交绘制的实例数（= 渲染器的 `vertexCount`；不随视角变） */
+    drawn: number;
+    proj: number[] | null;
+    /** 该姿态渲染器实际使用的视图矩阵（对账用；未取到为 null） */
+    view: number[] | null;
+}
+
 /** `__FLUXGS_BENCH_END__()` 的返回：测帧会话累计量（由驱动页负责结算，渲染器侧不做计时）。 */
 interface FluxBenchEnd {
     frames: number;
@@ -112,6 +143,8 @@ interface FluxBenchEnd {
     dpr: number;
     downsample: number;
     points: number;
+    /** BEGIN 之后**真正完成**的排序次数（效度自查）：静止机位下基线 worker 的早退会让它停在 1 */
+    sorts?: number;
     view: number[];
 }
 /** `__FLUXGS_BENCH_PROBE__()` 的只读快照（分辨率核对用，不做任何渲染）。 */
@@ -126,6 +159,8 @@ interface FluxBenchProbe {
     benchRes: { w: number; h: number } | null;
     fetchEndAt: number;
     firstFrameAt: number;
+    /** 当前视图矩阵（世界→视图，列主序 16 项）——`?spin=` 用它取基准位姿；旧版钩子无此字段 */
+    view?: number[] | null;
 }
 interface RoundResult {
     scene: string;
@@ -175,6 +210,45 @@ interface RoundResult {
     poseKey?: string;
     /** `pose=ours` 时机位是否成功注入（false 表示仍用 Flux-GS 自己的机位） */
     poseInjected?: boolean;
+    /** 动态相机（`?spin=`）实际注入的转动速度（deg/帧；0/缺省 = 静止协议） */
+    spinDeg?: number;
+    /** 轨迹模式（`rate` = 匀速转 | `swing` = ±摆幅内往复摆动）与峰值角速度（deg/帧）：
+     *  `spin=` 的语义由 `spin_mode=` 决定（与本文臂同名字段，格式逐字一致）。 */
+    spinMode?: string;
+    spinPeriod?: number;
+    spinPeakDeg?: number;
+    /** 内容量扫描（`?sweep=<k>`，与本文臂同名字段）：逐姿态实测的覆盖率 / 裁剪盒内高斯比例 / 提交实例数。
+     *  用来证明"两臂在整条轨迹上看着同量级的内容"——否则 fps 不掉可以解释成"要画的东西变少了"。 */
+    sweepK?: number;
+    sweepCoveredMean?: number;
+    sweepCoveredMin?: number;
+    sweepCoveredMax?: number;
+    sweepSeenMean?: number;
+    sweepSeenMin?: number;
+    sweepSeenMax?: number;
+    sweepDrawnMin?: number;
+    sweepDrawnMax?: number;
+    sweepFrames?: string;
+    sweepYaws?: string;
+    sweepPoses?: string;
+    sweepCoveredList?: string;
+    sweepSeenList?: string;
+    sweepDrawnList?: string;
+    /** 点集包围盒（**世界坐标**，与本文臂同名字段同格式）与对角线长度：基线侧的点集是
+     *  `__FLUXGS_DUMP_XYZ__` 回报的**解码后世界坐标**（739431 点）。用途见本文臂同名注释。 */
+    sceneMin?: string;
+    sceneMax?: string;
+    sceneDiag?: number;
+    /** 本测帧窗口内基线 worker **真正完成**的排序次数（效度自查；静止下应 ≈1，动态下按帧数增长） */
+    sortResults?: number;
+    /** 旋转轴心（`x,y,z`）或来源标记 `cam`（绕相机自身位置原地转，载荷会变，慎用） */
+    spinPivot?: string;
+    /** 轴心来源：param（URL `?pivot=`）| cam（相机位置回退） */
+    spinPivotSrc?: string;
+    /** 末帧视图 vs 共享实现目标视图的最大元素偏差（受 END 的 1e-3 舍入限制，≤2e-3 即"同一条轨迹"） */
+    spinErr?: number;
+    /** 动态相机的异常/说明（如"未取到初始视图，已退回静止协议"） */
+    spinNote?: string;
     /** dump=1 时导出的世界坐标点数 */
     dumped?: number;
     /** 本轮渲染器解码出的真实点数（`__FLUXGS_BENCH_END__.points`）：核对点数档与负载量级 */
@@ -392,6 +466,8 @@ type FluxWindow = Window & {
     __FLUXGS_BENCH_BEGIN__?: (opts?: { frames?: number }) => boolean;
     __FLUXGS_BENCH_FRAME__?: () => FluxBenchFrame;
     __FLUXGS_BENCH_END__?: () => FluxBenchEnd;
+    /** 内容量扫描：在指定姿态渲染一帧并回报覆盖率/实例数/投影矩阵（测帧窗口之后调用，不进计时） */
+    __FLUXGS_BENCH_SWEEP__?: (view16: number[]) => FluxBenchSweep | null;
 };
 
 /** 轮询等待渲染器暴露注入接口并调用（钩子在 main() 里 fetch 之后才定义，需要等一下）。 */
@@ -581,12 +657,27 @@ function exportXyzDump(cw: FluxWindow, sceneId: string): number {
  * 一帧 = iframe 里的 `__FLUXGS_BENCH_FRAME__()`（渲染一帧 + `gl.finish()`），与本文臂逐帧对称；
  * 计时区间/起表点/帧驱动全在共享实现里，两臂口径逐字相同。
  */
+/** 动态相机（`?spin=`）在基线臂的注入配置：基准视图矩阵 + 旋转参数。 */
+interface SpinInjection {
+    /** 轨迹的解析结果（模式/摆幅或速度/周期）：与本文臂**同一个** `resolveSpinSpec()` 产物 */
+    spec: SpinSpec;
+    /** 每帧绕竖直轴转的角度（deg）；`swing` 模式下它是**摆幅** */
+    deg: number;
+    /** 竖直轴经过的世界坐标点 */
+    pivot: [number, number, number];
+    /** 轴心来源：param（`?pivot=`）| cam（由基准视图反解的相机位置＝原地转） */
+    pivotSrc: string;
+    /** 第 0 帧的视图矩阵（世界→视图，列主序）＝注入基线渲染器的基准位姿 */
+    v0: number[];
+}
+
 async function driveFluxFrames(
     cw: FluxWindow,
     frames: number,
     warmup: number,
     timeoutMs: number,
-): Promise<{ stats: DriveThroughputStats; end: FluxBenchEnd }> {
+    spin: SpinInjection | null = null,
+): Promise<{ stats: DriveThroughputStats; end: FluxBenchEnd; spinErr?: number }> {
     const begin = cw.__FLUXGS_BENCH_BEGIN__;
     const step = cw.__FLUXGS_BENCH_FRAME__;
     const end = cw.__FLUXGS_BENCH_END__;
@@ -597,12 +688,22 @@ async function driveFluxFrames(
     }
     // BEGIN：冻结机位（carousel=false）、停止渲染器自身的 rAF 链、复位累计量 —— 之后每帧都由本页驱动
     begin.call(cw, { frames: frames + warmup });
+    const setCam = cw.__FLUXGS_SET_CAM__;
+    /** 动态相机：帧号从**预热第一帧**起连续计数，逐帧把"该帧应有的视图矩阵"注入渲染器 */
+    let spinIndex = 0;
     const stats = await withTimeout(
         driveThroughputFrames({
             frames,
             warmup,
             driver: "timer", // 协议值：每帧一条 setTimeout(0)，与本文臂同一条链的语义
             renderFrame: () => {
+                if (spin && typeof setCam === "function") {
+                    // 只注入**视图矩阵**（与本仓库 CameraData.viewMatrix 同布局）：位置与姿态都由它决定，
+                    // 渲染器不会用鼠标/键盘改写（SET_CAM 同时关掉 carousel）。
+                    // yaw 由**两臂共享**的 spinYawDegAt 给出（rate = 匀速累加；swing = ±摆幅正弦往复）。
+                    setCam.call(cw, orbitViewMatrix(spin.v0, spinYawDegAt(spin.spec, spinIndex), spin.pivot));
+                }
+                spinIndex++;
                 const r = step.call(cw);
                 return r && Number.isFinite(r.syncMs) ? r.syncMs : 0;
             },
@@ -617,7 +718,67 @@ async function driveFluxFrames(
     if (stats.rendered !== frames) {
         throw new Error(`测帧未完成（rendered=${stats.rendered}/${frames}）`);
     }
-    return { stats, end: tail };
+    // 轨迹对账：末帧注入的目标视图（按 END 的 1e-3 精度舍入）vs 渲染器回报的 `end.view`。
+    // 若两者不一致，说明注入没被渲染器采用（或被它自己的相机逻辑覆盖），该轮不能参与跨臂比较。
+    let spinErr: number | undefined;
+    if (spin) {
+        const expected = orbitViewMatrix(spin.v0, spinYawDegAt(spin.spec, spinIndex - 1), spin.pivot).map(
+            (v) => Math.round(v * 1000) / 1000,
+        );
+        spinErr = Array.isArray(tail.view) && tail.view.length === 16 ? maxMatrixDiff(expected, tail.view) : undefined;
+    }
+    return { stats, end: tail, spinErr };
+}
+
+/**
+ * **内容量扫描（基线臂）**：沿**与本文臂同一条轨迹**取 k 个姿态，逐个姿态渲染一帧并回报内容量读数。
+ *
+ * 与本文臂的 `BenchContext.contentSweep()` 逐项对应（字段同名同格式）：
+ *   - `coveredPct`：iframe 内真实 readPixels 的覆盖率（`__FLUXGS_BENCH_SWEEP__` 里量）；
+ *   - `seenPct`：裁剪盒内高斯点比例（用**它自己渲染器的** `proj` × 实际 `view` 复现 viewProj，
+ *     再调**两臂共享的** `clipInsideRatio`；点集来自 `__FLUXGS_DUMP_XYZ__` 的解码世界坐标）；
+ *   - `drawn`：该姿态提交绘制的实例数（渲染器的 `vertexCount`，不随视角变）。
+ * 全部在测帧窗口**之后**执行，不进任何计时区间；异常一律吞掉（扫描失败不影响本轮 fps 结论）。
+ */
+async function runFluxContentSweep(cw: FluxWindow, spin: SpinInjection): Promise<SweepResult | null> {
+    const sweepFn = cw.__FLUXGS_BENCH_SWEEP__;
+    const k = sweepSampleCount(true);
+    if (k <= 0 || typeof sweepFn !== "function") return null;
+    const xyz = cw.__FLUXGS_DUMP_XYZ__?.() ?? null;
+    const pointCount = xyz ? Math.floor(xyz.length / 3) : 0;
+    const samples: SweepSample[] = [];
+    for (const frame of spinSampleFrames(spin.spec, k)) {
+        const target = orbitViewMatrix(spin.v0, spinYawDegAt(spin.spec, frame), spin.pivot);
+        let r: FluxBenchSweep | null = null;
+        try {
+            r = sweepFn.call(cw, target);
+        } catch {
+            r = null;
+        }
+        if (!r) break;
+        const actual = Array.isArray(r.view) && r.view.length === 16 ? r.view : target;
+        const vp = Array.isArray(r.proj) && r.proj.length === 16 ? mulMat4(r.proj, actual) : null;
+        const seen = clipInsideRatio(xyz, pointCount, vp, 4000);
+        samples.push({
+            frame,
+            yaw: Math.round(spinYawDegAt(spin.spec, frame) * 100) / 100,
+            pos: viewCameraPosition(actual.slice()),
+            coveredPct: r.coveredPct,
+            seenPct: seen.insidePct,
+            seenCount: seen.inside,
+            drawn: r.drawn,
+        });
+    }
+    // 扫描结束把机位还原到基准位姿（iframe 随后会被销毁；还原只是让最后状态可复现）
+    const setCam = cw.__FLUXGS_SET_CAM__;
+    if (typeof setCam === "function") {
+        try {
+            setCam.call(cw, spin.v0);
+        } catch {
+            /* 忽略 */
+        }
+    }
+    return samples.length > 0 ? { samples } : null;
 }
 
 // ------------------------------------------------------------------ measurement
@@ -718,14 +879,46 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
                 ? stats.texUploadDoneAt - stats.decodeDoneAt
                 : undefined;
 
+        // ---- 动态相机（`?spin=`，效度自查）：逐帧把"该帧应有的视图矩阵"注入基线渲染器 ----
+        // 为什么必须做：基线渲染器的排序 worker 带 `|dot-1| < 0.01`（≈ 视角变化 < 8.1°）就跳过排序的
+        // 早退（render_shared/main.js:558-564），静止协议下它**整轮只排一次序**——这个便宜只有在
+        // 相机真动起来之后才消失。基准位姿取**注入之后**的真实视图（`PROBE.view`），因此本页注入的
+        // spin 轨迹与本文臂 `cam=flux` 看到的起始机位是同一条。
+        const spinDeg = camSpinDegPerFrame();
+        let spin: SpinInjection | null = null;
+        if (spinDeg !== 0) {
+            const probe = cw.__FLUXGS_BENCH_PROBE__?.();
+            const v0raw = probe && Array.isArray(probe.view) && probe.view.length === 16 ? probe.view : null;
+            if (!v0raw) {
+                base.spinNote = "未取到初始视图（PROBE.view 缺失）：本轮退回静止协议";
+            } else {
+                const pivotParam = spinPivotParam();
+                // 轨迹由**共享的** resolveSpinSpec 解析（与本文臂同一个函数：模式/摆幅/周期不会分叉）
+                const spec = resolveSpinSpec(st.benchFrames + st.warmupFrames);
+                if (!spec) {
+                    base.spinNote = "轨迹为空（?spin=0）：本轮按静止协议处理";
+                } else {
+                    spin = {
+                        spec,
+                        deg: spec.deg,
+                        pivot: pivotParam ?? viewCameraPosition(v0raw.slice()),
+                        pivotSrc: pivotParam ? "param" : "cam",
+                        v0: v0raw.slice(),
+                    };
+                    base.spinMode = spec.mode;
+                    base.spinPeriod = spec.mode === "swing" ? spec.period : undefined;
+                    base.spinPeakDeg = spinPeakDegPerFrame(spec);
+                }
+            }
+        }
+
         // 测帧：共享驱动（两臂同一个函数）逐帧调 iframe 的 __FLUXGS_BENCH_FRAME__（渲染 + gl.finish()）。
         // BEGIN 在首个真实帧**之后**调用：native 档下机位就此冻结；forced 档在 load 时已冻结。
-        const { stats: bench, end } = await driveFluxFrames(
-            cw,
-            st.benchFrames,
-            st.warmupFrames,
-            240000 + st.warmupFrames * 2000,
-        );
+        const {
+            stats: bench,
+            end,
+            spinErr,
+        } = await driveFluxFrames(cw, st.benchFrames, st.warmupFrames, 240000 + st.warmupFrames * 2000, spin);
         base.fps = bench.fps;
         base.frames = bench.rendered;
         base.elapsedMs = bench.elapsedMs;
@@ -750,7 +943,59 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
         base.downsample = end.downsample;
         base.points = end.points;
         base.coveredPct = end.coveredPct;
-        base.poseKey = Array.isArray(end.view) ? end.view.slice(0, 6).join(",") : undefined;
+        // 静态轮：`pose=` = 渲染器回报的视图（= 全程机位）。动态轮（`?spin=`）：必须写**第 0 帧**视图
+        // （`spin.v0`），否则与本文臂同名不同义（那边 `pose=` 取的是测帧前的起始机位），跨臂核对会误报。
+        base.poseKey = spin
+            ? spin.v0.slice(0, 6).join(",")
+            : Array.isArray(end.view)
+              ? end.view.slice(0, 6).join(",")
+              : undefined;
+        // ---- 动态相机（`?spin=`）实际应用量：`spinDeg=0` = 静止协议（`pose=` 即全程机位）----
+        base.spinDeg = spin ? spin.deg : 0;
+        // 排序次数（效度自查）：BEGIN 之后 worker 真正排完的次数，与本文臂 `sort_results=` 同名同义
+        base.sortResults = typeof end.sorts === "number" ? end.sorts : undefined;
+        if (spin) {
+            base.spinPivot =
+                spin.pivotSrc === "cam" ? "cam" : spin.pivot.map((v) => Math.round(v * 1000) / 1000).join(",");
+            base.spinPivotSrc = spin.pivotSrc;
+            base.spinErr = spinErr;
+            // ---- 内容量扫描（`?sweep=<k>`）：测帧之后逐姿态实测"看着多少内容" ----
+            // 与本文臂同名字段同格式：只有两臂在整条轨迹上看着同量级的内容，帧率差异才归因于实现。
+            const sweep = await runFluxContentSweep(cw, spin);
+            if (sweep) {
+                const sum = summarizeSweep(sweep);
+                base.sweepK = sum.k;
+                base.sweepCoveredMean = sum.covMean;
+                base.sweepCoveredMin = sum.covMin;
+                base.sweepCoveredMax = sum.covMax;
+                base.sweepSeenMean = sum.seenMean;
+                base.sweepSeenMin = sum.seenMin;
+                base.sweepSeenMax = sum.seenMax;
+                base.sweepDrawnMin = sum.drawnMin;
+                base.sweepDrawnMax = sum.drawnMax;
+                base.sweepFrames = sum.frames;
+                base.sweepYaws = sum.yaws;
+                base.sweepPoses = sum.poses;
+                base.sweepCoveredList = sum.covList;
+                base.sweepSeenList = sum.seenList;
+                base.sweepDrawnList = sum.drawnList;
+            }
+        }
+        // ---- 点集包围盒（世界坐标）+ 对角线长度（与本文臂同名字段同格式）----
+        // 目的与本文臂一致：把"两臂基准机位相差 0.039 世界单位"换算成**相对场景尺度的比例**。
+        // 数据来源 = `__FLUXGS_DUMP_XYZ__`（解码后的世界坐标，与 sweep_seen 用的是同一份点集），
+        // 纯 CPU 统计、发生在测帧窗口之后，不参与任何性能指标。
+        try {
+            const xyz = cw.__FLUXGS_DUMP_XYZ__?.() ?? null;
+            const bnd = xyz ? positionsBounds(xyz, Math.floor(xyz.length / 3)) : null;
+            if (bnd) {
+                base.sceneMin = formatTriple(bnd.min);
+                base.sceneMax = formatTriple(bnd.max);
+                base.sceneDiag = bnd.diag;
+            }
+        } catch {
+            /* 点集还没解码出来时忽略（包围盒只是自查字段） */
+        }
         base.ok = true;
         refreshDeviceLabel(cw); // 首帧已过，GPU 名一定已上报（读的是它在用的上下文，零新建）
         return base;
@@ -806,6 +1051,17 @@ function buildResultText(st: BenchState): string {
             frameMs: median(roundStats.map((r) => r.frameMs).filter((v): v is number => typeof v === "number")),
             frameMeanMs: median(roundStats.map((r) => r.frameMeanMs).filter((v): v is number => typeof v === "number")),
             fpsCapped: roundStats.some((r) => r.fpsCapped),
+            // 动态相机（`?spin=`，效度自查）：取各轮上报的实际应用量（缺省 0 = 静止协议）
+            spinDeg: roundStats.find((r) => r.spinDeg)?.spinDeg,
+            // 轨迹模式与峰值角速度（2026-09-17 追加，与本文臂结果头同名字段）
+            spinMode: roundStats.find((r) => r.spinMode)?.spinMode,
+            spinPeriod: roundStats.find((r) => typeof r.spinPeriod === "number")?.spinPeriod,
+            spinPeakDeg: roundStats.find((r) => typeof r.spinPeakDeg === "number")?.spinPeakDeg,
+            spinPivot: roundStats.find((r) => r.spinPivot)?.spinPivot,
+            spinErr: roundStats.find((r) => typeof r.spinErr === "number")?.spinErr,
+            spinNote: roundStats.find((r) => r.spinNote)?.spinNote,
+            // 排序次数（效度自查）：静止下应 ≈1、动态下按帧数增长（两臂同名字段）
+            sortResults: roundStats.find((r) => typeof r.sortResults === "number")?.sortResults,
             // 本臂没有 FadeInPass 那类"前 N 帧只画一部分"的档位：写 n/a（把本文臂的 `fade=none` 区分开）
             fade: "n/a",
         }),
@@ -864,6 +1120,18 @@ function buildResultText(st: BenchState): string {
             `covered=${fmt(r.coveredPct, 1)}%`,
             `poseInjected=${r.poseInjected === undefined ? "" : r.poseInjected ? 1 : 0}`,
             `pose=${r.poseKey ?? ""}`,
+            // 动态相机（`?spin=`，效度自查）：与本文臂同名同格式；`spin=0` = 静止协议，
+            // `pose=` 即全程机位；`spin>0` 时 `pose=` 只代表第 0 帧起始机位。
+            // 标签由**两臂共用**的 spinRoundTags()/sweepRoundTags() 生成（格式不可能分叉）。
+            ...spinRoundTags(r),
+            `sort_results=${r.sortResults ?? "-"}`,
+            ...sweepRoundTags(r),
+            // 包围盒（世界坐标）+ 对角线：与本文臂同名同格式，用于把"机位偏差"换算成相对场景尺度的比例
+            ...sceneBoundsRoundTags(r),
+            // 排序滞后核对（`sortlag_*`）：**基线臂没有这个探针**（`?sortlag=1` 只在本文臂实现，
+            // 见 bench-measure.sortLagProbe），所以这里不打印该组字段 —— 字段的定义与格式仍由
+            // 两臂共用的 sortLagRoundTags() 给出，将来基线侧若要补探针，直接调它即可。
+            ...(r.spinNote ? [`spin_note=${r.spinNote.replace(/\s+/g, "_")}`] : []),
         ];
         if (!r.ok) tags.push(`err=${r.err ?? ""}`);
         lines.push(tags.join(" "));

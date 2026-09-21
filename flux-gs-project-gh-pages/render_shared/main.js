@@ -310,6 +310,9 @@ function createWorker(self) {
     let depthIndex = new Uint32Array();
     let lastVertexCount = 0;
     let sortRunning;
+    // [BENCH INSTRUMENTATION] 已**真正完成**的排序次数（被 `|dot-1|<0.01` 早退跳过的不算）：
+    // 驱动页据此核对"两臂在测帧窗口里是否做了等量工作"——静止协议下它整轮停在 1。
+    let sortCount = 0;
 
     let tmc3Module = null;
     let pendingMobileGS = null;
@@ -601,7 +604,8 @@ function contractToUnisphereInPlace(x, y, z, out) {
         console.timeEnd("sort");
 
         lastProj = viewProj;
-        self.postMessage({ depthIndex, viewProj, vertexCount }, [
+        sortCount++; // [BENCH INSTRUMENTATION] 这一趟是真的排完了（没走 `|dot-1|<0.01` 早退）
+        self.postMessage({ depthIndex, viewProj, vertexCount, sortCount }, [
             depthIndex.buffer,
         ]);
     }
@@ -1539,7 +1543,7 @@ async function main() {
         __fluxBenchManual = true;      // 帧驱动交给驱动页
         if (rafId) cancelAnimationFrame(rafId);
         rafId = null;
-        __fluxBenchState = { frames: 0, sync: [], coveredPct: 0, target: o.frames | 0 };
+        __fluxBenchState = { frames: 0, sync: [], coveredPct: 0, target: o.frames | 0, sort0: sortCount };
         return true;
     };
     window.__FLUXGS_BENCH_PROBE__ = () => {
@@ -1559,6 +1563,11 @@ async function main() {
         const st = window.__FLUXGS_STATS__;
         snap.fetchEndAt = st ? st.fetchEndAt : 0;
         snap.firstFrameAt = st ? st.firstFrameAt : 0;
+        // [BENCH INSTRUMENTATION] 当前视图矩阵（世界→视图，列主序 16 项）：驱动页的 `?spin=`（动态相机）
+        // 用它取"第 0 帧机位"，再逐帧注入该帧应有的视图；不传 `spin=` 时该字段无人读取、行为不变。
+        try { snap.view = Array.from(viewMatrix); } catch (e) { snap.view = null; }
+        // [BENCH INSTRUMENTATION] 已完成的排序次数（驱动页核对"两臂是否做了等量工作"）
+        snap.sorts = sortCount;
         return snap;
     };
     window.__FLUXGS_BENCH_FRAME__ = () => {
@@ -1606,6 +1615,9 @@ async function main() {
             downsample: downsample,
             points: vertexCount,
             view: viewMatrix.map((v) => Math.round(v * 1000) / 1000),
+            // [BENCH INSTRUMENTATION] 本次会话（BEGIN 之后）**真正完成**的排序次数：
+            // 静止机位下基线 worker 的 `|dot-1|<0.01` 早退会让它停在 1；相机一动就按帧数增长。
+            sorts: Math.max(0, sortCount - ((s && s.sort0) || 0)),
         };
         __fluxBenchState = null;
         return out;
@@ -1877,6 +1889,8 @@ async function main() {
             gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
             gl.bufferData(gl.ARRAY_BUFFER, depthIndex, gl.DYNAMIC_DRAW);
             vertexCount = e.data.vertexCount;
+            // [BENCH INSTRUMENTATION] 记下 worker 侧的排序计数（每次回传都是"真的排完了"）
+            if (typeof e.data.sortCount === "number") sortCount = e.data.sortCount;
             hideProgress();
         }
     };
@@ -2135,6 +2149,8 @@ async function main() {
 
     let jumpDelta = 0;
     let vertexCount = 0;
+    // [BENCH INSTRUMENTATION] worker 侧"已完成排序次数"的最近一次回传值（PROBE/END 读它）
+    let sortCount = 0;
 
     let lastFrame = 0;
     let avgFps = 0;
@@ -2387,6 +2403,52 @@ async function main() {
         return true;
     };
     window.__FLUXGS_DUMP_XYZ__ = () => window.__FLUXGS_XYZ__ || null;
+    // [BENCH INSTRUMENTATION] **内容量扫描钩子**（2026-09-17 追加；只做“渲染一帧 + 读像素 + 回报数值”，
+    //   不含任何计时/驱动状态机，且由驱动页在**测帧窗口之后**调用 → 不进任何性能指标）：
+    //   把机位设成 view16（固定注入，不是 carousel 动画），渲染恰好一帧 + gl.finish()，
+    //   再 readPixels 稀疏采样（stride=8，与 `coveredPct` 同一个量法）得到覆盖率；
+    //   同时回报该帧提交的实例数（vertexCount）与**渲染器自己的**投影矩阵 projectionMatrix。
+    //   用途：驱动页沿“与本文臂同一条轨迹”逐姿态核对两臂看着多少内容（bench-shared.clipInsideRatio），
+    //   把“fps 不掉”这件事与“要画的东西变少”分开——否则后者是前者的合理替代解释。
+    window.__FLUXGS_BENCH_SWEEP__ = (view16) => {
+        if (!Array.isArray(view16) || view16.length !== 16) return null;
+        try {
+            viewMatrix = Array.from(view16);
+            carousel = false;
+            frame(performance.now()); // 渲染一帧（manual 模式下帧末不会自行续排 rAF）
+            try {
+                gl.finish();
+            } catch (e) {
+                /* 上下文丢失时忽略 */
+            }
+            let coveredPct = 0;
+            try {
+                const pw = gl.canvas.width;
+                const ph = gl.canvas.height;
+                const px = new Uint8Array(pw * ph * 4);
+                gl.readPixels(0, 0, pw, ph, gl.RGBA, gl.UNSIGNED_BYTE, px);
+                let hit = 0;
+                let total = 0;
+                for (let y = 0; y < ph; y += 8) {
+                    for (let x = 0; x < pw; x += 8) {
+                        if (px[(y * pw + x) * 4 + 3] > 0) hit++;
+                        total++;
+                    }
+                }
+                coveredPct = total > 0 ? (hit / total) * 100 : 0;
+            } catch (e) {
+                /* readPixels 不可用时忽略 */
+            }
+            return {
+                coveredPct: coveredPct,
+                drawn: vertexCount,
+                proj: projectionMatrix ? Array.from(projectionMatrix) : null,
+                view: Array.from(viewMatrix),
+            };
+        } catch (e) {
+            return null;
+        }
+    };
     // [BENCH INSTRUMENTATION] 上游的 window.runFluxBenchmark(count) 已删除：本文的测帧驱动
     //   统一走 bench-shared.ts 的 driveThroughputFrames()（两臂同一个函数），本文件只提供
     //   上面的 BEGIN/FRAME/END/PROBE 四个入口。原官方入口留下的这段说明便于回溯：
