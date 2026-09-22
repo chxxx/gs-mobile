@@ -330,7 +330,8 @@ def profile_for(group, platform, scene_key=""):
     return ",".join(scene_ids())
 
 
-def build_url(base, group, scene_key="", platform="", u=None, report="", rtok="", subset="", rounds=None):
+def build_url(base, group, scene_key="", platform="", u=None, report="", rtok="", subset="",
+              rounds=None, hopms=None):
     """按协议 §2/§12 生成一条 bench URL（每个协议参数都显式写出，不依赖页面默认值）。
 
     - `group=res` 保留 `frames=100` 并覆盖 `res`（协议 §5.4）；
@@ -342,6 +343,10 @@ def build_url(base, group, scene_key="", platform="", u=None, report="", rtok=""
     """
     params = dict(PROTO_PARAMS)
     params["rounds"] = str(rounds_for(group, rounds))
+    if hopms:
+        # 轮间"零上下文中转页"停留时长（毫秒；页面默认 1500，上限 5000）。
+        # 手机端出现 WebGL 上下文紧张时，加大它能让浏览器更充分回收上一个上下文（协议 §12.8）。
+        params["hopms"] = str(hopms)
     params["profile"] = subset or profile_for(group, platform, scene_key)
     if group == GRP_RES and scene_key.startswith("garden-"):
         params["frames"] = "100"                     # 表 7-8 保留 frames=100（协议 §5.4）

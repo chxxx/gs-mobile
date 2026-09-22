@@ -287,12 +287,35 @@ def cmd_plan(args):
 
 
 def cmd_ingest(args):
-    with open(args.text, "r", encoding="utf-8", errors="replace") as fh:
-        text = fh.read()
-    if args.group == C.GRP_LOAD and not args.arm:
+    group = None if args.group == "auto" else args.group
+    if group == C.GRP_LOAD and not args.arm:
         print("✗ 表 7-5 是两臂实验：--group load 必须同时给 --arm r7 或 --arm std45")
         return 2
-    written, counts = ingest_text(text, args.platform, args.group, arm=args.arm,
+    if args.pattern:                       # 批量：把 raw 根目录下匹配的回传原文全部 ingest（旧→新）
+        hits = sorted(glob.glob(os.path.join(args.root, args.pattern)), key=os.path.getmtime)
+        if not hits:
+            print("✗ 没有匹配的文件：%s" % os.path.join(args.root, args.pattern))
+            return 1
+        print("按修改时间 ingest %d 份（旧→新；同名轮次以最新为准，旧文件自动改名 .superseded）：" % len(hits))
+        total = 0
+        for path in hits:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+            written, counts = ingest_text(text, args.platform, group, arm=args.arm,
+                                          tag=args.tag or os.path.basename(path), root=args.root)
+            total += written
+            print("  %-46s %3d 条  %s" % (os.path.basename(path), written,
+                                          ", ".join("%s×%d" % (k, v) for k, v in sorted(counts.items()))))
+        print("-" * 78)
+        print("合计 %d 条 → %s/%s/" % (total, args.root, args.platform))
+        print("下一步：python gsplat.js\\tools\\ch7_batch.py status")
+        return 0 if total else 1
+    if not args.text:
+        print("✗ 要么给 --text <单份文件>，要么给 --pattern <通配符>（例如 helper-d9400-xweb_*.txt）")
+        return 2
+    with open(args.text, "r", encoding="utf-8", errors="replace") as fh:
+        text = fh.read()
+    written, counts = ingest_text(text, args.platform, group, arm=args.arm,
                                   tag=args.tag or os.path.splitext(os.path.basename(args.text))[0],
                                   root=args.root)
     if written == 0:
@@ -341,7 +364,7 @@ def cmd_link(args):
               "正式采集请去掉 --rounds（或写 --rounds %d）" % (rounds, proto_rounds, proto_rounds))
     print("-" * 100)
     print(C.build_url(args.base, group, keys[0], platform=args.platform, report=report,
-                      rtok=args.token, subset=subset, rounds=rounds,
+                      rtok=args.token, subset=subset, rounds=rounds, hopms=args.hopms or None,
                       u="%s-%s-%s" % (args.name, args.platform, group)))
     if group == C.GRP_FLUX and not subset:
         print("ℹ Flux-GS 很慢：建议改成分 3 片发（--subset bicycle,flowers,garden,stump,treehill,room,counter,kitchen,bonsai"
@@ -363,6 +386,8 @@ def cmd_link(args):
     print("  2) 页面会自动逐场景开跑，请插电、屏幕常亮、别锁屏、别切后台（%s）；" % dur)
     print("  3) 跑完会自动回传，看到「已回传」即可关页面；若提示提交失败，")
     print("     点页面上的「复制结果」把文本原样发回给我（我这边 ingest 落盘）。")
+    print("  4) 若页面提示「WebGL 上下文耗尽（整页重启后仍无法创建）」：**完全关闭浏览器**（清后台/清多任务）")
+    print("     → 重开**同一条链接** → 会自动从断点续跑（已完成的轮次不会重测）。跑不动就分几次、中间歇一会儿。")
     print("  ⚠ 隧道地址每次重启都会变：若打不开就是我在重启，等我发新链接。")
     return 0
 
@@ -439,7 +464,7 @@ def cmd_count(args):
 
 
 def cmd_status(args):
-    """现状一眼看全（协议 §12.7）：隧道状态 / 最新回传原文 / 已落盘轮次 / 下一步照抄的命令。"""
+    """现状一眼看全（协议 §12.6）：隧道状态 / 最新回传原文 / 已落盘轮次 / 下一步照抄的命令。"""
     root = args.root
     print("原始数据根目录：%s" % root)
     tun = os.path.join(root, "_tunnel", "tunnel.json")
@@ -528,7 +553,8 @@ def build_parser():
 
     p3 = sub.add_parser("ingest", help="人工通道：把页面「复制结果」文本拆成逐轮 JSON")
     p3.add_argument("--platform", required=True, choices=plat_choices)
-    p3.add_argument("--text", required=True)
+    p3.add_argument("--text", default="", help="单份结果文本（与 --pattern 二选一）")
+    p3.add_argument("--pattern", default="", help="批量：raw 根目录下的通配符，例如 helper-d9400-xweb_*.txt")
     p3.add_argument("--group", default="auto", choices=["auto"] + list(C.GROUPS),
                     help="auto = 按结果头 engine= 自动判组（fluxgs→flux，否则 main）")
     p3.add_argument("--arm", default=None, choices=[None, "r7", "std45"])
@@ -557,6 +583,8 @@ def build_parser():
     p5.add_argument("--per-scene", action="store_true", help="额外逐场景列出链接（一般不用）")
     p5.add_argument("--rounds", type=int, default=C.FAST_ROUNDS,
                     help="每场景轮次（默认 %d = 快速验证；正式采集用 3，load 组 5）" % C.FAST_ROUNDS)
+    p5.add_argument("--hopms", type=int, default=0,
+                    help="轮间零上下文中转页停留毫秒（0=用页面默认 1500；手机上下文紧张时加到 3000–5000，§12.8）")
     p5.add_argument("--arm", default=None, choices=[None, "r7", "std45"], help="仅表 7-5 需要")
     p5.set_defaults(func=cmd_link)
 
