@@ -86,7 +86,9 @@ import {
     copyRoundResultFields,
     sanitizeRoundResult,
     sceneBoundsRoundTags,
+    segTimingRoundTags,
     sortLagRoundTags,
+    throughputPercentileRoundTags,
 } from "./bench-shared";
 import type { BenchState, CasePhase, CaseToParentMessage, RoundResult, SceneMeta } from "./bench-shared";
 // 仅类型导入：view 模式的实现（含渲染器代码）由 main() 动态 import，bench 模式下不会被加载
@@ -453,6 +455,10 @@ function buildResultText(st: BenchState): string {
             // 但贴地板的轮次两边读数都贴在量化下限上，**不得用它算两臂倍数**（倍数取帧间隔之比）。
             `frame_ms=${fmt(r.frameMs, 2)}`,
             `frame_mean_ms=${fmt(r.frameMeanMs, 2)}`,
+            // [DIAG-EXPERIMENT-1] 分段计时（两臂共用 segTimingRoundTags()；本臂 3 段，`seg_ge1/ge2` 为 `-`）
+            //   + 共享驱动两个核心量的分位数（与 Flux 臂逐字同格式）。
+            ...segTimingRoundTags(r),
+            ...throughputPercentileRoundTags(r),
             // 判定 fps_capped 时**实际引用**的本轮实测地板：表头 timer_floor_ms= 是各轮中位数，
             // 与本字段不是同一个数；有了它，`fps_capped` 就能在结果文本里直接用
             // `1000/fps ≤ floor_used_ms × 1.05` 手算复核，不必再猜。

@@ -44,8 +44,14 @@ import {
     maxMatrixDiff,
     mulMat4,
     orbitViewMatrix,
+    percentile,
     resolutionMode,
     resolveSpinSpec,
+    // [DIAG-EXPERIMENT-1] 分段计时的汇总与结果字段：**两臂共用**同一份实现（本文臂 3 段 / 本臂 5 段）
+    applySegTimingFields,
+    segTimingRoundTags,
+    summarizeSegTiming,
+    throughputPercentileRoundTags,
     // 包围盒（世界坐标）+ 逐轮标签：与本文臂同一实现/同一字段名，"0.039 单位占场景尺度多少"两臂可直接对照
     formatTriple,
     positionsBounds,
@@ -62,7 +68,14 @@ import {
     throughputFields,
     viewCameraPosition,
 } from "./bench-shared";
-import type { DriveThroughputStats, ResMode, SpinSpec, SweepResult, SweepSample } from "./bench-shared";
+import type {
+    DriveThroughputStats,
+    ResMode,
+    SegTimingFields,
+    SpinSpec,
+    SweepResult,
+    SweepSample,
+} from "./bench-shared";
 
 // ------------------------------------------------------------------ DOM
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -119,6 +132,23 @@ interface FluxBenchFrame {
     t: number;
     syncMs: number;
 }
+/**
+ * [DIAG-EXPERIMENT-1] `__FLUXGS_BENCH_END__().drawTimings` 的单项：iframe 内 `frame()` 被拆成的
+ * 5 个**互不重叠**分段（单位 ms，同一 `performance.now()` 时间轴）：
+ *   - `prep` = `frame()` 入口 → draw 前那个 `gl.getError()` 之前（含 uniformMatrix4fv / clear / 两次 bindTexture）
+ *   - `err1` = draw 前的 `gl.getError()`
+ *   - `draw` = `gl.drawArraysInstanced`
+ *   - `err2` = draw 后的 `gl.getError()`
+ *   - `post` = 第二次 `gl.getError()` 之后 → `frame()` 返回前（fps 文本、lastFrame 等）
+ * `prep+err1+draw+err2+post + sync_ms ≈ frame_ms`（差在父页面那一层跨 realm 调用）。
+ */
+interface FluxDrawTiming {
+    prep: number;
+    err1: number;
+    draw: number;
+    err2: number;
+    post: number;
+}
 /** `__FLUXGS_BENCH_SWEEP__(view16)` 的返回：在**指定姿态**渲染一帧后的内容量读数（不进任何计时区间）。
  *  `proj` = 渲染器自己的投影矩阵（列主序 16 项）：驱动页用 `mulMat4(proj, view)` 复现它的 viewProj，
  *  再调**两臂共享的** `clipInsideRatio` 算"裁剪盒内点数"，与本文臂的同一个量法。 */
@@ -135,6 +165,8 @@ interface FluxBenchSweep {
 interface FluxBenchEnd {
     frames: number;
     syncSamples: number[];
+    /** [DIAG-EXPERIMENT-1] 逐帧分段样本（与 `syncSamples` 同序同长度；旧版钩子无此字段） */
+    drawTimings?: FluxDrawTiming[];
     coveredPct: number;
     canvasW: number;
     canvasH: number;
@@ -160,7 +192,7 @@ interface FluxBenchProbe {
     /** 当前视图矩阵（世界→视图，列主序 16 项）——`?spin=` 用它取基准位姿；旧版钩子无此字段 */
     view?: number[] | null;
 }
-interface RoundResult {
+interface RoundResult extends SegTimingFields {
     scene: string;
     dataset: string;
     round: number;
@@ -181,6 +213,16 @@ interface RoundResult {
     /** 帧内阻塞耗时中位数/均值（诊断/自检用；不可用于算倍数，语义边界见 bench-shared.DriveThroughputStats.frameMs） */
     frameMs?: number;
     frameMeanMs?: number;
+    /**
+     * [DIAG-EXPERIMENT-1] iframe 内 `frame()` 的分段 p50/p90 —— 扁平字段由 `SegTimingFields` 提供
+     * （`segN`/`segPrepP50`…`segSumOfP50s`），逐轮行经 `segTimingRoundTags()` 输出 `seg_*_p50_ms=`。
+     */
+    /** [DIAG-EXPERIMENT-1] `gl.finish()` 逐帧耗时的 p50/p90（与 `syncMs` 同一批样本） */
+    syncP50?: number;
+    syncP90?: number;
+    /** [DIAG-EXPERIMENT-1] 帧内阻塞耗时（`frame_ms`）的 p50/p90（与 `frameMs` 同一批样本） */
+    frameP50?: number;
+    frameP90?: number;
     /** 实测计时地板（空驱动校准，驱动所在文档测得） */
     timerFloorMs?: number;
     timerFloorRounds?: number;
@@ -809,6 +851,13 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
     if (/^\d+$/.test(fluxCam)) {
         pageUrl.searchParams.set("fluxcam", fluxCam);
     }
+    // [DIAG-EXPERIMENT-2] `?noge=1` 必须**显式转发**进 iframe：渲染器读的是**它自己文档**的
+    //   `location.search`，父页面的参数不会自动传进去。首次尝试漏了这一步，于是"B 版"与 A 版逐字相同
+    //   （实测 B 的 `seg_ge1/seg_ge2` 仍为 0.50/0.70ms）——这种"开关没生效"会伪装成"消融无效果"，
+    //   是本轮桌面预筛拦下来的第 1 个坑，特此留痕。
+    if (param("noge", "") === "1") {
+        pageUrl.searchParams.set("noge", "1");
+    }
 
     frameHost.dataset.w = String(st.resW);
     frameHost.dataset.h = String(st.resH);
@@ -930,6 +979,14 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
         // 属测量框架常量而非渲染器差异：核对两臂时不必修正，但结论里不把它算作方法优势即可。
         base.frameMs = bench.frameMs;
         base.frameMeanMs = bench.frameMeanMs;
+        // [DIAG-EXPERIMENT-1] frame_ms / sync_ms 的分位数 + iframe 内 frame() 的 5 段分解：
+        //   `seg_sum_p50_ms + sync_p50_ms` 应与 `frame_p50_ms` 同量级；差距大就说明还有未被计时的区间。
+        base.frameP50 = bench.frameMsP50;
+        base.frameP90 = bench.frameMsP90;
+        base.syncP50 = bench.syncMsP50;
+        base.syncP90 = bench.syncMsP90;
+        // [DIAG-EXPERIMENT-1] 分段计时（iframe 内 frame() 的 5 段）摊平进结果字段
+        applySegTimingFields(base, summarizeSegTiming(end.drawTimings));
         base.timerFloorMs = bench.timerFloorMs;
         base.timerFloorRounds = bench.timerFloorRounds;
         base.timerFloorSrc = bench.timerFloorSrc;
@@ -1013,6 +1070,15 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
         await nextFrame();
         await nextFrame();
     }
+}
+
+/**
+ * [DIAG-EXPERIMENT-1] 分段计时的结果行字段由 **两臂共用** 的 `segTimingRoundTags()`（bench-shared）
+ * 统一输出：本文臂 3 段（prep/draw/post，`seg_ge1/ge2` 写 `-`）、Flux 臂 5 段，字段名与格式不可能分叉。
+ * 这里只补上共享驱动两个核心量的分位数（`sync_p50/p90_ms`、`frame_p50/p90_ms`）。
+ */
+function fluxThroughputPercentileTags(r: RoundResult): string[] {
+    return throughputPercentileRoundTags(r);
 }
 
 function buildResultText(st: BenchState): string {
@@ -1110,6 +1176,10 @@ function buildResultText(st: BenchState): string {
             // 而帧内实际阻塞是 X ms"（`cpu_ms ≈ 地板 + frame_ms`）；不得用它算两臂倍数。
             `frame_ms=${fmt(r.frameMs, 2)}`,
             `frame_mean_ms=${fmt(r.frameMeanMs, 2)}`,
+            // [DIAG-EXPERIMENT-1] 分段计时诊断字段（由**两臂共用**的 segTimingRoundTags() 输出；
+            //   读法：`seg_sum_p50_ms + sync_p50_ms` ≈ `frame_p50_ms`；差得远说明还有没计时的区间）。
+            ...segTimingRoundTags(r),
+            ...fluxThroughputPercentileTags(r),
             `driver=${r.driver ?? "timer"}`,
             // 判定 fps_capped 时**实际引用**的本轮实测地板（表头 timer_floor_ms= 是各轮中位数，
             // 与本字段不是同一个数）：两臂逐轮行同名字段，报表脚本据此重算判据自查。

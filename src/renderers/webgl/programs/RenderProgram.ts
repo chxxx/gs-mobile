@@ -11,6 +11,44 @@ import { WebGLRenderer } from "../../WebGLRenderer";
 import { Scene } from "../../../core/Scene";
 import { perf } from "../../../utils/PerfDebug";
 
+/**
+ * [DIAG-EXPERIMENT-1] 本文臂的**逐帧分段计时**（与 Flux 臂 `render_shared/main.js` 的 `drawTimings` 对称）。
+ *
+ * 为什么本臂只有 3 段：本臂**没有** `gl.getError()`（全仓库 0 处），所以没有 Flux 臂那两个 getError 段；
+ * 段边界与 Flux 臂的 prep/draw/post **同义**，两臂可并排对照：
+ *   - `prep` = `_render()` 入口 → draw 调用之前（needsRebuild、纹理上传检查、`camera.update()`、
+ *     `worker.postMessage`、viewport/clear/blend、uniform、属性指针）；
+ *   - `draw` = `gl.drawArraysInstanced` 提交；
+ *   - `post` = draw 之后 → `_render()` 返回（本臂帧尾没有额外逻辑，所以通常 ≈ 0）。
+ *
+ * 默认**关闭**（`diagFrameTimingEnabled = false`）：展示/演示路径零开销、行为逐字不变；
+ * 只有 bench 测帧内核（`bench-measure.runThroughputFrames`）在测帧前后成对开关，且只取计帧窗口的样本。
+ */
+export interface DiagFrameTiming {
+    prep: number;
+    draw: number;
+    post: number;
+}
+
+let diagFrameTimingEnabled = false;
+const diagFrameTimingSamples: DiagFrameTiming[] = [];
+
+/** 打开/关闭采集；**打开时清空**历史样本（避免把测帧前的门禁帧混进统计）。 */
+export function setDiagFrameTimingEnabled(on: boolean): void {
+    diagFrameTimingEnabled = on;
+    if (on) diagFrameTimingSamples.length = 0;
+}
+
+/** 已采集的逐帧样本（同一数组引用，调用方自行切片；读完后用 setDiagFrameTimingEnabled(false) 释放）。 */
+export function diagFrameTimings(): DiagFrameTiming[] {
+    return diagFrameTimingSamples;
+}
+
+export function clearDiagFrameTimings(): void {
+    diagFrameTimingSamples.length = 0;
+}
+
+
 const vertexShaderSource = /* glsl */ `#version 300 es
 precision highp float;
 precision highp int;
@@ -618,6 +656,9 @@ class RenderProgram extends ShaderProgram {
                 return;
             }
 
+            // [DIAG-EXPERIMENT-1] prep 段起点（默认关闭时恒为 0，不参与任何计算）
+            const tPrep = diagFrameTimingEnabled ? performance.now() : 0;
+
             if (this.renderData.needsRebuild) {
                 this.renderData.rebuild();
             }
@@ -781,10 +822,25 @@ class RenderProgram extends ShaderProgram {
             gl.vertexAttribDivisor(indexAttribute, 1);
 
             const drawSubmitStart = performance.now();
+            // [DIAG-EXPERIMENT-1] draw 段边界（默认关闭时恒为 0）
+            const tDrawStart = diagFrameTimingEnabled ? performance.now() : 0;
             gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, this.depthIndex.length);
+            const tDrawEnd = diagFrameTimingEnabled ? performance.now() : 0;
             if (perf.enabled) {
                 perf.sample("gl.drawSubmit.ms", performance.now() - drawSubmitStart);
                 perf.sample("cpu.drawSetup.ms", performance.now() - drawSetupStart);
+            }
+            // [DIAG-EXPERIMENT-1] 帧尾：落一份逐帧样本。`window.__THESIS_FRAME_TIMING__` 供流式读数/人工排查；
+            //   数组样本由 bench-measure 在测帧结束后按 `slice(-rendered)` 取计帧窗口（排除预热帧）。
+            if (diagFrameTimingEnabled) {
+                const tPost = performance.now();
+                const sample: DiagFrameTiming = {
+                    prep: tDrawStart - tPrep,
+                    draw: tDrawEnd - tDrawStart,
+                    post: tPost - tDrawEnd,
+                };
+                (window as unknown as { __THESIS_FRAME_TIMING__?: DiagFrameTiming }).__THESIS_FRAME_TIMING__ = sample;
+                diagFrameTimingSamples.push(sample);
             }
         };
 

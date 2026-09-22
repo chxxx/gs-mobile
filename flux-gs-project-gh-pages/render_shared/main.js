@@ -1517,6 +1517,15 @@ async function main() {
     let __fluxBenchState = null;
     let __fluxBenchManual = false;
     let rafId = null;
+    /**
+     * [DIAG-EXPERIMENT-2] `?noge=1`：**跳过**每帧的两次 `gl.getError()`（draw 前后各一次），其余逐字不变。
+     * 为什么做成 URL 开关而不是"另做一个注释掉 getError 的部署"：
+     *   1) A（缺省）与 B（`&noge=1`）落在**同一个部署**里 → 两次点击之间不存在重新部署/版本漂移；
+     *   2) 隧道地址不变，链接只多一个参数，测试者无需分辨两份页面；
+     *   3) 回退 = 不传该参数，不需要改代码。
+     * 判据仍按协议：A/B 的 `frame_ms`（多轮中位数）之比较；本开关只影响那两个调用。
+     */
+    const __fluxNoGetError = /[?&]noge=1/.test(location.search);
     // [BENCH INSTRUMENTATION] ?fluxcam=N：用 Flux-GS 原代码里的第 N 个真实镜头（等价于按数字键 N），
     // 并关掉轮播，使三方机位完全确定、可复现。不传则保持原行为。
     const __fluxCamIdx = (() => {
@@ -1543,7 +1552,8 @@ async function main() {
         __fluxBenchManual = true;      // 帧驱动交给驱动页
         if (rafId) cancelAnimationFrame(rafId);
         rafId = null;
-        __fluxBenchState = { frames: 0, sync: [], coveredPct: 0, target: o.frames | 0, sort0: sortCount };
+        // [DIAG-EXPERIMENT-1] drawTimings：逐帧分段样本（prep/err1/draw/err2/post，见 frame() 里的采集点）
+        __fluxBenchState = { frames: 0, sync: [], coveredPct: 0, target: o.frames | 0, sort0: sortCount, drawTimings: [] };
         return true;
     };
     window.__FLUXGS_BENCH_PROBE__ = () => {
@@ -1608,6 +1618,9 @@ async function main() {
         const out = {
             frames: s ? s.frames : 0,
             syncSamples: s ? s.sync.slice(0) : [],
+            // [DIAG-EXPERIMENT-1] 逐帧分段样本（每帧 5 段，单位 ms）：驱动页据此算 p50/p90，
+            //   用来判定"frame_ms 减去 sync_ms 的那一段"到底落在哪个区间。
+            drawTimings: s ? s.drawTimings.slice(0) : [],
             coveredPct: s ? s.coveredPct : 0,
             canvasW: gl.canvas.width,
             canvasH: gl.canvas.height,
@@ -2170,6 +2183,9 @@ async function main() {
     let leftGamepadTrigger, rightGamepadTrigger;
 
     const frame = (now) => {
+        // [DIAG-EXPERIMENT-1] 帧起点：只为把 frame() 内部的墙钟拆成互不重叠的分段（纯时间戳采集，
+        //   不改变任何渲染/提交行为）。配套的采集点在 draw 分支与帧尾，见下面同名标记。
+        const tFrameStart = performance.now();
         let inv = invert4(viewMatrix);
         let shiftKey =
             activeKeys.includes("Shift") ||
@@ -2353,6 +2369,8 @@ async function main() {
         const currentFps = 1000 / (now - lastFrame) || 0;
         avgFps = avgFps * 0.9 + currentFps * 0.1;
 
+        // [DIAG-EXPERIMENT-1] 分段计时变量（在 vertexCount>0 分支里赋值；无点时保持 0 → 不落样本）
+        let tPre = 0, tAfterErr1 = 0, tAfterDraw = 0, tAfterErr2 = 0;
         if (vertexCount > 0) {
             document.getElementById("spinner").style.display = "none";
             gl.uniformMatrix4fv(u_view, false, actualViewMatrix);
@@ -2363,10 +2381,15 @@ async function main() {
             gl.activeTexture(gl.TEXTURE1);
             gl.bindTexture(gl.TEXTURE_2D, shTexture);
 
-            const error = gl.getError();
+            // [DIAG-EXPERIMENT-1] 分段计时：只插时间戳，draw 前/后两次 gl.getError() 原样保留
+            // [DIAG-EXPERIMENT-2] `?noge=1` 时用 `gl.NO_ERROR` 常量顶替真正的 getError() 调用
+            //   （常量读取不产生任何 GL 调用），其余逻辑逐字不变。
+            tPre = performance.now();
+            const error = __fluxNoGetError ? gl.NO_ERROR : gl.getError();
             if (error !== gl.NO_ERROR) {
                 console.error("WebGL error before draw:", error);
             }
+            tAfterErr1 = performance.now();
 
             gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, vertexCount);
             // [BENCH INSTRUMENTATION] 首个真实绘制帧（纹理上传完成后）
@@ -2374,10 +2397,22 @@ async function main() {
                 window.__FLUXGS_STATS__.firstFrameAt = performance.now();
             }
 
-            const drawError = gl.getError();
+            tAfterDraw = performance.now();
+
+            const drawError = __fluxNoGetError ? gl.NO_ERROR : gl.getError();
             if (drawError !== gl.NO_ERROR) {
                 console.error("WebGL error after draw:", drawError);
             }
+            tAfterErr2 = performance.now();
+
+            // [DIAG-EXPERIMENT-1] 本帧各分段的窗口（毫秒）：与下面帧尾的 post 段 + 父页面计时的
+            //   sync_ms 相加 ≈ 父页面量到的 frame_ms。cpu_prepare_ms = frame() 入口 → 首个 getError 之前。
+            window.__FLUX_FRAME_TIMING__ = {
+                cpu_prepare_ms: tPre - tFrameStart,
+                getError1_ms: tAfterErr1 - tPre,
+                drawSubmit_ms: tAfterDraw - tAfterErr1,
+                getError2_ms: tAfterErr2 - tAfterDraw,
+            };
         } else {
             gl.clear(gl.COLOR_BUFFER_BIT);
             document.getElementById("spinner").style.display = "";
@@ -2388,6 +2423,18 @@ async function main() {
             camid.innerText = "";
         }
         lastFrame = now;
+        // [DIAG-EXPERIMENT-1] 帧尾时间戳：落一份**逐帧**分段样本（只在测帧会话内累积，避免常驻增长）。
+        //   与上面的 window.__FLUX_FRAME_TIMING__ 同源，但这个是给 __FLUXGS_BENCH_END__ 汇总 p50/p90 用的。
+        const tFrameEnd = performance.now();
+        if (__fluxBenchState && tAfterErr2 > 0) {
+            __fluxBenchState.drawTimings.push({
+                prep: tPre - tFrameStart,
+                err1: tAfterErr1 - tPre,
+                draw: tAfterDraw - tAfterErr1,
+                err2: tAfterErr2 - tAfterDraw,
+                post: tFrameEnd - tAfterErr2,
+            });
+        }
         // [BENCH INSTRUMENTATION] manual 模式（BEGIN 之后）：帧驱动交给驱动页的共享驱动函数，
         // 本文件不再自行排帧；否则保持原行为（每帧续排一次 rAF）。
         if (__fluxBenchManual) return;

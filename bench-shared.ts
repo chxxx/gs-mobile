@@ -30,6 +30,205 @@ export function median(nums: number[]): number | undefined {
     const m = Math.floor(a.length / 2);
     return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
 }
+/**
+ * [DIAG-EXPERIMENT-1] 最近秩（nearest-rank）分位数：p ∈ (0,1]，返回排序后第 ceil(p·n) 个样本。
+ * 为什么不用插值：这些读数的量化下限是 100µs（`performance.now()` 非隔离上下文的钳制），
+ * 插值会产生"看起来更精细"的假精度；最近秩的读法就是"至少有 p·n 帧不超过这个值"，
+ * 与 `median()`（同族、偶数取中位两项均值）在 p=0.5 时口径一致。
+ */
+export function percentile(nums: number[], p: number): number | undefined {
+    if (nums.length === 0) return undefined;
+    const a = [...nums].sort((x, y) => x - y);
+    const idx = Math.min(a.length - 1, Math.max(0, Math.ceil(p * a.length) - 1));
+    return a[idx];
+}
+/**
+ * [DIAG-EXPERIMENT-1] 一行**原始分段样本**（单位 ms，同一 `performance.now()` 时间轴）：
+ *   - `prep` = 帧入口 → draw 提交之前；`draw` = draw 提交；`post` = draw 之后 → 帧返回。
+ *   - `err1` / `err2` = Flux 臂独有：draw 前 / 后的两次 `gl.getError()`（本文臂**没有** `gl.getError()`，
+ *     所以这两个字段缺省）。缺省时汇总结果里对应字段写 `-`，两臂的字段名与格式仍逐字一致。
+ */
+export interface SegTimingRow {
+    prep: number;
+    draw: number;
+    post: number;
+    err1?: number;
+    err2?: number;
+}
+
+/**
+ * [DIAG-EXPERIMENT-1] 一轮测帧里各分段的 p50/p90（nearest-rank，与 `sync_ms`/`frame_ms` 同族口径）。
+ * `sum` = **逐帧**先把各段相加、再取分位数（不是"把各段 p50 相加"）；`sumOfP50s` 才是后者，
+ * 两者相差很大时说明"少数帧整体很贵"，而不是"每一段都稳定地贵"。
+ */
+export interface SegTimingStats {
+    /** 实际采到分段样本的帧数（应 = 本轮 frames；小于它说明采集开关/钩子没生效） */
+    n: number;
+    prepP50: number;
+    prepP90: number;
+    /** Flux 臂独有（该臂有两次 `gl.getError()`）；本文臂为 undefined → 结果行写 `-` */
+    err1P50?: number;
+    err1P90?: number;
+    drawP50: number;
+    drawP90: number;
+    err2P50?: number;
+    err2P90?: number;
+    postP50: number;
+    postP90: number;
+    sumP50: number;
+    sumP90: number;
+    sumOfP50s: number;
+}
+
+/**
+ * [DIAG-EXPERIMENT-1] 把逐帧分段样本汇总成 p50/p90（nearest-rank，与 `median()` 同族口径）。
+ * 返回 undefined 只有两种情况：没有样本、或旧版钩子没报这些字段——**都不能**读成"某一段是 0ms"。
+ * `err1/err2` 是否输出按样本自身判定（有 finite 值才算），因此同一个函数同时服务 3 段（本文臂）与
+ * 5 段（Flux 臂），两臂字段名不会分叉。
+ */
+export function summarizeSegTiming(samples: readonly SegTimingRow[] | undefined): SegTimingStats | undefined {
+    const rows = Array.isArray(samples) ? samples.filter((r) => r && Number.isFinite(r.prep)) : [];
+    if (rows.length === 0) return undefined;
+    const col = (f: (r: SegTimingRow) => number) => rows.map(f);
+    const q = (f: (r: SegTimingRow) => number) => ({
+        p50: percentile(col(f), 0.5) ?? 0,
+        p90: percentile(col(f), 0.9) ?? 0,
+    });
+    const prep = q((r) => r.prep);
+    const draw = q((r) => r.draw);
+    const post = q((r) => r.post);
+    const sums = col((r) => r.prep + r.draw + r.post + (r.err1 ?? 0) + (r.err2 ?? 0));
+    const hasErr1 = rows.some((r) => typeof r.err1 === "number" && Number.isFinite(r.err1));
+    const hasErr2 = rows.some((r) => typeof r.err2 === "number" && Number.isFinite(r.err2));
+    const err1 = hasErr1 ? q((r) => r.err1 ?? 0) : null;
+    const err2 = hasErr2 ? q((r) => r.err2 ?? 0) : null;
+    return {
+        n: rows.length,
+        prepP50: prep.p50,
+        prepP90: prep.p90,
+        err1P50: err1?.p50,
+        err1P90: err1?.p90,
+        drawP50: draw.p50,
+        drawP90: draw.p90,
+        err2P50: err2?.p50,
+        err2P90: err2?.p90,
+        postP50: post.p50,
+        postP90: post.p90,
+        sumP50: percentile(sums, 0.5) ?? 0,
+        sumP90: percentile(sums, 0.9) ?? 0,
+        sumOfP50s: prep.p50 + draw.p50 + post.p50 + (err1?.p50 ?? 0) + (err2?.p50 ?? 0),
+    };
+}
+
+/**
+ * [DIAG-EXPERIMENT-1] 分段计时的**扁平字段**（结果对象只能携带基本类型——`sanitizeRoundResult()` 明确
+ * 不接受对象/TypedArray，见结果字段登记表的说明）。`SegTimingStats` 是对外的汇总对象，落进结果前
+ * 一律经 `applySegTimingFields()` 摊平到下面这些数值字段。
+ */
+export interface SegTimingFields {
+    /** 实际采到分段样本的帧数（应 = 本轮 frames） */
+    segN?: number;
+    segPrepP50?: number;
+    segPrepP90?: number;
+    /** Flux 臂独有（该臂有两次 `gl.getError()`）；本文臂缺省 → 结果行写 `-` */
+    segErr1P50?: number;
+    segErr1P90?: number;
+    segDrawP50?: number;
+    segDrawP90?: number;
+    segErr2P50?: number;
+    segErr2P90?: number;
+    segPostP50?: number;
+    segPostP90?: number;
+    /** 逐帧各段之和的分位数（不是"各段 p50 相加"） */
+    segSumP50?: number;
+    segSumP90?: number;
+    /** 各段 p50 直接相加：与 `segSumP50` 差得远 = "少数帧整体很贵"而不是"每段都稳定地贵" */
+    segSumOfP50s?: number;
+}
+
+/** 扁平字段清单（登记进 `ROUND_RESULT_NUM_KEYS` 时与它对齐，避免漏登记被闸门拦下后发现是名字不一致）。 */
+export const SEG_TIMING_FIELD_KEYS = [
+    "segN",
+    "segPrepP50",
+    "segPrepP90",
+    "segErr1P50",
+    "segErr1P90",
+    "segDrawP50",
+    "segDrawP90",
+    "segErr2P50",
+    "segErr2P90",
+    "segPostP50",
+    "segPostP90",
+    "segSumP50",
+    "segSumP90",
+    "segSumOfP50s",
+] as const;
+
+/** 把 `summarizeSegTiming()` 的汇总对象摊平到结果字段上（`undefined` 的段不写，保持"没测到"≠0ms）。 */
+export function applySegTimingFields(dst: SegTimingFields, s: SegTimingStats | undefined): void {
+    if (!s) return;
+    dst.segN = s.n;
+    dst.segPrepP50 = s.prepP50;
+    dst.segPrepP90 = s.prepP90;
+    dst.segErr1P50 = s.err1P50;
+    dst.segErr1P90 = s.err1P90;
+    dst.segDrawP50 = s.drawP50;
+    dst.segDrawP90 = s.drawP90;
+    dst.segErr2P50 = s.err2P50;
+    dst.segErr2P90 = s.err2P90;
+    dst.segPostP50 = s.postP50;
+    dst.segPostP90 = s.postP90;
+    dst.segSumP50 = s.sumP50;
+    dst.segSumP90 = s.sumP90;
+    dst.segSumOfP50s = s.sumOfP50s;
+}
+
+/**
+ * [DIAG-EXPERIMENT-1] 分段计时的**结果行字段**（两臂共用这一个实现，字段名不可能分叉）。
+ * 分组前缀 `seg_` + `_p50_ms` / `_p90_ms`；缺失一律写 `-`（不写 0，避免把"没测到"读成"是 0ms"）：
+ *   - `seg_prep/draw/post`  两臂都有；`seg_ge1/seg_ge2` 只有 Flux 臂有（本臂写 `-`）
+ *   - `seg_sum_*` = 逐帧各段之和的分位数；`seg_sumofp50_p50_ms` = 各段 p50 直接相加（两者差大 = 少数帧整体贵）
+ *   - `seg_n` = 实际采样帧数（应 = 本轮 frames）
+ */
+export function segTimingRoundTags(v: SegTimingFields | undefined): string[] {
+    const num = (x: number | undefined) => (x === undefined ? "-" : fmt(x, 2));
+    return [
+        `seg_n=${v?.segN ?? "-"}`,
+        `seg_prep_p50_ms=${num(v?.segPrepP50)}`,
+        `seg_prep_p90_ms=${num(v?.segPrepP90)}`,
+        `seg_ge1_p50_ms=${num(v?.segErr1P50)}`,
+        `seg_ge1_p90_ms=${num(v?.segErr1P90)}`,
+        `seg_draw_p50_ms=${num(v?.segDrawP50)}`,
+        `seg_draw_p90_ms=${num(v?.segDrawP90)}`,
+        `seg_ge2_p50_ms=${num(v?.segErr2P50)}`,
+        `seg_ge2_p90_ms=${num(v?.segErr2P90)}`,
+        `seg_post_p50_ms=${num(v?.segPostP50)}`,
+        `seg_post_p90_ms=${num(v?.segPostP90)}`,
+        `seg_sum_p50_ms=${num(v?.segSumP50)}`,
+        `seg_sum_p90_ms=${num(v?.segSumP90)}`,
+        `seg_sumofp50_p50_ms=${num(v?.segSumOfP50s)}`,
+    ];
+}
+
+/**
+ * [DIAG-EXPERIMENT-1] 共享驱动的两个核心量的分位数（两臂共用这一个实现）：
+ *   - `sync_*`  = 逐帧 `gl.finish()` 耗时（与 `sync_ms` 同一批样本，`sync_ms` 是中位数）
+ *   - `frame_*` = 逐帧帧内阻塞耗时（与 `frame_ms` 同一批样本，`frame_ms` 是中位数）
+ * 只取字段（不取整个 RoundResult），因此 bench.ts / bench-flux.ts 都能直接调用同一份。
+ */
+export function throughputPercentileRoundTags(r: {
+    syncP50?: number;
+    syncP90?: number;
+    frameP50?: number;
+    frameP90?: number;
+}): string[] {
+    return [
+        `sync_p50_ms=${fmt(r.syncP50, 2)}`,
+        `sync_p90_ms=${fmt(r.syncP90, 2)}`,
+        `frame_p50_ms=${fmt(r.frameP50, 2)}`,
+        `frame_p90_ms=${fmt(r.frameP90, 2)}`,
+    ];
+}
 export function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -789,6 +988,12 @@ export interface DriveThroughputStats {
     frameMs: number;
     /** 帧内耗时**均值**（与中位数一起给：长尾轮次下中位数会低估，均值能暴露抖动） */
     frameMeanMs: number;
+    // [DIAG-EXPERIMENT-1] 帧内耗时与 GPU 同步耗时的分位数（逐帧样本，nearest-rank）：
+    //   中位数只看中心，长尾会被掩盖；p50/p90 用来判断"某一段是不是只在少数帧里偶发地贵"。
+    frameMsP50: number;
+    frameMsP90: number;
+    syncMsP50: number;
+    syncMsP90: number;
     warmupMs: number;
     /** 实测的计时地板（见 calibrateTimerFloor） */
     timerFloorMs: number;
@@ -818,6 +1023,10 @@ export async function driveThroughputFrames(spec: DriveThroughputSpec): Promise<
         syncFrames: 0,
         frameMs: 0,
         frameMeanMs: 0,
+        frameMsP50: 0,
+        frameMsP90: 0,
+        syncMsP50: 0,
+        syncMsP90: 0,
         warmupMs: 0,
         timerFloorMs: floor.floorMs,
         timerFloorRounds: floor.rounds,
@@ -883,6 +1092,11 @@ export async function driveThroughputFrames(spec: DriveThroughputSpec): Promise<
         syncFrames: syncs.length,
         frameMs: median(frameDurations) ?? 0,
         frameMeanMs: frameDurations.length > 0 ? frameDurations.reduce((a, b) => a + b, 0) / frameDurations.length : 0,
+        // [DIAG-EXPERIMENT-1] 逐帧样本的分位数（与 frameMs 同一批样本，量的是同一个窗口）
+        frameMsP50: percentile(frameDurations, 0.5) ?? 0,
+        frameMsP90: percentile(frameDurations, 0.9) ?? 0,
+        syncMsP50: percentile(syncs, 0.5) ?? 0,
+        syncMsP90: percentile(syncs, 0.9) ?? 0,
         warmupMs,
         timerFloorMs: floorMs,
         timerFloorRounds: floor.rounds,
@@ -1264,7 +1478,7 @@ export function defaultUserLabel(glRenderer: string): string {
 /** 单轮结果。前 14 个字段与旧 bench.ts 完全同名同义（论文口径不变）；
  *  `jobId` / `retryCount` / `contextLost` / `disposeMs` / `iframeCreateMs` 是 iframe 改造新增的**诊断**字段，
  *  不参与 fps / first_frame_ms / fetch_ms / parse_ms 的任何计算。 */
-export interface RoundResult {
+export interface RoundResult extends SegTimingFields {
     scene: string;
     /** 场景所属数据集（mip360/tnt/db）：与 bench-flux 臂同名字段，供 tools/ch7_baseline_report.py 分组 */
     dataset?: string;
@@ -1338,6 +1552,12 @@ export interface RoundResult {
     frameMs?: number;
     /** 帧内耗时均值（与中位数一起看，暴露长尾抖动） */
     frameMeanMs?: number;
+    /** [DIAG-EXPERIMENT-1] `gl.finish()` 逐帧耗时的 p50/p90（与 `syncMs` 同一批样本） */
+    syncP50?: number;
+    syncP90?: number;
+    /** [DIAG-EXPERIMENT-1] 帧内阻塞耗时（`frameMs`）的 p50/p90（与 `frameMs` 同一批样本） */
+    frameP50?: number;
+    frameP90?: number;
     /** 实测计时地板（空驱动校准；与结果头同名同源） */
     timerFloorMs?: number;
     timerFloorRounds?: number;
@@ -1548,6 +1768,12 @@ export const ROUND_RESULT_NUM_KEYS = [
     "sortLagDiffMax4",
     "sortLagDiffMax8",
     "sortLagDiffMaxReal",
+    // [DIAG-EXPERIMENT-1] 分段计时 + 共享驱动分位数（扁平数值字段；见 SegTimingFields）
+    ...SEG_TIMING_FIELD_KEYS,
+    "syncP50",
+    "syncP90",
+    "frameP50",
+    "frameP90",
 ] as const satisfies readonly (keyof RoundResult)[];
 /** 字符串字段（列表类字段也在这里，逐姿态/逐帧数据用逗号分隔） */
 export const ROUND_RESULT_STR_KEYS = [

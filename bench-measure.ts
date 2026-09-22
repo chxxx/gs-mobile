@@ -9,12 +9,20 @@
  *     会连带把渲染器/wasm 模块拉进父页面。父页面靠"不导入"来保证 bench 模式下零 WebGL 上下文。
  */
 import * as SPLAT from "./src/index";
+// [DIAG-EXPERIMENT-1] 本文臂渲染器侧的逐帧分段计时（默认关闭；只在本文件的测帧窗口内成对开关）。
+//   与 Flux 臂 `render_shared/main.js` 的 drawTimings 对称：段定义见 RenderProgram.ts 顶部注释。
+import {
+    clearDiagFrameTimings,
+    diagFrameTimings,
+    setDiagFrameTimingEnabled,
+} from "./src/renderers/webgl/programs/RenderProgram";
 // 排序耗时来自渲染器内部的 perf 采样（`sort.worker.ms` / `sort.latency.ms`）：只在排序滞后探针里
 // 临时打开（`perf.enableWindowDebug()`），跑完立即关掉，不影响其它任何测量。
 import { perf } from "./src/utils/PerfDebug";
 import {
     CAM_FLUX,
     PROTO_FLUX,
+    applySegTimingFields,
     clipInsideRatio,
     driveThroughputFrames,
     fmt,
@@ -25,20 +33,24 @@ import {
     param,
     positionsBounds,
     resolveSpinSpec,
+    segTimingRoundTags,
     spinPeakDegPerFrame,
     spinPivotParam,
     spinPose,
     spinSampleFrames,
     spinYawDegAt,
+    summarizeSegTiming,
     summarizeSweep,
     sweepSampleCount,
     throughputDriver,
+    throughputPercentileRoundTags,
 } from "./bench-shared";
 import type {
     DriveThroughputStats,
     RoundResult,
     SceneBounds,
     SceneMeta,
+    SegTimingStats,
     SpinSpec,
     SweepResult,
     SweepSample,
@@ -97,7 +109,12 @@ export type { ThroughputDriver };
 /** 测帧统计：口径字段**直接来自共享驱动**（`bench-shared.driveThroughputFrames`，两臂同一个函数），
  *  外加本臂特有的 `renders`（`frameRender()` 的真实调用次数，用来证明每帧都真的画了）与
  *  `sortResults`（本臂 sort worker **完成排序**的次数，见 `runThroughputFrames` 里的说明）。 */
-export type ThroughputStats = DriveThroughputStats & { renders: number; sortResults?: number };
+export type ThroughputStats = DriveThroughputStats & {
+    renders: number;
+    sortResults?: number;
+    /** [DIAG-EXPERIMENT-1] 渲染器侧逐帧分段计时（prep/draw/post）的 p50/p90；见 RenderProgram.ts 顶部 */
+    segTiming?: SegTimingStats;
+};
 
 function emptyThroughput(driver: ThroughputDriver, note: string): ThroughputStats {
     return {
@@ -115,6 +132,11 @@ function emptyThroughput(driver: ThroughputDriver, note: string): ThroughputStat
         syncFrames: 0,
         frameMs: 0,
         frameMeanMs: 0,
+        // [DIAG-EXPERIMENT-1] 与 DriveThroughputStats 同批样本的分位数（空结果一律 0）
+        frameMsP50: 0,
+        frameMsP90: 0,
+        syncMsP50: 0,
+        syncMsP90: 0,
         warmupMs: 0,
         timerFloorMs: 0,
         timerFloorRounds: 0,
@@ -951,14 +973,33 @@ export class BenchCase {
             return performance.now() - t0;
         };
         if (this.stopped) return emptyThroughput(driver, "测帧开始前已被取消");
-        const s = await driveThroughputFrames({
-            frames,
-            warmup,
-            driver,
-            renderFrame,
-            stopped: () => this.stopped,
-        });
-        return { ...s, renders: this.renderCalls - rendersBefore, sortResults: this.sortResultsSince(sortsBefore) };
+        // [DIAG-EXPERIMENT-1] 打开渲染器侧逐帧分段采集（打开即清空历史样本：门禁/预热之前的帧不混入）
+        setDiagFrameTimingEnabled(true);
+        let s: DriveThroughputStats;
+        try {
+            s = await driveThroughputFrames({
+                frames,
+                warmup,
+                driver,
+                renderFrame,
+                stopped: () => this.stopped,
+            });
+        } finally {
+            setDiagFrameTimingEnabled(false);
+        }
+        // [DIAG-EXPERIMENT-1] 只取**计帧窗口**的样本：`driveThroughputFrames` 先跑 warmup 帧再跑计帧，
+        //   所以末尾 `rendered` 个样本 = 计帧窗口的帧，与共享驱动的 frameDurations/syncs 是同一批帧。
+        //   `rendered === 0`（被取消）时不取（`slice(-0)` 会返回整个数组，必须显式挡住）。
+        const counted = Math.max(0, s.rendered);
+        const segRows = counted > 0 ? diagFrameTimings().slice(-counted) : [];
+        const segTiming = summarizeSegTiming(segRows);
+        clearDiagFrameTimings();
+        return {
+            ...s,
+            renders: this.renderCalls - rendersBefore,
+            sortResults: this.sortResultsSince(sortsBefore),
+            segTiming,
+        };
     }
 
     /**
@@ -1535,6 +1576,13 @@ export async function measureOneRound(
         // 不得用来算两臂倍数——被地板封顶时两边读数都落在 performance.now() 的量化下限上。
         base.frameMs = perf.frameMs;
         base.frameMeanMs = perf.frameMeanMs;
+        // [DIAG-EXPERIMENT-1] 分段计时 + 共享驱动两个核心量的分位数（与 Flux 臂同名同源：
+        //   汇总都在 bench-shared.summarizeSegTiming()，摊平/打印在 applySegTimingFields()/segTimingRoundTags()）。
+        applySegTimingFields(base, perf.segTiming);
+        base.frameP50 = perf.frameMsP50;
+        base.frameP90 = perf.frameMsP90;
+        base.syncP50 = perf.syncMsP50;
+        base.syncP90 = perf.syncMsP90;
         base.timerFloorMs = perf.timerFloorMs;
         base.timerFloorRounds = perf.timerFloorRounds;
         base.timerFloorSrc = perf.timerFloorSrc;
