@@ -30,7 +30,7 @@ param(
     [string]$Proxy = 'http://127.0.0.1:7890',   # 本机经公网自测用（本机 DNS 常访问不了 trycloudflare）
     [switch]$SkipDev,                     # 复用已在跑的 dev server
     [switch]$NoTunnel,                    # 只起 dev server（仅本机/同网）
-    [switch]$PerScene                     # 一般不用：只在需要逐场景链接时才加
+    [switch]$Stop                          # 只停服务：杀掉隧道 + dev server（不启动任何东西）
 )
 
 $ErrorActionPreference = 'Continue'
@@ -53,6 +53,36 @@ function Log($m) {
     Write-Host $m
 }
 Log ("=== ch7_serve {0} groups={1} platform={2} name={3} anchor={4} ===" -f (Get-Date -Format 'HH:mm:ss'), ($Groups -join '+'), $Platform, $Name, $anchor)
+
+# ---------------------------------------------------------------- 0) -Stop：只停服务
+if ($Stop) {
+    $cfPidFile = Join-Path $OUT 'cf_pid.txt'
+    if (Test-Path $cfPidFile) {
+        $m = [regex]::Match((Get-Content $cfPidFile -Raw), 'pid = (\d+)')
+        if ($m.Success) {
+            Stop-Process -Id ([int]$m.Groups[1].Value) -Force -ErrorAction SilentlyContinue
+            Log "已停隧道包装进程 pid=$($m.Groups[1].Value)"
+        }
+    }
+    Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object {
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+        Log "已停 cloudflared pid=$($_.Id)（该隧道地址立即失效）"
+    }
+    $conns = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    if ($conns) {
+        foreach ($c in $conns) {
+            $proc = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
+            if ($proc) {
+                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+                Log ("已停 dev server pid={0}（{1}，监听 {2}）" -f $proc.Id, $proc.ProcessName, $Port)
+            }
+        }
+    }
+    else { Log "端口 $Port 上没有监听进程（dev server 本来就没在跑）" }
+    Log '服务已停。⚠ 对外发过的链接全部失效——记得告知协助者"本轮结束"。'
+    Log '要看结果：python gsplat.js\tools\ch7_batch.py status'
+    exit 0
+}
 
 function Wait-Dev([int]$secs = 90) {
     for ($i = 0; $i -lt $secs; $i += 3) {

@@ -152,10 +152,17 @@ def flux_scene_ids(path=None):
 
 
 def scene_keys(group, platform):
-    """返回该 (组, 平台) 下的 scene_key 列表（即 raw/ 下的一级子目录名）。"""
+    """返回该 (组, 平台) 下的 scene_key 列表（即 raw/ 下的一级子目录名）。
+
+    ⚠ **同一平台的 main 与 flux 必须落在不同目录**：两者场景 id 相同，若共用 `{scene}/`，
+    后 ingest 的会覆盖前者（靠 JSON 里的 `group` 字段区分是不够的——文件名才是落盘键）。
+    因此 flux 的 scene_key 一律加 `-flux` 后缀（如 `garden-flux`）。
+    """
     base = platform_base(platform)
-    if group in (GRP_MAIN, GRP_FLUX):
-        return list(scene_ids()) if group == GRP_MAIN else list(flux_scene_ids())
+    if group == GRP_MAIN:
+        return list(scene_ids())
+    if group == GRP_FLUX:
+        return ["%s-flux" % s for s in flux_scene_ids()]
     if group == GRP_LOAD:
         if base != "gen3":
             return []

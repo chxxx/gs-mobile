@@ -29,6 +29,7 @@
 
 import argparse
 import datetime
+import glob
 import json
 import os
 import subprocess
@@ -139,6 +140,20 @@ def tasks_for(group, platforms, base, rounds=None, arm=None):
 
 # --------------------------------------------------------------------------- 落盘
 
+def _ts(mtime):
+    """mtime → `MM-DD HH:MM:SS`（status 用）。"""
+    return datetime.datetime.fromtimestamp(mtime).strftime("%m-%d %H:%M:%S")
+
+
+def _read_group(path):
+    """读一份逐轮 JSON 的 `group` 字段（status 聚合用）。"""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return (json.load(fh) or {}).get("group", "?")
+    except (ValueError, OSError):
+        return "?"
+
+
 def read_snapshot():
     if os.path.isfile(C.PROTOCOL_SNAPSHOT):
         try:
@@ -157,11 +172,13 @@ def current_protocol_id():
 def scene_key_for(group, scene, header, arm=None):
     """逐轮行 → raw/ 下的一级子目录名（协议 §4.1）。
 
-    main / flux 都是 13 个场景 id 本体；flux 臂靠 `engine=fluxgs` 与 platform 目录区分，
-    因此**不需要**在 scene_key 里再带 `-flux` 后缀（避免与资产命名混淆）。
+    ⚠ flux 臂必须带 `-flux` 后缀：同平台的 main 与 flux 场景 id 相同，若共用一个目录，
+    后 ingest 的会覆盖前者的 `round{n}.json`（文件路径才是落盘键，JSON 里的 `group` 救不了）。
     """
-    if group in (C.GRP_MAIN, C.GRP_FLUX):
+    if group == C.GRP_MAIN:
         return scene
+    if group == C.GRP_FLUX:
+        return "%s-flux" % scene
     if group == C.GRP_LOAD:
         return "%s-%s" % (scene, arm or "r7")
     tier = str(header.get("res", "")).strip()
@@ -421,6 +438,70 @@ def cmd_count(args):
                                            rounds=getattr(args, "rounds", 0)))
 
 
+def cmd_status(args):
+    """现状一眼看全（协议 §12.7）：隧道状态 / 最新回传原文 / 已落盘轮次 / 下一步照抄的命令。"""
+    root = args.root
+    print("原始数据根目录：%s" % root)
+    tun = os.path.join(root, "_tunnel", "tunnel.json")
+    if os.path.isfile(tun):
+        try:
+            with open(tun, "r", encoding="utf-8-sig") as fh:
+                st = json.load(fh)
+            print("最近一次隧道：%s" % st.get("url", "?"))
+            print("  起于 %s   组=%s   平台=%s   轮次=%s   name=%s   锚定=%s"
+                  % (st.get("generated_at", "?"), st.get("group", "?"), st.get("platform", "?"),
+                     st.get("rounds", "?"), st.get("name", "?"), st.get("anchor", "?")))
+            print("  ⚠ quick tunnel 重启即失效：先确认这个地址还能打开，再决定要不要重发链接")
+        except (ValueError, OSError) as exc:
+            print("隧道状态文件读不出来：%s" % exc)
+    else:
+        print("隧道状态：还没有（没跑过 ch7_serve.ps1）")
+
+    all_texts = sorted(glob.glob(os.path.join(root, "*.txt")), key=os.path.getmtime, reverse=True)
+    print("-" * 92)
+    print("回传/采集原文（raw 根目录 *.txt，共 %d 份，列最新 %d 份）——**还没解析，要用得先 ingest**："
+          % (len(all_texts), min(args.limit, len(all_texts))))
+    for path in all_texts[:args.limit]:
+        print("  %-46s %8d B  %s" % (os.path.basename(path), os.path.getsize(path), _ts(os.path.getmtime(path))))
+
+    print("-" * 92)
+    print("已落盘的逐轮 JSON（按 平台/组 聚合；`.superseded.*` 为历史备份，不计入）：")
+    found = False
+    for plat in list(C.PLATFORMS) + list(C.OPTIONAL_PLATFORMS):
+        pdir = os.path.join(root, plat)
+        if not os.path.isdir(pdir):
+            continue
+        per_group = {}
+        newest = 0.0
+        for key in sorted(os.listdir(pdir)):
+            kdir = os.path.join(pdir, key)
+            if not os.path.isdir(kdir):
+                continue
+            files = [f for f in glob.glob(os.path.join(kdir, "round*.json"))
+                     if ".superseded." not in os.path.basename(f)]
+            if not files:
+                continue
+            grp = _read_group(os.path.join(kdir, "round1.json")) if os.path.isfile(
+                os.path.join(kdir, "round1.json")) else _read_group(files[0])
+            per_group.setdefault(grp, []).append((key, len(files)))
+            newest = max(newest, max(os.path.getmtime(f) for f in files))
+        for grp, items in sorted(per_group.items()):
+            found = True
+            print("  %-12s %-5s scene_key=%2d  round_json=%3d  最新=%s   例：%s（%d 轮）"
+                  % (plat, grp, len(items), sum(n for _, n in items), _ts(newest),
+                     items[0][0], items[0][1]))
+    if not found:
+        print("  （还没有逐轮 JSON —— 回传原文要先 ingest）")
+
+    print("-" * 92)
+    print("下一步（照抄）：")
+    print("  1) 回传文本 → 逐轮 JSON：python gsplat.js\\tools\\ch7_batch.py ingest --platform <平台> --group auto --text %s\\<上面最新的那个.txt>" % root)
+    print("  2) 校验：python gsplat.js\\tools\\ch7_batch.py count --platforms <平台> [--rounds 1]   # 快速验证批加 --rounds 1")
+    print("  3) 入库索引：python gsplat.js\\tools\\ch7_verify.py verify --write-index docs\\ch7_raw_index.csv")
+    print("  4) 停服务（隧道 + dev server）：powershell -ExecutionPolicy Bypass -File gsplat.js\\tools\\ch7_serve.ps1 -Stop")
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="第 7 章统一重测：跑批计划、采数落盘与计数校验")
     sub = parser.add_subparsers(dest="cmd")
@@ -478,6 +559,11 @@ def build_parser():
                     help="每场景轮次（默认 %d = 快速验证；正式采集用 3，load 组 5）" % C.FAST_ROUNDS)
     p5.add_argument("--arm", default=None, choices=[None, "r7", "std45"], help="仅表 7-5 需要")
     p5.set_defaults(func=cmd_link)
+
+    p6 = sub.add_parser("status", help="现状一眼看全：隧道状态 / 最新回传原文 / 已落盘轮次 / 下一步命令")
+    p6.add_argument("--root", default=C.RAW_ROOT)
+    p6.add_argument("--limit", type=int, default=10, help="列几份最新回传原文（默认 10）")
+    p6.set_defaults(func=cmd_status)
     return parser
 
 
