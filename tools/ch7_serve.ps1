@@ -20,14 +20,16 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('main', 'load', 'res', 'flux')][string]$Group = 'main',
+    [string[]]$Groups = @('main', 'flux'),   # 默认两条臂都给：本文方法 + Flux-GS 基线
     [Parameter(Mandatory = $true)][string]$Platform,
     [string]$Name = 'helper',
     [string]$Subset = '',                 # 逗号分隔场景 id（分片跑时用），空 = 该组全量
     [string]$Token = $env:CH7_REPORT_TOKEN,
     [int]$Port = 5173,
+    [string]$Proxy = 'http://127.0.0.1:7890',   # 本机经公网自测用（本机 DNS 常访问不了 trycloudflare）
     [switch]$SkipDev,                     # 复用已在跑的 dev server
-    [switch]$NoTunnel                     # 只起 dev server（仅本机/同网）
+    [switch]$NoTunnel,                    # 只起 dev server（仅本机/同网）
+    [switch]$PerScene                     # 一般不用：只在需要逐场景链接时才加
 )
 
 $ErrorActionPreference = 'Continue'
@@ -44,10 +46,12 @@ $anchor = ''
 try { $anchor = (& git -C $GS rev-parse --short=13 HEAD 2>$null).Trim() } catch {}
 
 function Log($m) {
-    $m | Tee-Object -FilePath (Join-Path $OUT 'ch7_serve.log') -Append | Write-Host
-    return $m
+    # 上屏 + 落日志，各一次：Tee-Object 负责落盘（结果吞掉），Write-Host 负责上屏。
+    # ⚠ 千万不要在这里再 `return $m`：PowerShell 会把返回值也写进调用方的输出流 → 每行打印两遍。
+    $m | Tee-Object -FilePath (Join-Path $OUT 'ch7_serve.log') -Append | Out-Null
+    Write-Host $m
 }
-Log ("=== ch7_serve {0} group={1} platform={2} name={3} anchor={4} ===" -f (Get-Date -Format 'HH:mm:ss'), $Group, $Platform, $Name, $anchor)
+Log ("=== ch7_serve {0} groups={1} platform={2} name={3} anchor={4} ===" -f (Get-Date -Format 'HH:mm:ss'), ($Groups -join '+'), $Platform, $Name, $anchor)
 
 function Wait-Dev([int]$secs = 90) {
     for ($i = 0; $i -lt $secs; $i += 3) {
@@ -116,29 +120,46 @@ if (-not $NoTunnel) {
     "$url" | Set-Content -Encoding UTF8 (Join-Path $OUT 'tunnel_url.txt')
     if ($url -eq 'NOT_YET') { Log '✗ 隧道未给出地址：见 out\cf_tunnel_err.log'; exit 2 }
 
-    $codeB = & curl.exe -sS -o NUL -w '%{http_code}' --max-time 30 "$url/bench.html" 2>$null
-    $codeF = & curl.exe -sS -o NUL -w '%{http_code}' --max-time 30 "$url/bench-flux.html" 2>$null
-    $codeR = & curl.exe -sS -o NUL -w '%{http_code}' --max-time 30 -X POST -H 'Content-Type: text/plain;charset=utf-8' `
-        --data-binary 'PING' "$url/__ch7/report?name=selftest&token=$Token" 2>$null
-    Log "selfcheck bench=$codeB bench_flux=$codeF report=$codeR（report 期望 200；403 = token 不符）"
+    # 本机经公网自测：直连失败就走本机代理再试一次。
+    # ⚠ 自测返回 000 **不代表隧道坏了**——本机 DNS/直连常常访问不了 *.trycloudflare.com，
+    #   真正的验收以"手机实测"为准（§12.5）。403 才是真的 token 不符。
+    function Get-Code([string]$path, [switch]$Post) {
+        $curlArgs = @('-sS', '-o', 'NUL', '-w', '%{http_code}', '--max-time', '30')
+        if ($Post) { $curlArgs += @('-X', 'POST', '-H', 'Content-Type: text/plain;charset=utf-8', '--data-binary', 'PING') }
+        $c = & curl.exe @curlArgs "$url$path" 2>$null
+        if ("$c" -ne '200' -and $Proxy) {
+            $c2 = & curl.exe @($curlArgs + @('-x', $Proxy)) "$url$path" 2>$null
+            if ("$c2" -eq '200') { return "$c2(经代理)" }
+            return "直连=$c/代理=$c2"
+        }
+        return "$c"
+    }
+    $codeB = Get-Code '/bench.html'
+    $codeF = Get-Code '/bench-flux.html'
+    $codeR = Get-Code "/__ch7/report?name=selftest&token=$Token" -Post
+    Log "selfcheck bench=$codeB bench_flux=$codeF report=$codeR（report 期望 200；403 = 口令不符）"
 }
 else {
     $url = "http://127.0.0.1:$Port"
     Log "已跳过隧道（-NoTunnel）：本次仅本机/同网可用 base=$url"
 }
 
-# ---------------------------------------------------------------- 3) 生成分发链接
-$linkArgs = @('--base', $url, '--group', $Group, '--platform', $Platform, '--name', $Name, '--token', $Token)
-if ($Subset) { $linkArgs += @('--subset', $Subset) }
-Log '--- 分发给协助测试者的链接（含 report= 自动回传与 rtok= 口令）---'
-& python (Join-Path $PSScriptRoot 'ch7_batch.py') link @linkArgs 2>&1 | ForEach-Object { Log $_ }
+# ---------------------------------------------------------------- 3) 生成分发链接（每组一条）
+Log '--- 分发给协助测试者的链接（每组一条、整组一次跑完；含 report= 自动回传与 rtok= 口令）---'
+foreach ($g in $Groups) {
+    $linkArgs = @('--base', $url, '--group', $g, '--platform', $Platform, '--name', $Name, '--token', $Token)
+    if ($Subset) { $linkArgs += @('--subset', $Subset) }
+    if ($PerScene) { $linkArgs += @('--per-scene') }
+    Log ("【组 {0} / 平台 {1}】" -f $g, $Platform)
+    & python (Join-Path $PSScriptRoot 'ch7_batch.py') link @linkArgs 2>&1 | ForEach-Object { Log $_ }
+}
 
 # ---------------------------------------------------------------- 4) 状态落盘
 $state = [ordered]@{
     generated_at = (Get-Date).ToString('s')
     url          = $url
     port         = $Port
-    group        = $Group
+    group        = $Groups -join ','
     platform     = $Platform
     name         = $Name
     subset       = $Subset

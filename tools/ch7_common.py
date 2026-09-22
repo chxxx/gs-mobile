@@ -5,12 +5,11 @@
 - 场景清单唯一来源：`gsplat.js/bench-scenes.json`（13 项，带 dataset 分组）；
 - 原始数据落盘：`thesis_project/data/ch7_measurements/raw/{platform}/{scene_key}/round{n}.json`；
 - 四个批次组（协议 §4.2/§5.5）：
-    main = 13 场景 × 5 平台 × 3 轮 = 195（表 7-2/7-3/7-4/7-7；Gen2 双内核各算一组）
-    load = 3 场景 × 2 臂 × 5 轮 = 30（表 7-5，platform=gen3，scene_key={scene}-r7 / {scene}-std45）
+    main = 13 场景 × 4 平台 × 3 轮 = 156（表 7-2/7-3/7-4/7-7；手机端全部走微信 XWEB）
+    load = 3 场景 × 2 臂 × 5 轮 = 30（表 7-5，platform=gen3-xweb，scene_key={scene}-r7 / {scene}-std45）
     res  = 4 档分辨率 × 3 轮 = 12（表 7-8，platform=rtx4060，scene_key=garden-{WxH}）
-    flux = 13 场景 × 4 平台 × 3 轮 = 156（Flux-GS 基线，platform 不含 gen2-chrome 取证轮）
-  核心合计 393 份；另有 gen2-chrome 的 Flux-GS 取证轮 39 份（该内核下 Flux-GS 渲染异常，
-  只留档、不进表、不计入核心期望数），见协议 §4.2；
+    flux = 13 场景 × 4 平台 × 3 轮 = 156（Flux-GS 基线）
+  核心合计 354 份；`gen2-chrome` 等可选对照平台默认不跑、不计入核心（见 §4.2/§5.5）；
 - 资产登记：`thesis_project/data/ch7_measurements/scenes_manifest.csv`（本地工作副本）
   与 `docs/ch7_assets_manifest.csv`（入库镜像，因 `thesis_project/` 被主仓 .gitignore 忽略）。
 """
@@ -39,14 +38,18 @@ PROTOCOL_DOC = os.path.join(PROJECT_ROOT, "docs", "ch7_measurement_protocol.md")
 
 # 平台标识（协议 §2）：`<机型>[-<内核>]`。内核不是 Chrome 时必须显式加后缀——
 # 不同浏览器内核对同一 WebGL 实现的差异不能当成"硬件差异"（协议 §6.4 的跨内核规则）。
-PLATFORMS = ("rtx4060", "gen3", "d9400", "gen2-xweb", "gen2-chrome")
+# 2026-09-21 作者定案：**手机端一律走微信内置浏览器（XWEB）**（协助者在微信里点开最省事，
+# 且 Flux-GS 只有 XWEB 能正常渲染）→ 核心平台 4 个；桌面保持 Chrome。
+PLATFORMS = ("rtx4060", "gen3-xweb", "gen2-xweb", "d9400-xweb")
 PLATFORM_LABEL = {
     "rtx4060": "RTX 4060 Laptop / Chrome Windows（含无头 Edge）",
-    "gen3": "Snapdragon 8 Gen 3 / Adreno 750（Chrome Mobile；若实测只能用微信内核，请写作 gen3-xweb）",
-    "d9400": "Dimensity 9400 / Mali（Chrome Mobile；同上，必要时写作 d9400-xweb）",
-    "gen2-xweb": "Snapdragon 8 Gen 2 / Adreno 740 · 微信 XWEB 内核（Flux-GS 唯一可用内核）",
-    "gen2-chrome": "Snapdragon 8 Gen 2 / Adreno 740 · Chrome Mobile（Flux-GS 在此内核渲染异常，仅取证）",
+    "gen3-xweb": "Snapdragon 8 Gen 3 / Adreno 750 · 微信 XWEB",
+    "gen2-xweb": "Snapdragon 8 Gen 2 / Adreno 740 · 微信 XWEB（Flux-GS 唯一可用内核）",
+    "d9400-xweb": "Dimensity 9400 / Mali · 微信 XWEB",
 }
+# 可选对照平台：默认**不跑、不计入核心期望数**。需要"同一设备不同内核"的对照证据时
+# （内核敏感性 / Flux-GS 黑白取证），用 `--platforms gen2-chrome` 单独补。
+OPTIONAL_PLATFORMS = ("gen3-chrome", "gen2-chrome", "d9400-chrome")
 
 
 def platform_base(platform):
@@ -71,8 +74,8 @@ RES_TIERS = ("800x531", "1600x1063", "2400x1596", "3200x2126")
 # Flux-GS 基线（协议 §5.5）：页面是 bench-flux.html，清单是 flux-baseline-scenes.json。
 FLUX_PAGE = "bench-flux.html"
 FLUX_SCENES_JSON = os.path.join(GS_REPO, "flux-baseline-scenes.json")
-FLUX_PLATFORMS = ("rtx4060", "gen3", "gen2-xweb", "d9400")
-FLUX_EVIDENCE_PLATFORMS = ("gen2-chrome",)   # 只取证（渲染异常），不计入核心期望数
+FLUX_PLATFORMS = ("rtx4060", "gen3-xweb", "gen2-xweb", "d9400-xweb")
+FLUX_EVIDENCE_PLATFORMS = ("gen2-chrome",)   # 黑白取证轮：默认不跑，跑则只留档、不计入核心
 
 
 def rounds_for(group):
@@ -153,10 +156,11 @@ def scene_keys(group, platform):
 
 
 def expected_files(group=None, platform=None):
-    """{(group, platform): 期望文件数} 与**核心合计**（不含 gen2-chrome 的 Flux-GS 取证轮）。
+    """{(group, platform): 期望文件数} 与**核心合计**（只统计 `PLATFORMS`，不含可选对照平台）。
 
-    核心合计（协议 §4.2）= main 195 + load 30 + res 12 + flux 156 = **393**。
-    另有 Flux-GS 在 gen2-chrome 的取证轮 39 份（渲染异常，只留档、不进表），见 evidence_files()。
+    核心合计（协议 §4.2）= main 156 + load 30 + res 12 + flux 156 = **354**。
+    可选对照（`OPTIONAL_PLATFORMS`，例如 gen2-chrome 的内核敏感性 / Flux-GS 黑白取证）
+    默认不跑、不计入核心；跑了的用 evidence_files() 或 `--platforms` 单独统计。
     """
     table = {}
     for plat in PLATFORMS:

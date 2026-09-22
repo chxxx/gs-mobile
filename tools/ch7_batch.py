@@ -282,9 +282,7 @@ def cmd_link(args):
     """远程协助分发（协议 §12）：生成可直接发给测试者的链接。
 
     - 链接自带 `report=`（自动回传端点）与 `rtok=`（回传口令），测试者只需「打开 → 等 → 关页面」；
-    - `--subset` 可只跑部分场景并合成**一条**链接（远程协助者分片跑）；
-      不给 `--subset` 时逐场景一条链接（单场景一键跑完该组全部轮次）；
-    - `--name` 写进 `u=`，用于溯源（谁交的、哪台设备）；回传文件名也用 `--name` 前缀。
+    - 分片模式（`--subset` 只跑部分场景，合成**一条**链接）；flux 组很慢，建议按数据集分 3 片发。
     """
     group = args.group
     keys = C.scene_keys(group, args.platform)
@@ -297,29 +295,35 @@ def cmd_link(args):
         arm = "r7"
         print("ℹ 表 7-5 是两臂实验：本次按 arm=%s 生成；标准臂请再跑一次 --arm std45" % arm)
     report = "/__ch7/report?name=" + args.name
-    print("平台 = %-11s 内核 = %-6s 组 = %-4s 轮次 = %d   回传端点 = %s"
-          % (args.platform, C.platform_kernel(args.platform), group, C.rounds_for(group), report))
-    print("回传口令 rtok = %s（与 vite.config.js 的 CH7_REPORT_TOKEN 一致；换口令只需换链接）" % args.token)
-    print("-" * 78)
-
-    def make(key, profile_subset=""):
-        return C.build_url(args.base, group, key, platform=args.platform, report=report,
-                           rtok=args.token, subset=profile_subset,
-                           u="%s-%s-%s" % (args.name, args.platform, key))
-
-    if subset:
-        print("分片模式（一条链接跑 %d 个场景）：" % len(subset.split(",")))
-        print("  %s" % make(keys[0], profile_subset=subset))
-    else:
+    n_scenes = len(subset.split(",")) if subset else len(keys)
+    print("平台 = %-11s 内核 = %-6s 组 = %-4s 轮次 = %d   场景 = %d 个/条"
+          % (args.platform, C.platform_kernel(args.platform), group, C.rounds_for(group), n_scenes))
+    print("回传端点 = %s   回传口令 rtok = %s" % (report, args.token))
+    print("-" * 100)
+    print(C.build_url(args.base, group, keys[0], platform=args.platform, report=report,
+                      rtok=args.token, subset=subset,
+                      u="%s-%s-%s" % (args.name, args.platform, group)))
+    if group == C.GRP_FLUX and not subset:
+        print("ℹ Flux-GS 很慢：建议改成分 3 片发（--subset bicycle,flowers,garden,stump,treehill,room,counter,kitchen,bonsai"
+              " / --subset truck,train / --subset drjohnson,playroom）")
+    if args.per_scene:
+        print("-" * 100)
+        print("（--per-scene：逐场景链接，仅在协助者只能一次跑一个场景时才用）")
         for key in keys:
-            print("  %-24s %s" % (key, make(key)))
-    print("-" * 78)
+            print("  %-24s %s" % (key, C.build_url(args.base, group, key, platform=args.platform,
+                                                    report=report, rtok=args.token,
+                                                    u="%s-%s-%s" % (args.name, args.platform, key))))
+    print("-" * 100)
     print("发给协助测试者的话术（可直接复制）：")
-    print("  1) 用手机浏览器打开（Gen2 上的 Flux-GS 臂必须用微信内置浏览器）；")
-    print("  2) 打开后会自动开跑，请保持屏幕常亮、不要切后台、不要锁屏；一轮约 3–10 分钟；")
-    print("  3) 跑完页面会自动回传，看到「已回传」就能关页面。若提示提交失败，")
-    print("     请点页面上的「复制结果」把文本原样发回给我（我这边 ingest 落盘）。")
-    print("  ⚠ 隧道地址每次重启都会变：若链接打不开，说明我在重启隧道，请等我发新链接。")
+    if C.platform_kernel(args.platform) != "chrome":
+        print("  1) 手机上用**微信**打开这条链接（微信内置浏览器，别切到系统浏览器）；")
+    else:
+        print("  1) 用**系统浏览器（Chrome）**打开这条链接（本平台是内核对照组，故意不用微信）；")
+    dur = "本文方法整组约 1 小时" if group != C.GRP_FLUX else "Flux-GS 解码很慢，整片可能 1–3 小时"
+    print("  2) 页面会自动逐场景开跑，请插电、屏幕常亮、别锁屏、别切后台（%s）；" % dur)
+    print("  3) 跑完会自动回传，看到「已回传」即可关页面；若提示提交失败，")
+    print("     点页面上的「复制结果」把文本原样发回给我（我这边 ingest 落盘）。")
+    print("  ⚠ 隧道地址每次重启都会变：若打不开就是我在重启，等我发新链接。")
     return 0
 
 
@@ -391,13 +395,14 @@ def cmd_count(args):
 def build_parser():
     parser = argparse.ArgumentParser(description="第 7 章统一重测：跑批计划、采数落盘与计数校验")
     sub = parser.add_subparsers(dest="cmd")
+    plat_choices = list(C.PLATFORMS) + list(C.OPTIONAL_PLATFORMS)   # 可选对照平台也能显式点名
 
     p1 = sub.add_parser("plan", help="生成 protocol.json 快照并打印跑批计划（不启动浏览器）")
     p1.add_argument("--base", default=DEFAULT_BASE)
     p1.set_defaults(func=cmd_plan)
 
     p2 = sub.add_parser("run", help="桌面通道跑批（默认 dry-run，加 --yes 才真跑）")
-    p2.add_argument("--platform", required=True, choices=list(C.PLATFORMS))
+    p2.add_argument("--platform", required=True, choices=plat_choices)
     p2.add_argument("--group", default=C.GRP_MAIN, choices=list(C.GROUPS))
     p2.add_argument("--arm", default=None, choices=[None, "r7", "std45"], help="仅表 7-5 需要")
     p2.add_argument("--base", default=DEFAULT_BASE)
@@ -410,7 +415,7 @@ def build_parser():
     p2.set_defaults(func=cmd_run)
 
     p3 = sub.add_parser("ingest", help="人工通道：把页面「复制结果」文本拆成逐轮 JSON")
-    p3.add_argument("--platform", required=True, choices=list(C.PLATFORMS))
+    p3.add_argument("--platform", required=True, choices=plat_choices)
     p3.add_argument("--text", required=True)
     p3.add_argument("--group", default="auto", choices=["auto"] + list(C.GROUPS),
                     help="auto = 按结果头 engine= 自动判组（fluxgs→flux，否则 main）")
@@ -429,12 +434,13 @@ def build_parser():
     p4.set_defaults(func=cmd_count)
 
     p5 = sub.add_parser("link", help="远程协助分发：生成带自动回传的链接（协议 §12）")
-    p5.add_argument("--platform", required=True, choices=list(C.PLATFORMS))
+    p5.add_argument("--platform", required=True, choices=plat_choices)
     p5.add_argument("--group", default=C.GRP_MAIN, choices=list(C.GROUPS))
     p5.add_argument("--base", default=DEFAULT_BASE, help="隧道地址或本机地址（默认 dev server）")
     p5.add_argument("--name", default="helper", help="测试者标识（进 u= 与回传文件名）")
     p5.add_argument("--token", default=os.environ.get("CH7_REPORT_TOKEN", "ch7-2026-phase4"))
     p5.add_argument("--subset", default="", help="只跑这些场景（逗号分隔，合成一条链接）")
+    p5.add_argument("--per-scene", action="store_true", help="额外逐场景列出链接（一般不用）")
     p5.add_argument("--arm", default=None, choices=[None, "r7", "std45"], help="仅表 7-5 需要")
     p5.set_defaults(func=cmd_link)
     return parser
