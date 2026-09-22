@@ -78,8 +78,20 @@ FLUX_PLATFORMS = ("rtx4060", "gen3-xweb", "gen2-xweb", "d9400-xweb")
 FLUX_EVIDENCE_PLATFORMS = ("gen2-chrome",)   # 黑白取证轮：默认不跑，跑则只留档、不计入核心
 
 
-def rounds_for(group):
-    """该组每场景跑几轮（协议 §6.4：本文方法与 Flux-GS 分开定轮次）。"""
+# 快速验证轮次（2026-09-21 作者定案）：现场太慢，`link`/`run` **默认只跑 1 轮**，
+# 用于"跑通链路 + 看趋势"；**正式采集必须回到协议轮次**（main/res/flux=3、load=5）。
+# 护栏：`count/verify` 默认按协议轮次算期望文件，1 轮的批次必然报"缺 round2/3"，
+# 所以快速批不会被误当成完整批次；要校验快速批请显式 `--rounds 1`。
+FAST_ROUNDS = 1
+
+
+def rounds_for(group, override=None):
+    """该组每场景跑几轮（协议 §6.4：本文方法与 Flux-GS 分开定轮次）。
+
+    `override` 为显式指定（快速验证传 FAST_ROUNDS=1）；不传则用协议轮次。
+    """
+    if override:
+        return int(override)
     return ROUNDS_BY_GROUP.get(group, ROUNDS)
 
 
@@ -155,12 +167,11 @@ def scene_keys(group, platform):
     raise ValueError("未知批次组：%s" % group)
 
 
-def expected_files(group=None, platform=None):
+def expected_files(group=None, platform=None, rounds=None):
     """{(group, platform): 期望文件数} 与**核心合计**（只统计 `PLATFORMS`，不含可选对照平台）。
 
-    核心合计（协议 §4.2）= main 156 + load 30 + res 12 + flux 156 = **354**。
-    可选对照（`OPTIONAL_PLATFORMS`，例如 gen2-chrome 的内核敏感性 / Flux-GS 黑白取证）
-    默认不跑、不计入核心；跑了的用 evidence_files() 或 `--platforms` 单独统计。
+    协议轮次下的核心合计（§4.2）= main 156 + load 30 + res 12 + flux 156 = **354**；
+    `rounds=1` 时为快速验证口径（每组 1 轮），只能用于"跑通链路"，不能进表。
     """
     table = {}
     for plat in PLATFORMS:
@@ -169,7 +180,7 @@ def expected_files(group=None, platform=None):
                 continue                      # 取证轮单独统计
             keys = scene_keys(grp, plat)
             if keys:
-                table[(grp, plat)] = len(keys) * rounds_for(grp)
+                table[(grp, plat)] = len(keys) * rounds_for(grp, rounds)
     if group is not None:
         return table.get((group, platform), 0)
     return table, sum(table.values())
@@ -312,17 +323,18 @@ def profile_for(group, platform, scene_key=""):
     return ",".join(scene_ids())
 
 
-def build_url(base, group, scene_key="", platform="", u=None, report="", rtok="", subset=""):
+def build_url(base, group, scene_key="", platform="", u=None, report="", rtok="", subset="", rounds=None):
     """按协议 §2/§12 生成一条 bench URL（每个协议参数都显式写出，不依赖页面默认值）。
 
     - `group=res` 保留 `frames=100` 并覆盖 `res`（协议 §5.4）；
     - `group=flux` 指向 `bench-flux.html`（Flux-GS 自带渲染器，协议 §5.5）；
     - `report`/`rtok` 用于远程协助的自动回传（页面测完直接 POST 到本机 dev server 的
       `/__ch7/report`，见 vite.config.js；不填则不自动回传，走人工「复制结果」）；
-    - `subset` 用逗号分隔的场景 id 覆盖 `profile`（远程协助者分片跑时用）。
+    - `subset` 用逗号分隔的场景 id 覆盖 `profile`（远程协助者分片跑时用）；
+    - `rounds` 覆盖轮次（默认按协议 `rounds_for`；快速验证传 `FAST_ROUNDS=1`）。
     """
     params = dict(PROTO_PARAMS)
-    params["rounds"] = str(rounds_for(group))
+    params["rounds"] = str(rounds_for(group, rounds))
     params["profile"] = subset or profile_for(group, platform, scene_key)
     if group == GRP_RES and scene_key.startswith("garden-"):
         params["frames"] = "100"                     # 表 7-8 保留 frames=100（协议 §5.4）

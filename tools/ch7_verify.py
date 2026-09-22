@@ -182,7 +182,11 @@ def cmd_verify(args):
         return 2
     groups = [g for g in args.groups.split(",") if g]
     platforms = [p for p in args.platforms.split(",") if p]
-    table, total_expected = C.expected_files()
+    rounds_ovr = getattr(args, "rounds", 0) or None       # 非 0 → 按显式轮次校验（快速验证批）
+    table, total_expected = C.expected_files(rounds=rounds_ovr)
+    if rounds_ovr:
+        print("ℹ 按显式轮次校验：每场景 %d 轮（协议轮次为 main/res/flux=3、load=5）——"
+              "这种批次只能用于快速验证，**不能作为进表依据**。" % rounds_ovr)
 
     missing, short_fields, asset_bad, asset_notes, mixed, index_rows = [], [], [], [], [], []
     protocol_id = ""
@@ -207,7 +211,7 @@ def cmd_verify(args):
             scene = key.split("-")[0]
             arm = key.split("-", 1)[1] if grp == C.GRP_LOAD else "r7"
             key_capped = []
-            for n in range(1, C.rounds_for(grp) + 1):
+            for n in range(1, C.rounds_for(grp, rounds_ovr) + 1):
                 rel = "%s/%s/round%d.json" % (plat, key, n)
                 path = os.path.join(args.root, plat, key, "round%d.json" % n)
                 if not os.path.isfile(path):
@@ -258,10 +262,11 @@ def cmd_verify(args):
                              % (grp, plat, key, ",".join(str(v) for v in key_capped)))
         got_total += got
         print("%s %-4s / %-9s 实收 %2d / 应收 %2d（%d 轮）  贴地板轮次 %d/%d"
-              % ("✓" if got == exp else "✗", grp, plat, got, exp, C.rounds_for(grp), capped, max(got, 1)))
+              % ("✓" if got == exp else "✗", grp, plat, got, exp, C.rounds_for(grp, rounds_ovr), capped, max(got, 1)))
     print("-" * 78)
-    print("合计 实收 %d / 应收 %d（统计范围：组=%s 平台=%s；协议核心 %d；Flux-GS 取证轮另计 %s）"
-          % (got_total, exp_total, ",".join(groups), ",".join(platforms), total_expected,
+    print("合计 实收 %d / 应收 %d（统计范围：组=%s 平台=%s；%s %d；Flux-GS 取证轮另计 %s）"
+          % (got_total, exp_total, ",".join(groups), ",".join(platforms),
+             "本次口径核心" if rounds_ovr else "协议核心", total_expected,
              ", ".join("%s×%d" % (p, n) for p, n in sorted(C.evidence_files().items()))))
     for title, items in (("缺失文件", missing), ("字段/解析问题", short_fields),
                          ("资产对账不一致", asset_bad),
@@ -305,6 +310,8 @@ def build_parser():
     p2.add_argument("--write-index", default="", help="把逐轮索引写到指定 CSV（建议 %s）" % C.RAW_INDEX)
     p2.add_argument("--bytes-tol", type=int, default=1024,
                     help="资产字节数容差（默认 1024 B，另叠加 0.5%% 相对容差；超出即判为资产不一致）")
+    p2.add_argument("--rounds", type=int, default=0,
+                    help="显式轮次（0=按协议；校验快速验证批时填 1）")
     p2.set_defaults(func=cmd_verify)
     return parser
 

@@ -114,12 +114,12 @@ def build_snapshot():
     }
 
 
-def tasks_for(group, platforms, base):
+def tasks_for(group, platforms, base, rounds=None):
     """生成 [(platform, group, scene_key, url), ...]。"""
     plan = []
     for platform in platforms:
         for key in C.scene_keys(group, platform):
-            url = C.build_url(base, group, key, platform=platform,
+            url = C.build_url(base, group, key, platform=platform, rounds=rounds,
                               u="%s-%s-%s" % (platform, group, key))
             plan.append({"platform": platform, "group": group, "scene_key": key, "url": url})
     return plan
@@ -250,6 +250,10 @@ def cmd_plan(args):
         print("按目录全量落地时磁盘上应为 %d 份（核心 %d + 取证 %d）"
               % (total + sum(ev.values()), total, sum(ev.values())))
     print("提示：跑批落盘根目录 = %s" % C.RAW_ROOT)
+    print("提示：`link`/`run` 默认 **%d 轮**（快速验证用；协议轮次：main/res/flux=%d、load=%d）——"
+          "正式采集请显式 `--rounds %d`（load 用 %d）。"
+          % (C.FAST_ROUNDS, C.rounds_for(C.GRP_MAIN), C.rounds_for(C.GRP_LOAD),
+             C.rounds_for(C.GRP_MAIN), C.rounds_for(C.GRP_LOAD)))
     return 0
 
 
@@ -295,13 +299,20 @@ def cmd_link(args):
         arm = "r7"
         print("ℹ 表 7-5 是两臂实验：本次按 arm=%s 生成；标准臂请再跑一次 --arm std45" % arm)
     report = "/__ch7/report?name=" + args.name
+    rounds = args.rounds or C.rounds_for(group)              # 0/None → 按协议
+    proto_rounds = C.rounds_for(group)
+    fast = rounds < proto_rounds
     n_scenes = len(subset.split(",")) if subset else len(keys)
-    print("平台 = %-11s 内核 = %-6s 组 = %-4s 轮次 = %d   场景 = %d 个/条"
-          % (args.platform, C.platform_kernel(args.platform), group, C.rounds_for(group), n_scenes))
+    print("平台 = %-11s 内核 = %-6s 组 = %-4s 轮次 = %d%s   场景 = %d 个/条"
+          % (args.platform, C.platform_kernel(args.platform), group, rounds,
+             ("（快速验证；协议要求 %d）" % proto_rounds) if fast else "", n_scenes))
     print("回传端点 = %s   回传口令 rtok = %s" % (report, args.token))
+    if fast:
+        print("⚠ rounds=%d < 协议要求的 %d：本批只用于【跑通链路 / 看趋势】，不得进表；"
+              "正式采集请去掉 --rounds（或写 --rounds %d）" % (rounds, proto_rounds, proto_rounds))
     print("-" * 100)
     print(C.build_url(args.base, group, keys[0], platform=args.platform, report=report,
-                      rtok=args.token, subset=subset,
+                      rtok=args.token, subset=subset, rounds=rounds,
                       u="%s-%s-%s" % (args.name, args.platform, group)))
     if group == C.GRP_FLUX and not subset:
         print("ℹ Flux-GS 很慢：建议改成分 3 片发（--subset bicycle,flowers,garden,stump,treehill,room,counter,kitchen,bonsai"
@@ -311,7 +322,7 @@ def cmd_link(args):
         print("（--per-scene：逐场景链接，仅在协助者只能一次跑一个场景时才用）")
         for key in keys:
             print("  %-24s %s" % (key, C.build_url(args.base, group, key, platform=args.platform,
-                                                    report=report, rtok=args.token,
+                                                    report=report, rtok=args.token, rounds=rounds,
                                                     u="%s-%s-%s" % (args.name, args.platform, key))))
     print("-" * 100)
     print("发给协助测试者的话术（可直接复制）：")
@@ -341,12 +352,17 @@ def cmd_run(args):
         print("✗ 表 7-5 是两臂实验，必须显式给 --arm r7 或 --arm std45")
         return 2
     snap = read_snapshot() or build_snapshot()
-    print("protocol_id = %s   平台 = %s   组 = %s   场景 = %d 个"
-          % (snap["protocol_id"], platform, args.group, len(keys)))
+    rounds = args.rounds or C.rounds_for(args.group)
+    proto_rounds = C.rounds_for(args.group)
+    print("protocol_id = %s   平台 = %s   组 = %s   场景 = %d 个   轮次 = %d"
+          % (snap["protocol_id"], platform, args.group, len(keys), rounds))
+    if rounds < proto_rounds:
+        print("⚠ rounds=%d < 协议 %d：本批只用于跑通链路/看趋势，不得进表（正式采集加 --rounds %d）"
+              % (rounds, proto_rounds, proto_rounds))
     print("落盘根目录 = %s" % C.RAW_ROOT)
     print("-" * 78)
     failed = []
-    for task in tasks_for(args.group, [platform], args.base):
+    for task in tasks_for(args.group, [platform], args.base, rounds=rounds):
         tmp = os.path.join(C.RAW_ROOT, "_cdp_tmp", "%s-%s.json" % (platform, task["scene_key"]))
         cmd = ["node", CDP_DRIVER, "--url=" + task["url"], "--wait=" + WAIT_SENTINEL,
                "--expr=" + EXPR_RESULT_TEXT, "--pollExpr=" + EXPR_POLL,
@@ -389,7 +405,8 @@ def cmd_count(args):
     """委托给 ch7_verify.verify（数量 / 必填字段 / 资产对账 三重校验）。"""
     return V.cmd_verify(argparse.Namespace(root=args.root, manifest=args.manifest, groups=args.groups,
                                            platforms=args.platforms, write_index=args.write_index,
-                                           bytes_tol=getattr(args, "bytes_tol", 1024)))
+                                           bytes_tol=getattr(args, "bytes_tol", 1024),
+                                           rounds=getattr(args, "rounds", 0)))
 
 
 def build_parser():
@@ -408,6 +425,8 @@ def build_parser():
     p2.add_argument("--base", default=DEFAULT_BASE)
     p2.add_argument("--timeout", type=int, default=1800, help="单场景超时秒数（13 场景×3 轮≈15–25 分钟）")
     p2.add_argument("--port", type=int, default=9333)
+    p2.add_argument("--rounds", type=int, default=C.FAST_ROUNDS,
+                    help="每场景轮次（默认 %d = 快速验证；正式采集用 3，load 组 5）" % C.FAST_ROUNDS)
     p2.add_argument("--yes", action="store_true", help="确认真跑")
     p2.add_argument("--root", default=C.RAW_ROOT)
     p2.add_argument("--manifest", default=C.MANIFEST)
@@ -431,6 +450,8 @@ def build_parser():
     p4.add_argument("--platforms", default=",".join(C.PLATFORMS))
     p4.add_argument("--write-index", default="")
     p4.add_argument("--bytes-tol", type=int, default=1024)
+    p4.add_argument("--rounds", type=int, default=0,
+                    help="显式轮次（0=按协议；校验快速验证批时填 1）")
     p4.set_defaults(func=cmd_count)
 
     p5 = sub.add_parser("link", help="远程协助分发：生成带自动回传的链接（协议 §12）")
@@ -441,6 +462,8 @@ def build_parser():
     p5.add_argument("--token", default=os.environ.get("CH7_REPORT_TOKEN", "ch7-2026-phase4"))
     p5.add_argument("--subset", default="", help="只跑这些场景（逗号分隔，合成一条链接）")
     p5.add_argument("--per-scene", action="store_true", help="额外逐场景列出链接（一般不用）")
+    p5.add_argument("--rounds", type=int, default=C.FAST_ROUNDS,
+                    help="每场景轮次（默认 %d = 快速验证；正式采集用 3，load 组 5）" % C.FAST_ROUNDS)
     p5.add_argument("--arm", default=None, choices=[None, "r7", "std45"], help="仅表 7-5 需要")
     p5.set_defaults(func=cmd_link)
     return parser

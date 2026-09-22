@@ -26,6 +26,7 @@ param(
     [string]$Subset = '',                 # 逗号分隔场景 id（分片跑时用），空 = 该组全量
     [string]$Token = $env:CH7_REPORT_TOKEN,
     [int]$Port = 5173,
+    [int]$Rounds = 1,                     # 0 = 按协议轮次；默认 1 = 快速验证（现场太慢，见协议 §4.2）
     [string]$Proxy = 'http://127.0.0.1:7890',   # 本机经公网自测用（本机 DNS 常访问不了 trycloudflare）
     [switch]$SkipDev,                     # 复用已在跑的 dev server
     [switch]$NoTunnel,                    # 只起 dev server（仅本机/同网）
@@ -147,7 +148,8 @@ else {
 # ---------------------------------------------------------------- 3) 生成分发链接（每组一条）
 Log '--- 分发给协助测试者的链接（每组一条、整组一次跑完；含 report= 自动回传与 rtok= 口令）---'
 foreach ($g in $Groups) {
-    $linkArgs = @('--base', $url, '--group', $g, '--platform', $Platform, '--name', $Name, '--token', $Token)
+    $linkArgs = @('--base', $url, '--group', $g, '--platform', $Platform, '--name', $Name, '--token', $Token,
+                  '--rounds', "$Rounds")
     if ($Subset) { $linkArgs += @('--subset', $Subset) }
     if ($PerScene) { $linkArgs += @('--per-scene') }
     Log ("【组 {0} / 平台 {1}】" -f $g, $Platform)
@@ -164,6 +166,7 @@ $state = [ordered]@{
     name         = $Name
     subset       = $Subset
     token        = $Token
+    rounds       = $Rounds
     anchor       = $anchor
     note         = 'quick tunnel 地址每次重启都会变：重启后必须重新分发链接，旧链接立即失效'
 }
