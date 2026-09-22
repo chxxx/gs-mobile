@@ -84,6 +84,26 @@ if ($Stop) {
     exit 0
 }
 
+# ---------------------------------------------------------------- 0.5) 参数先校验（不要起了服务才发现平台名写错）
+$KnownPlatforms = @('rtx4060', 'gen3-xweb', 'gen2-xweb', 'd9400-xweb',
+                    'gen3-chrome', 'gen2-chrome', 'd9400-chrome')
+if ($KnownPlatforms -notcontains $Platform) {
+    Write-Host ''
+    Write-Host ("✗ -Platform '{0}' 不是已登记的平台标识——本次**未启动任何服务**，可放心改好命令重跑。" -f $Platform)
+    Write-Host ('  可用值：' + ($KnownPlatforms -join '  '))
+    Write-Host '  命名规则：<机型>[-<内核>]，手机端一律加 -xweb（例：gen3-xweb / gen2-xweb / d9400-xweb）'
+    Write-Host '  新机型请先在 tools/ch7_common.py 的 PLATFORMS 里登记（落盘目录名就是它，不能随手起名）。'
+    exit 2
+}
+$KnownGroups = @('main', 'load', 'res', 'flux')
+$badGroups = @($Groups | Where-Object { $KnownGroups -notcontains $_ })
+if ($badGroups.Count -gt 0) {
+    Write-Host ''
+    Write-Host ("✗ -Groups 里有未登记的组：{0}——本次**未启动任何服务**。" -f ($badGroups -join ','))
+    Write-Host ('  可用值：' + ($KnownGroups -join '  ') + '（main=本文方法；flux=Flux-GS；load=表 7-5；res=表 7-8）')
+    exit 2
+}
+
 function Wait-Dev([int]$secs = 90) {
     for ($i = 0; $i -lt $secs; $i += 3) {
         $c = & curl.exe -sS -o NUL -w '%{http_code}' --max-time 5 "http://127.0.0.1:$Port/bench.html" 2>$null
@@ -169,6 +189,10 @@ if (-not $NoTunnel) {
     $codeF = Get-Code '/bench-flux.html'
     $codeR = Get-Code "/__ch7/report?name=selftest&token=$Token" -Post
     Log "selfcheck bench=$codeB bench_flux=$codeF report=$codeR（report 期望 200；403 = 口令不符）"
+    if ("$codeB$codeF$codeR" -notmatch '200' -and "$codeB$codeF$codeR" -match '000') {
+        Log 'ℹ 本机直连与代理都是 000：这是**本机网络出口**（DNS/代理）打不开 *.trycloudflare.com，不是隧道坏了。'
+        Log '  真实验收请以手机实测为准（§12.5）：手机上能正常加载页面 = 隧道通。'
+    }
 }
 else {
     $url = "http://127.0.0.1:$Port"
