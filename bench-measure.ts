@@ -15,7 +15,6 @@ import { perf } from "./src/utils/PerfDebug";
 import {
     CAM_FLUX,
     PROTO_FLUX,
-    camSpinDegPerFrame,
     clipInsideRatio,
     driveThroughputFrames,
     fmt,

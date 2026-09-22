@@ -36,12 +36,10 @@
  */
 import { guessChip as guessChipFrom } from "./bench-chip";
 import {
-    HOP_PAGE,
     benchResOverride,
     camSpinDegPerFrame,
     clipInsideRatio,
     driveThroughputFrames,
-    hopDelayMs,
     hopUrlFor,
     maxMatrixDiff,
     mulMat4,

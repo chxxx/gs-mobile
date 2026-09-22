@@ -1607,11 +1607,12 @@ export const ROUND_RESULT_FIELD_KEYS: readonly RoundResultFieldKey[] = [
 ];
 /**
  * **编译期闸门**（不是运行时检查）：`RoundResult` 里若有字段没登记进上面三张表，
- * `MissingResultKeys` 就不再是 `never`，下面那一行的泛型实参违反约束 `T extends never`
+ * `MissingResultKeys` 就不再是 `never`，下面那一行的泛型实参违反约束 `_T extends never`
  * → `tsc --noEmit` 直接报错，并**在错误信息里列出缺的字段名**。这就是"第五次漏登记"的拦截点。
+ * 泛型形参本身只用来承载约束、函数体不引用它，故按 eslint `varsIgnorePattern: '^_'` 命名为 `_T`。
  */
 export type MissingResultKeys = Exclude<keyof RoundResult, RoundResultFieldKey>;
-function assertResultKeysRegistered<T extends never>(): void {
+function assertResultKeysRegistered<_T extends never>(): void {
     /* 只做类型检查，运行时无动作 */
 }
 void assertResultKeysRegistered<MissingResultKeys>();
