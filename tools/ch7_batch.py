@@ -114,11 +114,23 @@ def build_snapshot():
     }
 
 
-def tasks_for(group, platforms, base, rounds=None):
+def arm_keys(group, platform, arm):
+    """表 7-5 两臂：把 scene_key 列表收敛到指定臂（`r7`/`std45`）。
+
+    ⚠ 必须收敛，否则会出现"**跑了 r7 的 URL、却按 std45 落盘**"——两臂结果互相污染。
+    """
+    keys = C.scene_keys(group, platform)
+    if group != C.GRP_LOAD or not arm:
+        return keys
+    picked = [k for k in keys if k.endswith("-" + arm)]
+    return picked or keys
+
+
+def tasks_for(group, platforms, base, rounds=None, arm=None):
     """生成 [(platform, group, scene_key, url), ...]。"""
     plan = []
     for platform in platforms:
-        for key in C.scene_keys(group, platform):
+        for key in arm_keys(group, platform, arm):
             url = C.build_url(base, group, key, platform=platform, rounds=rounds,
                               u="%s-%s-%s" % (platform, group, key))
             plan.append({"platform": platform, "group": group, "scene_key": key, "url": url})
@@ -289,15 +301,15 @@ def cmd_link(args):
     - 分片模式（`--subset` 只跑部分场景，合成**一条**链接）；flux 组很慢，建议按数据集分 3 片发。
     """
     group = args.group
-    keys = C.scene_keys(group, args.platform)
-    if not keys:
-        print("✗ 组 %s 在平台 %s 上没有场景（见协议 §4.1 分组规则）" % (group, args.platform))
-        return 2
-    subset = ",".join([s for s in args.subset.split(",") if s]) if args.subset else ""
     arm = args.arm
     if group == C.GRP_LOAD and not arm:
         arm = "r7"
         print("ℹ 表 7-5 是两臂实验：本次按 arm=%s 生成；标准臂请再跑一次 --arm std45" % arm)
+    keys = arm_keys(group, args.platform, arm)               # 收敛到指定臂，避免两臂标签错位
+    if not keys:
+        print("✗ 组 %s 在平台 %s 上没有场景（见协议 §4.1 分组规则）" % (group, args.platform))
+        return 2
+    subset = ",".join([s for s in args.subset.split(",") if s]) if args.subset else ""
     report = "/__ch7/report?name=" + args.name
     rounds = args.rounds or C.rounds_for(group)              # 0/None → 按协议
     proto_rounds = C.rounds_for(group)
@@ -344,12 +356,12 @@ def cmd_run(args):
         print("✗ 找不到 CDP 驱动器：%s" % CDP_DRIVER)
         return 2
     platform = args.platform
-    keys = C.scene_keys(args.group, platform)
-    if not keys:
-        print("✗ 组 %s 在平台 %s 上没有场景（检查协议 §4.1 的分组规则）" % (args.group, platform))
-        return 2
     if args.group == C.GRP_LOAD and not args.arm:
         print("✗ 表 7-5 是两臂实验，必须显式给 --arm r7 或 --arm std45")
+        return 2
+    keys = arm_keys(args.group, platform, args.arm)          # 收敛到指定臂，避免两臂标签错位
+    if not keys:
+        print("✗ 组 %s 在平台 %s 上没有场景（检查协议 §4.1 的分组规则）" % (args.group, platform))
         return 2
     snap = read_snapshot() or build_snapshot()
     rounds = args.rounds or C.rounds_for(args.group)
@@ -362,7 +374,7 @@ def cmd_run(args):
     print("落盘根目录 = %s" % C.RAW_ROOT)
     print("-" * 78)
     failed = []
-    for task in tasks_for(args.group, [platform], args.base, rounds=rounds):
+    for task in tasks_for(args.group, [platform], args.base, rounds=rounds, arm=args.arm):
         tmp = os.path.join(C.RAW_ROOT, "_cdp_tmp", "%s-%s.json" % (platform, task["scene_key"]))
         cmd = ["node", CDP_DRIVER, "--url=" + task["url"], "--wait=" + WAIT_SENTINEL,
                "--expr=" + EXPR_RESULT_TEXT, "--pollExpr=" + EXPR_POLL,
