@@ -157,3 +157,5 @@ __pycache__/
 _tmp_ch7probe/
 _tidy_out.txt
 
+# ---- 一次性探针资产（P2：w/o 预算剪枝 174MB，只在本机做存在性测试，不入库）----
+scenes/point_cloud_quantised_half_noprune-*.ply
