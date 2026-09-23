@@ -28,17 +28,17 @@
 
 <h2>① A1 · 骁龙 8 Gen 3（主表 13 场景）</h2>
 <div class="meta">13 个场景 × 3 轮 · 预计 6–10 分钟</div>
-<a class="run" href="/bench.html?profile=garden,bicycle,flowers,stump,treehill,room,counter,kitchen,bonsai,truck,train,drjohnson,playroom&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;cam=flux&amp;proto=flux&amp;driver=timer&amp;warmup=0&amp;cold=1&amp;u=gen3-main13-r3&amp;rtok=ch7-2026-phase4">开始 A1（Gen3 · 13 场景 ×3 轮）</a>
+<a class="run" href="/bench.html?profile=garden,bicycle,flowers,stump,treehill,room,counter,kitchen,bonsai,truck,train,drjohnson,playroom&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;cam=flux&amp;proto=flux&amp;driver=timer&amp;warmup=0&amp;cold=1&amp;u=gen3-main13-r3&amp;rtok=ch7-2026-phase4&amp;report=/__ch7/report?name=gen3-main13-r3">开始 A1（Gen3 · 13 场景 ×3 轮）</a>
 
 <h2>② A2 · 骁龙 8 Gen 3（低秩 / 标准 两臂）</h2>
 <div class="meta">garden / truck / drjohnson，各含标准 QPLY（r=45）与低秩 QPLY（r=7）· 5 轮 · 预计 6–8 分钟</div>
-<a class="run alt2" href="/bench.html?profile=garden,garden-std45,truck,truck-std45,drjohnson,drjohnson-std45&amp;rounds=5&amp;res=1600x1063&amp;frames=300&amp;cam=flux&amp;proto=flux&amp;driver=timer&amp;warmup=0&amp;cold=1&amp;u=gen3-twoarms-r5&amp;rtok=ch7-2026-phase4">开始 A2（Gen3 · 两臂 ×5 轮）</a>
+<a class="run alt2" href="/bench.html?profile=garden,garden-std45,truck,truck-std45,drjohnson,drjohnson-std45&amp;rounds=5&amp;res=1600x1063&amp;frames=300&amp;cam=flux&amp;proto=flux&amp;driver=timer&amp;warmup=0&amp;cold=1&amp;u=gen3-twoarms-r5&amp;rtok=ch7-2026-phase4&amp;report=/__ch7/report?name=gen3-twoarms-r5">开始 A2（Gen3 · 两臂 ×5 轮）</a>
 
 <h2>③ 摸底对照（<b>不填论文</b>）· 骁龙 8 Gen 3</h2>
 <div class="meta">同一台手机、同一批 truck / train 场景，三方对照：① 本文方法 ② Flux-GS 基线 ③ Flux-GS 去掉每帧两次 <code>gl.getError()</code>（消融）。每个批次预计 2–3 分钟（Flux 首帧较慢，等待属正常）。</div>
-<a class="run alt" href="/bench.html?profile=truck,train&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;cam=flux&amp;proto=flux&amp;driver=timer&amp;warmup=0&amp;cold=1&amp;u=gen3-probe-ours-tt-r3&amp;rtok=ch7-2026-phase4">③-a 本文方法（truck / train ×3 轮）</a>
-<a class="run alt" href="/bench-flux.html?profile=truck,train&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;warmup=0&amp;cold=1&amp;u=gen3-probe-flux-tt-r3&amp;rtok=ch7-2026-phase4">③-b Flux-GS 基线（truck / train ×3 轮）</a>
-<a class="run alt" href="/bench-flux.html?profile=truck,train&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;warmup=0&amp;cold=1&amp;noge=1&amp;u=gen3-probe-flux-noge-tt-r3&amp;rtok=ch7-2026-phase4">③-c Flux-GS 去 getError 消融（同上 + noge=1）</a>
+<a class="run alt" href="/bench.html?profile=truck,train&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;cam=flux&amp;proto=flux&amp;driver=timer&amp;warmup=0&amp;cold=1&amp;u=gen3-probe-ours-tt-r3&amp;rtok=ch7-2026-phase4&amp;report=/__ch7/report?name=gen3-probe-ours-tt-r3">③-a 本文方法（truck / train ×3 轮）</a>
+<a class="run alt" href="/bench-flux.html?profile=truck,train&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;warmup=0&amp;cold=1&amp;u=gen3-probe-flux-tt-r3&amp;rtok=ch7-2026-phase4&amp;report=/__ch7/report?name=gen3-probe-flux-tt-r3">③-b Flux-GS 基线（truck / train ×3 轮）</a>
+<a class="run alt" href="/bench-flux.html?profile=truck,train&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;warmup=0&amp;cold=1&amp;noge=1&amp;u=gen3-probe-flux-noge-tt-r3&amp;rtok=ch7-2026-phase4&amp;report=/__ch7/report?name=gen3-probe-flux-noge-tt-r3">③-c Flux-GS 去 getError 消融（同上 + noge=1）</a>
 
 <div class="hint">
   <b>失败处置</b>：若页面白屏、或 60 秒以上进度不动、或报错——<b>保持页面 30 秒</b>后截图，记下大概时间点并告诉我；服务端埋点日志能判定是"下载未完成"还是"下载完成后解析失败"。<br>
