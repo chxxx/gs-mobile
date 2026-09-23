@@ -35,12 +35,13 @@
 <a class="run alt2" href="/bench.html?profile=garden,garden-std45,truck,truck-std45,drjohnson,drjohnson-std45&amp;rounds=5&amp;res=1600x1063&amp;frames=300&amp;cam=flux&amp;proto=flux&amp;driver=timer&amp;warmup=0&amp;cold=1&amp;u=gen3-twoarms-r5&amp;rtok=ch7-2026-phase4&amp;report=/__ch7/report?name=gen3-twoarms-r5">开始 A2（Gen3 · 两臂 ×5 轮）</a>
 
 <h2>③ 摸底对照（<b>不填论文</b>）· 骁龙 8 Gen 3</h2>
-<div class="meta">同一台手机、同一批 truck / train 场景，三方对照：① 本文方法 ② Flux-GS 基线 ③ Flux-GS 去掉每帧两次 <code>gl.getError()</code>（消融）。每个批次预计 2–3 分钟（Flux 首帧较慢，等待属正常）。</div>
-<a class="run alt" href="/bench.html?profile=truck,train&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;cam=flux&amp;proto=flux&amp;driver=timer&amp;warmup=0&amp;cold=1&amp;u=gen3-probe-ours-tt-r3&amp;rtok=ch7-2026-phase4&amp;report=/__ch7/report?name=gen3-probe-ours-tt-r3">③-a 本文方法（truck / train ×3 轮）</a>
-<a class="run alt" href="/bench-flux.html?profile=truck,train&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;warmup=0&amp;cold=1&amp;u=gen3-probe-flux-tt-r3&amp;rtok=ch7-2026-phase4&amp;report=/__ch7/report?name=gen3-probe-flux-tt-r3">③-b Flux-GS 基线（truck / train ×3 轮）</a>
-<a class="run alt" href="/bench-flux.html?profile=truck,train&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;warmup=0&amp;cold=1&amp;noge=1&amp;u=gen3-probe-flux-noge-tt-r3&amp;rtok=ch7-2026-phase4&amp;report=/__ch7/report?name=gen3-probe-flux-noge-tt-r3">③-c Flux-GS 去 getError 消融（同上 + noge=1）</a>
-<a class="run alt" href="/bench.html?profile=r3dgs-bicycle,r3dgs-bonsai,r3dgs-counter,r3dgs-kitchen,r3dgs-truck&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;cam=flux&amp;proto=flux&amp;driver=timer&amp;warmup=0&amp;cold=1&amp;u=gen3-probe-r3dgs-r3&amp;rtok=ch7-2026-phase4&amp;report=/__ch7/report?name=gen3-probe-r3dgs-r3">③-d reduced-3DGS High 档（5 场景 ×3 轮，摸底）</a>
-<div class="meta">③-d 说明：这是论文对比方法之一（reduced-3DGS）的量化资产在 Gen3 上的实测，点数为 $0.50$–$2.41$M（比我们大），体量也大（合计约 110 MB），下载与首帧会更慢；若某场景加载失败请截图告诉我（该资产格式与我们的 QPLY 同源，但首次在真机上跑，需要验证）。</div>
+<div class="meta">同一台手机、同协议，四方对照：① 本文方法 ② Flux-GS 基线（13 场景）③ Flux-GS 去掉每帧两次 <code>gl.getError()</code>（消融，truck/train）④ reduced-3DGS High 档。Flux 首帧较慢（要先解码模型），等待属正常。</div>
+<a class="run alt" href="/bench.html?profile=truck,train&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;cam=flux&amp;proto=flux&amp;driver=timer&amp;warmup=0&amp;cold=1&amp;u=gen3-probe-ours-tt-r3&amp;rtok=ch7-2026-phase4&amp;report=/__ch7/report?name=gen3-probe-ours-tt-r3">③-a 本文方法（truck / train ×3 轮 · 约 2–3 分钟）</a>
+<a class="run alt" href="/bench-flux.html?profile=garden,bicycle,flowers,stump,treehill,room,counter,kitchen,bonsai,truck,train,drjohnson,playroom&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;warmup=0&amp;cold=1&amp;u=gen3-probe-flux-all13-r3&amp;rtok=ch7-2026-phase4&amp;report=/__ch7/report?name=gen3-probe-flux-all13-r3">③-b Flux-GS 基线（13 场景 ×3 轮 · 约 8–12 分钟）</a>
+<a class="run alt" href="/bench-flux.html?profile=truck,train&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;warmup=0&amp;cold=1&amp;noge=1&amp;u=gen3-probe-flux-noge-tt-r3&amp;rtok=ch7-2026-phase4&amp;report=/__ch7/report?name=gen3-probe-flux-noge-tt-r3">③-c Flux-GS 去 getError 消融（truck / train ×3 轮 · 约 2–3 分钟）</a>
+<a class="run alt" href="/bench.html?profile=r3dgs-bicycle,r3dgs-bonsai,r3dgs-counter,r3dgs-kitchen,r3dgs-truck&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;cam=flux&amp;proto=flux&amp;driver=timer&amp;warmup=0&amp;cold=1&amp;u=gen3-probe-r3dgs-r3&amp;rtok=ch7-2026-phase4&amp;report=/__ch7/report?name=gen3-probe-r3dgs-r3">③-d reduced-3DGS High 档（5 场景 ×3 轮 · 约 3–5 分钟）</a>
+<div class="meta">③ 组的对照关系：**本文 vs Flux**（③-a + ③-b 的 T&amp;T 子集）、**Flux vs Flux 去 getError**（③-b 的 T&amp;T 子集 + ③-c，单因素）、**本文 vs reduced-3DGS**（③-d）。</div>
+<div class="meta">③-d 说明：reduced-3DGS 点数为 $0.50$–$2.41$M（比我们大），体量合计约 110 MB，下载与首帧会更慢；若某场景加载失败请截图告诉我（其格式与我们的 QPLY 同源，但首次在真机上跑，需验证）。</div>
 
 <div class="hint">
   <b>失败处置</b>：若页面白屏、或 60 秒以上进度不动、或报错——<b>保持页面 30 秒</b>后截图，记下大概时间点并告诉我；服务端埋点日志能判定是"下载未完成"还是"下载完成后解析失败"。<br>
