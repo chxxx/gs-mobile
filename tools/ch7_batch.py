@@ -127,12 +127,12 @@ def arm_keys(group, platform, arm):
     return picked or keys
 
 
-def tasks_for(group, platforms, base, rounds=None, arm=None):
-    """生成 [(platform, group, scene_key, url), ...]。"""
+def tasks_for(group, platforms, base, rounds=None, arm=None, subset=None):
+    """生成 [(platform, group, scene_key, url), ...]。`subset` 为显式 profile（基线/探针臂用）。"""
     plan = []
     for platform in platforms:
         for key in arm_keys(group, platform, arm):
-            url = C.build_url(base, group, key, platform=platform, rounds=rounds,
+            url = C.build_url(base, group, key, platform=platform, rounds=rounds, subset=subset,
                               u="%s-%s-%s" % (platform, group, key))
             plan.append({"platform": platform, "group": group, "scene_key": key, "url": url})
     return plan
@@ -409,6 +409,10 @@ def cmd_run(args):
     if not keys:
         print("✗ 组 %s 在平台 %s 上没有场景（检查协议 §4.1 的分组规则）" % (args.group, platform))
         return 2
+    override = (getattr(args, "profile_override", "") or "").strip()
+    if override:
+        print("ℹ --profile-override=%s：本次按页面清单里的该分组/场景 id 取场景（忽略本章的 scene_key 列表）"
+              % override)
     snap = read_snapshot() or build_snapshot()
     rounds = args.rounds or C.rounds_for(args.group)
     proto_rounds = C.rounds_for(args.group)
@@ -420,8 +424,9 @@ def cmd_run(args):
     print("落盘根目录 = %s" % C.RAW_ROOT)
     print("-" * 78)
     failed = []
-    for task in tasks_for(args.group, [platform], args.base, rounds=rounds, arm=args.arm):
-        tmp = os.path.join(C.RAW_ROOT, "_cdp_tmp", "%s-%s.json" % (platform, task["scene_key"]))
+    for task in tasks_for(args.group, [platform], args.base, rounds=rounds, arm=args.arm,
+                          subset=override or None):
+        tmp = os.path.join(args.root, "_cdp_tmp", "%s-%s.json" % (platform, task["scene_key"]))
         cmd = ["node", CDP_DRIVER, "--url=" + task["url"], "--wait=" + WAIT_SENTINEL,
                "--expr=" + EXPR_RESULT_TEXT, "--pollExpr=" + EXPR_POLL,
                "--out=" + tmp, "--timeout=%d" % args.timeout, "--port=%d" % args.port]
@@ -441,7 +446,8 @@ def cmd_run(args):
             failed.append(task["scene_key"] + "：结果文本为空或未达哨兵（matched=%s）" % obj.get("matched"))
             print("      ✗ 页面未给出完成的结果文本（matched=%s，见 %s）" % (obj.get("matched"), tmp))
             continue
-        written, counts = ingest_text(text, platform, args.group, arm=args.arm, tag="run-" + task["scene_key"])
+        written, counts = ingest_text(text, platform, args.group, arm=args.arm,
+                                      tag="run-" + task["scene_key"], root=args.root)
         print("      ✓ 落盘 %d 条：%s" % (written, ", ".join("%s×%d" % (k, v) for k, v in sorted(counts.items()))))
     print("-" * 78)
     if args.yes:
@@ -549,6 +555,8 @@ def build_parser():
     p2.add_argument("--port", type=int, default=9333)
     p2.add_argument("--rounds", type=int, default=C.FAST_ROUNDS,
                     help="每场景轮次（默认 %d = 快速验证；正式采集用 3，load 组 5）" % C.FAST_ROUNDS)
+    p2.add_argument("--profile-override", default="",
+                    help="直接用页面清单里的分组/场景 id 当 profile（如 garden-noprune、reduced3dgs）")
     p2.add_argument("--yes", action="store_true", help="确认真跑")
     p2.add_argument("--root", default=C.RAW_ROOT)
     p2.add_argument("--manifest", default=C.MANIFEST)
