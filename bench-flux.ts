@@ -44,7 +44,6 @@ import {
     maxMatrixDiff,
     mulMat4,
     orbitViewMatrix,
-    percentile,
     resolutionMode,
     resolveSpinSpec,
     // [DIAG-EXPERIMENT-1] 分段计时的汇总与结果字段：**两臂共用**同一份实现（本文臂 3 段 / 本臂 5 段）

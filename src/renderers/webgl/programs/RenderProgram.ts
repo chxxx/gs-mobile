@@ -48,7 +48,6 @@ export function clearDiagFrameTimings(): void {
     diagFrameTimingSamples.length = 0;
 }
 
-
 const vertexShaderSource = /* glsl */ `#version 300 es
 precision highp float;
 precision highp int;

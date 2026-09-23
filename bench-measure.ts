@@ -33,7 +33,6 @@ import {
     param,
     positionsBounds,
     resolveSpinSpec,
-    segTimingRoundTags,
     spinPeakDegPerFrame,
     spinPivotParam,
     spinPose,
@@ -43,7 +42,6 @@ import {
     summarizeSweep,
     sweepSampleCount,
     throughputDriver,
-    throughputPercentileRoundTags,
 } from "./bench-shared";
 import type {
     DriveThroughputStats,
