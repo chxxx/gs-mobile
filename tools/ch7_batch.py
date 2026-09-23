@@ -350,23 +350,27 @@ def cmd_link(args):
         print("✗ 组 %s 在平台 %s 上没有场景（见协议 §4.1 分组规则）" % (group, args.platform))
         return 2
     subset = ",".join([s for s in args.subset.split(",") if s]) if args.subset else ""
+    override = (getattr(args, "profile_override", "") or "").strip()   # 非本章臂（如 reduced3dgs、消融臂）
+    profile_arg = override or subset
     report = "/__ch7/report?name=" + args.name
     rounds = args.rounds or C.rounds_for(group)              # 0/None → 按协议
     proto_rounds = C.rounds_for(group)
     fast = rounds < proto_rounds
     n_scenes = len(subset.split(",")) if subset else len(keys)
-    print("平台 = %-11s 内核 = %-6s 组 = %-4s 轮次 = %d%s   场景 = %d 个/条"
+    print("平台 = %-11s 内核 = %-6s 组 = %-4s 轮次 = %d%s"
           % (args.platform, C.platform_kernel(args.platform), group, rounds,
-             ("（快速验证；协议要求 %d）" % proto_rounds) if fast else "", n_scenes))
+             ("（快速验证；协议要求 %d）" % proto_rounds) if fast else ""))
+    print("场景 = %s" % (("按 profile-override 取 `%s`（页面清单里的分组关键字或 id 列表）" % override)
+                       if override else ("%d 个/条" % n_scenes)))
     print("回传端点 = %s   回传口令 rtok = %s" % (report, args.token))
     if fast:
         print("⚠ rounds=%d < 协议要求的 %d：本批只用于【跑通链路 / 看趋势】，不得进表；"
               "正式采集请去掉 --rounds（或写 --rounds %d）" % (rounds, proto_rounds, proto_rounds))
     print("-" * 100)
     print(C.build_url(args.base, group, keys[0], platform=args.platform, report=report,
-                      rtok=args.token, subset=subset, rounds=rounds, hopms=args.hopms or None,
-                      u="%s-%s-%s" % (args.name, args.platform, group)))
-    if group == C.GRP_FLUX and not subset:
+                      rtok=args.token, subset=profile_arg, rounds=rounds, hopms=args.hopms or None,
+                      u="%s-%s-%s" % (args.name, args.platform, override or group)))
+    if group == C.GRP_FLUX and not profile_arg:
         print("ℹ Flux-GS 很慢：建议改成分 3 片发（--subset bicycle,flowers,garden,stump,treehill,room,counter,kitchen,bonsai"
               " / --subset truck,train / --subset drjohnson,playroom）")
     if args.per_scene:
@@ -580,6 +584,9 @@ def build_parser():
     p5.add_argument("--name", default="helper", help="测试者标识（进 u= 与回传文件名）")
     p5.add_argument("--token", default=os.environ.get("CH7_REPORT_TOKEN", "ch7-2026-phase4"))
     p5.add_argument("--subset", default="", help="只跑这些场景（逗号分隔，合成一条链接）")
+    p5.add_argument("--profile-override", default="",
+                    help="直接用页面清单里的分组关键字/场景 id 列表当 profile（如 reduced3dgs），"
+                         "用于本章之外的臂（reduced-3DGS、消融臂）；给出后忽略 --subset 的分片逻辑")
     p5.add_argument("--per-scene", action="store_true", help="额外逐场景列出链接（一般不用）")
     p5.add_argument("--rounds", type=int, default=C.FAST_ROUNDS,
                     help="每场景轮次（默认 %d = 快速验证；正式采集用 3，load 组 5）" % C.FAST_ROUNDS)

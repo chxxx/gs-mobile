@@ -1,6 +1,6 @@
 {
     "version": 1,
-    "note": "Bench page scene manifest. 'demo:true' entries appear in the viewer dropdown. File paths must stay same-origin under ./scenes/.",
+    "note": "Bench page scene manifest. 'demo:true' entries appear in the viewer dropdown. File paths must stay same-origin under ./scenes/. `*-std45` 为表 7-5 标准臂（朴素 45 维量化），仅用于两臂对照，不进 demo 下拉。",
     "scenes": [
         {
             "id": "garden",
@@ -95,6 +95,30 @@
             "file": "scenes/point_cloud_quantised_half_r7-playroom.ply",
             "dataset": "db",
             "demo": false
+        },
+        {
+            "id": "garden-std45",
+            "name": "Garden (r45 std QPLY)",
+            "file": "scenes/point_cloud_quantised_half_std45-garden.ply",
+            "dataset": "mip360",
+            "demo": false,
+            "points": 610000
+        },
+        {
+            "id": "truck-std45",
+            "name": "Truck (r45 std QPLY)",
+            "file": "scenes/point_cloud_quantised_half_std45-truck.ply",
+            "dataset": "tnt",
+            "demo": false,
+            "points": 273169
+        },
+        {
+            "id": "drjohnson-std45",
+            "name": "DrJohnson (r45 std QPLY)",
+            "file": "scenes/point_cloud_quantised_half_std45-drjohnson.ply",
+            "dataset": "db",
+            "demo": false,
+            "points": 432000
         }
     ]
 }

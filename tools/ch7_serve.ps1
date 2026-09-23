@@ -27,6 +27,8 @@ param(
     [string]$Token = $env:CH7_REPORT_TOKEN,
     [int]$Port = 5173,
     [int]$Rounds = 1,                     # 0 = 按协议轮次；默认 1 = 快速验证（现场太慢，见协议 §4.2）
+    [ValidateSet('', 'r7', 'std45')][string]$Arm = '',   # 仅表 7-5：两臂之一（std45 = 标准 QPLY）
+    [string]$ProfileOverride = '',        # 非本章臂：直接用页面清单的分组/场景 id（如 reduced3dgs）
     [string]$Proxy = 'http://127.0.0.1:7890',   # 本机经公网自测用（本机 DNS 常访问不了 trycloudflare）
     [switch]$SkipDev,                     # 复用已在跑的 dev server
     [switch]$NoTunnel,                    # 只起 dev server（仅本机/同网）
@@ -205,6 +207,8 @@ foreach ($g in $Groups) {
     $linkArgs = @('--base', $url, '--group', $g, '--platform', $Platform, '--name', $Name, '--token', $Token,
                   '--rounds', "$Rounds")
     if ($Subset) { $linkArgs += @('--subset', $Subset) }
+    if ($Arm) { $linkArgs += @('--arm', $Arm) }
+    if ($ProfileOverride) { $linkArgs += @('--profile-override', $ProfileOverride) }
     if ($PerScene) { $linkArgs += @('--per-scene') }
     Log ("【组 {0} / 平台 {1}】" -f $g, $Platform)
     & python (Join-Path $PSScriptRoot 'ch7_batch.py') link @linkArgs 2>&1 | ForEach-Object { Log $_ }
@@ -219,6 +223,8 @@ $state = [ordered]@{
     platform     = $Platform
     name         = $Name
     subset       = $Subset
+    arm          = $Arm
+    profile_override = $ProfileOverride
     token        = $Token
     rounds       = $Rounds
     anchor       = $anchor
