@@ -39,6 +39,8 @@
 <a class="run alt" href="/bench.html?profile=truck,train&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;cam=flux&amp;proto=flux&amp;driver=timer&amp;warmup=0&amp;cold=1&amp;u=gen3-probe-ours-tt-r3&amp;rtok=ch7-2026-phase4&amp;report=/__ch7/report?name=gen3-probe-ours-tt-r3">③-a 本文方法（truck / train ×3 轮）</a>
 <a class="run alt" href="/bench-flux.html?profile=truck,train&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;warmup=0&amp;cold=1&amp;u=gen3-probe-flux-tt-r3&amp;rtok=ch7-2026-phase4&amp;report=/__ch7/report?name=gen3-probe-flux-tt-r3">③-b Flux-GS 基线（truck / train ×3 轮）</a>
 <a class="run alt" href="/bench-flux.html?profile=truck,train&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;warmup=0&amp;cold=1&amp;noge=1&amp;u=gen3-probe-flux-noge-tt-r3&amp;rtok=ch7-2026-phase4&amp;report=/__ch7/report?name=gen3-probe-flux-noge-tt-r3">③-c Flux-GS 去 getError 消融（同上 + noge=1）</a>
+<a class="run alt" href="/bench.html?profile=r3dgs-bicycle,r3dgs-bonsai,r3dgs-counter,r3dgs-kitchen,r3dgs-truck&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;cam=flux&amp;proto=flux&amp;driver=timer&amp;warmup=0&amp;cold=1&amp;u=gen3-probe-r3dgs-r3&amp;rtok=ch7-2026-phase4&amp;report=/__ch7/report?name=gen3-probe-r3dgs-r3">③-d reduced-3DGS High 档（5 场景 ×3 轮，摸底）</a>
+<div class="meta">③-d 说明：这是论文对比方法之一（reduced-3DGS）的量化资产在 Gen3 上的实测，点数为 $0.50$–$2.41$M（比我们大），体量也大（合计约 110 MB），下载与首帧会更慢；若某场景加载失败请截图告诉我（该资产格式与我们的 QPLY 同源，但首次在真机上跑，需要验证）。</div>
 
 <div class="hint">
   <b>失败处置</b>：若页面白屏、或 60 秒以上进度不动、或报错——<b>保持页面 30 秒</b>后截图，记下大概时间点并告诉我；服务端埋点日志能判定是"下载未完成"还是"下载完成后解析失败"。<br>
