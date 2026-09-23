@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>第七章真机测试入口</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; padding: 16px 14px 40px; font: 16px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 20px; margin: 4px 0 2px; }
+  h2 { font-size: 17px; margin: 22px 0 6px; }
+  .origin { font-size: 12px; opacity: .65; word-break: break-all; }
+  .meta { font-size: 13px; opacity: .8; margin: 4px 0 10px; }
+  a.run { display: block; padding: 16px 14px; margin: 10px 0 4px; border-radius: 12px;
+          background: #2f6df6; color: #fff; text-decoration: none; font-size: 18px; font-weight: 600;
+          text-align: center; }
+  a.run.alt { background: #12805c; }
+  a.run.alt2 { background: #b3521a; }
+  .hint { font-size: 13px; opacity: .8; background: rgba(127,127,127,.12); padding: 10px 12px;
+          border-radius: 10px; margin-top: 18px; }
+  .done { font-size: 13px; opacity: .7; }
+</style>
+</head>
+<body>
+<h1>第七章真机测试入口</h1>
+<div class="origin" id="origin"></div>
+<div class="meta">依次点下面三个按钮，<b>每批期间保持页面在前台</b>（不要锁屏、不要切走）。跑完页面会显示结果并自动回传。</div>
+
+<h2>① P2 · 骁龙 8 Gen 2</h2>
+<div class="meta">4 个场景 × 3 轮（truck / train / drjohnson / playroom）· 预计 2–3 分钟</div>
+<a class="run alt" href="/bench.html?profile=truck,train,drjohnson,playroom&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;cam=flux&amp;proto=flux&amp;driver=timer&amp;warmup=0&amp;cold=1&amp;u=gen2-supp4-r3&amp;rtok=ch7-2026-phase4">开始 P2（Gen2）</a>
+
+<h2>② A1 · 骁龙 8 Gen 3（主表 13 场景）</h2>
+<div class="meta">13 个场景 × 3 轮 · 预计 6–10 分钟</div>
+<a class="run" href="/bench.html?profile=garden,bicycle,flowers,stump,treehill,room,counter,kitchen,bonsai,truck,train,drjohnson,playroom&amp;rounds=3&amp;res=1600x1063&amp;frames=300&amp;cam=flux&amp;proto=flux&amp;driver=timer&amp;warmup=0&amp;cold=1&amp;u=gen3-main13-r3&amp;rtok=ch7-2026-phase4">开始 A1（Gen3 · 13 场景 ×3 轮）</a>
+
+<h2>③ A2 · 骁龙 8 Gen 3（低秩 / 标准 两臂）</h2>
+<div class="meta">garden / truck / drjohnson，各含标准 QPLY（r=45）与低秩 QPLY（r=7）· 5 轮 · 预计 6–8 分钟</div>
+<a class="run alt2" href="/bench.html?profile=garden,garden-std45,truck,truck-std45,drjohnson,drjohnson-std45&amp;rounds=5&amp;res=1600x1063&amp;frames=300&amp;cam=flux&amp;proto=flux&amp;driver=timer&amp;warmup=0&amp;cold=1&amp;u=gen3-twoarms-r5&amp;rtok=ch7-2026-phase4">开始 A2（Gen3 · 两臂 ×5 轮）</a>
+
+<div class="hint">
+  <b>失败处置</b>：若页面白屏、或 60 秒以上进度不动、或报错——<b>保持页面 30 秒</b>后截图，记下大概时间点并告诉我；服务端埋点日志能判定是"下载未完成"还是"下载完成后解析失败"。<br>
+  <b>建议</b>：插着电跑；开始每批前先把微信里其它页面关掉，避免后台占用。
+</div>
+<div class="done" id="done"></div>
+<script>
+  document.getElementById('origin').textContent = '当前地址：' + location.origin +
+    (location.hostname.endsWith('trycloudflare.com') ? '（公网隧道）' : '（本机/局域网）');
+  document.getElementById('done').textContent = '页面加载时间：' + new Date().toLocaleString();
+</script>
+</body>
+</html>
