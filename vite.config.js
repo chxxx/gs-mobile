@@ -134,9 +134,53 @@ function ch7ReportPlugin() {
   };
 }
 
+// ---------------------------------------------------------------- ch7 静态请求埋点（2026-09-23 追加）
+/**
+ * 为什么需要：真机测试出现过"页面白屏、无结果回传"的现象，而 vite dev server 默认不记录静态请求，
+ * 事后无法区分"模型文件根本没下载完"与"下载完成后解析/上传阶段失败"（见 7.9 节探针记录）。
+ * 本中间件只对 `*.ply` 请求在响应结束时打一行：状态码、实际写出的字节数、耗时。
+ *   - 字节数是**写出量**（经过 gzip/brotli 或 throttled 管道后），因此可与磁盘字节数对照判断是否传输完整；
+ *   - 同时落盘到 raw/_probe/ply_requests.log，方便真机测试失败后离线回溯（stdout 会随终端滚掉）。
+ * 只在 `npm run dev` 下存在；不影响 build 产物，也不改变任何请求行为（仅挂 res 事件）。
+ */
+const CH7_PLY_LOG = resolve(__dirname, '../thesis_project/data/ch7_measurements/raw/_probe/ply_requests.log');
+function ch7PlyLogPlugin() {
+  return {
+    name: 'configure-ch7-ply-log',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if (!req.url || !/\.ply(\?|$)/.test(req.url)) return next();
+        const t0 = Date.now();
+        let sent = 0;
+        const write = res.write.bind(res);
+        const end = res.end.bind(res);
+        res.write = (chunk, ...rest) => {
+          if (chunk) sent += chunk.length;
+          return write(chunk, ...rest);
+        };
+        res.end = (chunk, ...rest) => {
+          if (chunk) sent += chunk.length;
+          return end(chunk, ...rest);
+        };
+        res.on('finish', () => {
+          const line = `[ch7-ply] ${ch7Stamp()} ${req.method} ${req.url} → ${res.statusCode} 写出 ${sent} B 耗时 ${Date.now() - t0} ms`;
+          console.log(line);
+          try {
+            fs.appendFileSync(CH7_PLY_LOG, line + '\n');
+          } catch {
+            /* 日志写不进去不影响请求本身 */
+          }
+        });
+        next();
+      });
+    },
+  };
+}
+
 export default defineConfig(({ command }) => ({
   plugins: [
     ch7ReportPlugin(),
+    ch7PlyLogPlugin(),
     dts(),
     viteStaticCopy({
       targets: [
