@@ -119,14 +119,6 @@
             "dataset": "db",
             "demo": false,
             "points": 432000
-        },
-        {
-            "id": "garden-noprune",
-            "name": "Garden (w/o budget prune, r7 quant)",
-            "file": "scenes/point_cloud_quantised_half_noprune-garden.ply",
-            "dataset": "mip360",
-            "demo": false,
-            "points": 7264322
         }
     ]
 }
