@@ -31,7 +31,7 @@
     },
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/YOUR_USERNAME/splat-shq.js.git"
+        "url": "git+https://github.com/chxxx/gs-mobile.git"
     },
     "keywords": [
         "splat-shq",
@@ -44,12 +44,12 @@
         "3d",
         "webgl2"
     ],
-    "author": "YOUR_NAME",
+    "author": "chxxx",
     "license": "MIT",
     "bugs": {
-        "url": "https://github.com/YOUR_USERNAME/splat-shq.js/issues"
+        "url": "https://github.com/chxxx/gs-mobile/issues"
     },
-    "homepage": "https://github.com/YOUR_USERNAME/splat-shq.js#readme",
+    "homepage": "https://chxxx.github.io/gs-mobile/",
     "devDependencies": {
         "@types/compression": "^1.8.1",
         "@types/node": "^24.0.13",

@@ -15,8 +15,8 @@
 | 源码分支 | `cleanup/resume-prep`（当前开发分支）/ `main` |
 | 自动部署 | `.github/workflows/deploy-pages.yml`：push → `npm ci` → `npm run site:build` → 把 `site-dist/` 强推为 `pages` 的一次性提交 |
 | 站点构建配置 | `vite.site.config.js`（`base: './'`，产物 `site-dist/`，静态复制 `scenes/`、`scenes.json` 与各 bench 清单） |
-| 演示页 JS 包 | 线上：`assets/index-DM7cq5Xl.js`（11 kB / gzip 4.7 kB） |
-| 本地最新构建 | `assets/index-DNw9vmHu.js`（含第 4 节的 `?scene=` 直达参数，**尚未部署**） |
+| 演示页 JS 包 | `assets/index-DNw9vmHu.js`（11 kB / gzip 4.7 kB）；本地 `npm run site:build` 产物哈希与之**完全一致** |
+| 最近一次部署 | commit `ea3e4f1`（`demo: add ?scene= deep-link preset …`）→ 工作流 run #26 成功后，线上即引用该包 |
 | 场景清单 | `scenes.json`（3 个 r7 低秩 QPLY 场景） |
 
 ### 场景文件体积（决定首帧快慢的直接因素）
@@ -43,17 +43,20 @@
 | 3 | 本地构建冒烟 · `?scene=truck` 直达 | Truck 6.3 MB | 0.220 s | 0.025 s | 0.9907 / 0.3592 | 42.72 |
 | 4 | 线上 · 桌面 · Truck | Truck 6.3 MB | 2.987 s | 2.26 s | 0.9907 / 0.3592 | 42.72 |
 | 5 | 本地构建 · 下拉框选 Truck（脚本重构后的回归） | Truck 6.3 MB | 0.237 s | 0.075 s | 0.9907 / 0.3592 | 42.72 |
+| 6 | **线上 · `?scene=truck` 直达（部署完成后复验）** | Truck 6.3 MB | 2.378 s | 2.20 s | 0.9907 / 0.3592 | 42.72 |
 
 原始报告与截图：`_verify/live-desktop.json`、`_verify/live-mobile.json`、`_verify/live-desktop-truck.json`、
-`_verify/local-scene-param.json`、`_verify/local-dropdown.json` 及对应 `*-after-drag.png`（`_verify/` 目录不入库）。
+`_verify/local-scene-param.json`、`_verify/local-dropdown.json`、`_verify/live-scene-param.json`
+及对应 `*-after-drag.png`（`_verify/` 目录不入库）。
 
 > 运行 #5 是给 `tools/verify_demo.mjs` 新增 `--serve` / `--no-select` 之后，对"下拉框选场景"这条原路径的回归验证：
 > 数字与 #3 完全一致（同一场景、同一机位），说明本次改动没有影响原有行为。
-> 运行 #4 的 `resourceTimings` 里仍是线上包 `index-DM7cq5Xl.js`，再次确认 `?scene=` 版本**尚未部署**。
+> 运行 #6 是**部署完成后**对线上直达链接的复验：`autoSelectedFromUrl: true`、控制台
+> `[scene] ?scene= 预选：Truck (r7 QPLY)`、`resourceTimings` 里已是新包 `index-DNw9vmHu.js`。
 
 ### 结论
 
-- **能不能跑**：五次运行 WebGL2 均可用（`ANGLE (NVIDIA …)`）；线上桌面与手机模拟都渲染出内容——非黑像素占比 ≈ 99%，
+- **能不能跑**：六次运行 WebGL2 均可用（`ANGLE (NVIDIA …)`）；线上桌面与手机模拟都渲染出内容——非黑像素占比 ≈ 99%，
   不存在黑屏或几何爆炸。
 - **能不能交互**：拖动（桌面鼠标 / 手机触摸）后画面灰度签名差异 31~43，远大于"几乎静止"的判据（见第 3 节），
   OrbitControls 正常。
@@ -99,7 +102,7 @@
 
 ---
 
-## 4. `?scene=` 直达链接（已实现，待随下次部署生效）
+## 4. `?scene=` 直达链接（已上线）
 
 `demo.ts` 的 `resolvePresetScene()` 支持用 URL 参数直接打开某个场景；**不带参数时行为完全不变**
 （访客仍需自己在下拉框选场景，页面不会预先下载任何模型）。
@@ -118,9 +121,9 @@
 https://chxxx.github.io/gs-mobile/?scene=truck
 ```
 
-> 该参数在**本地已实现并验证**（第 2 节运行 #3，控制台输出 `[scene] ?scene= 预选：Truck (r7 QPLY)`）；
-> 线上目前仍是 `index-DM7cq5Xl.js`（不含该参数），需要 `git push github cleanup/resume-prep` 重新部署后才生效。
-> 匹配失败时不会报错，只是回退成"不预选"。
+> 该参数**已随 commit `ea3e4f1` 部署到线上**，并在部署完成后用运行 #6 复验通过
+> （`autoSelectedFromUrl: true` + 控制台 `[scene] ?scene= 预选：Truck (r7 QPLY)`）。
+> 匹配失败时不会报错，只是回退成"不预选"（缺省行为与加参数前完全一致）。
 
 ---
 

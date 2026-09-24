@@ -9,7 +9,9 @@
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![BAPQ](https://img.shields.io/badge/Part%20of-BAPQ-purple)](https://gitee.com/chxxx/Plasticity-Pruning-GS)
 
-[**English README**](README.md) · [**BAPQ 主仓库**](https://gitee.com/chxxx/Plasticity-Pruning-GS)
+**▶️ [在线 Demo —— 点开即看，手机浏览器同样可玩](https://chxxx.github.io/gs-mobile/?scene=truck)**
+
+[**English README**](README.md) · [**在线 Demo**](https://chxxx.github.io/gs-mobile/?scene=truck) · [**线上验证记录**](docs/DEPLOYMENT.md) · [**BAPQ 主仓库**](https://gitee.com/chxxx/Plasticity-Pruning-GS)
 
 </div>
 
@@ -28,13 +30,45 @@
 - **低秩 QPLY 加载**：共享基低秩重建 + CPU 端并行解码（Web Worker），加载期一次完成，不进入逐帧渲染路径；
 - **单一 WebGL2 Shader 管线**：同时处理标准 SH 与自适应阶数 QPLY；
 - **半精度打包工具**：紧凑的 SH 纹理存储（`unpackHalf2x16`）；
-- **丰富示例**：原生 JS、文件拖拽加载、PLY 转换、FPS 相机控制、场景编辑。
+- **加载与渲染路径零神经网络推理**：不需要 MLP，也不需要 WebGPU；
+- **丰富示例**：原生 JS、文件拖拽加载、PLY 转换、FPS 相机控制、场景编辑等 9 个示例工程。
+
+---
+
+## 2. 🌐 在线 Demo 与线上验证
+
+渲染器以 **GitHub Pages 静态站点**的形式公开部署（由本仓库的 `index.html` + `demo.ts` 经 `vite.site.config.js` 构建）：
+
+| 链接 | 打开后是什么 |
+| ---- | ------------ |
+| <https://chxxx.github.io/gs-mobile/> | 场景选择页 —— **不选场景就不会下载任何模型** |
+| <https://chxxx.github.io/gs-mobile/?scene=truck> | 直达链接：自动加载 **Truck**（最小场景，6.3 MB） |
+| <https://chxxx.github.io/gs-mobile/?scene=garden> | 直达链接：自动加载 **Garden** |
+| <https://chxxx.github.io/gs-mobile/?scene=2> | 按序号直达（1 起算，不含占位项） |
+
+`?scene=` 支持文件路径、显示名子串、1 起序号或完整 URL（`0` / `off` 表示关闭）；**不带该参数时行为与以前完全一致**（仍需手动选择）。
+
+线上实测（**2026-09-24**，由 [`tools/verify_demo.mjs`](tools/verify_demo.mjs) 自动完成：真实浏览器打开线上页面、模拟用户操作、抓取全部网络请求、截图后做像素统计）：
+
+| 环境 | 场景 | 首帧 | `.ply` 下载 | 交互证据 |
+| ---- | ---- | ---: | ----------: | -------: |
+| 线上 · 桌面 | DrJohnson（9.9 MB） | 10.65 s | 10.42 s | 拖动 Δ = 31.1 |
+| 线上 · 手机模拟（390×844，DPR 3） | Truck（6.3 MB） | 2.40 s | 2.24 s | 触摸 Δ = 41.3 |
+| 线上 · `?scene=truck` 直达 | Truck（6.3 MB） | 2.38 s | 2.20 s | 拖动 Δ = 42.7 |
+| 本地生产构建（`npm run site:build`） | Truck（6.3 MB） | 0.22 s | 0.03 s | 拖动 Δ = 42.7 |
+
+- 每次运行 WebGL2 均可用；截图非黑像素占比 ≈ 99% → **没有黑屏，也没有几何爆炸**；
+- 首帧 ≈ 下载耗时 + 约 0.15 s 解码：真实网络下**模型字节数才是瓶颈**，这正是 BAPQ 压缩要解决的问题；
+- Δ = 拖动前后 32×18 灰度签名的平均绝对差（数值大即"相机真的动了"）；
+- 原始报告、截图与复验命令见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
+
+> 验证脚本里的 FPS 数字来自桌面独显，**不代表真机性能**，请勿当作结论引用。
 
 ---
 
 
 
-## 2. 🚀 快速开始
+## 3. 🚀 快速开始
 
 ```bash
 npm install
@@ -78,7 +112,7 @@ await SPLAT.PLYLoader.LoadAsync("path/to/point_cloud_quantised_half.ply", scene)
 
 ---
 
-## 3. 🖥️ 示例
+## 4. 🖥️ 示例
 
 | 示例 | 说明 |
 |---|---|
@@ -103,22 +137,33 @@ npm run dev
 ---
 
 
-## 4. 🛠️ 构建
+## 5. 🛠️ 构建与部署
 
 ```bash
-# 构建 WASM 工具与库
+# 构建 WASM 工具与库（产出 dist/）
 npm run build
+
+# 本仓库自带 viewer 的本地开发服务器（index.html + demo.ts）
+npm run dev
+
+# 构建可部署的静态站点到 site-dist/，并本地预览
+npm run site:build
+npm run site:preview
 
 # 代码检查与格式化
 npm run lint
 npm run format
 ```
 
+> 推到开发分支即自动重建并重新发布线上站点（`.github/workflows/deploy-pages.yml`：
+> `npm ci` → `npm run site:build` → 把 `site-dist/` 强推为 `pages` 分支）。
+> 链路细节见 [部署使用说明.md](部署使用说明.md)，验证记录见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+
 ---
 
-## 5. 📋 技术说明
+## 6. 📋 技术说明
 
-### 5.1 SH 纹理布局
+### 6.1 SH 纹理布局
 
 标准 PLY 与 QPLY 共用同一套 SH 纹理格式：
 
@@ -126,7 +171,7 @@ npm run format
 - 每个纹素通过 `unpackHalf2x16` 打包两个半浮点系数；
 - 单个 `ivec3 u_bandIndex` uniform 标记阶数边界，用于自适应 QPLY 渲染。
 
-### 5.2 QPLY 解码器
+### 6.2 QPLY 解码器
 
 `src/loaders/QPLYLoaderUtils.ts` 实现：
 
@@ -135,7 +180,7 @@ npm run format
 - 尺度、旋转、DC 特征、不透明度与 rest SH 系数的码本查找；
 - 自适应阶数处理（0 阶顶点跳过 SH 纹理分配）。
 
-### 5.3 低秩 QPLY 重建
+### 6.3 低秩 QPLY 重建
 
 `src/loaders/LowRankQPLYWorker.ts` 实现共享基低秩重建的 **CPU 端并行解码**：
 
@@ -145,10 +190,11 @@ npm run format
 
 ---
 
-## 6. 📁 仓库结构
+## 7. 📁 仓库结构
 
 ```text
 .
+├── index.html / demo.ts          # 线上 viewer（场景选择、拖拽加载、FPS 计数）
 ├── src/
 │   ├── index.ts                 # 库入口
 │   ├── loaders/                 # PLY / QPLY / 低秩 QPLY / SplatV 加载器
@@ -161,14 +207,17 @@ npm run format
 │   ├── cameras/  controls/  splats/  math/  events/  types/  utils/
 │   └── wasm/                    # WASM 工具（compile_wasm.sh 构建）
 ├── examples/                    # 9 个示例工程（vanilla-js / file-loader / ...）
-├── scenes/                      # 演示场景（point_cloud_quantised_half.ply 等）
+├── scenes/  scenes.json         # 演示场景（r7 低秩 QPLY）
+├── tools/verify_demo.mjs        # 无依赖 headless 浏览器部署验证脚本
+├── docs/DEPLOYMENT.md           # 线上状态与验证证据
+├── vite.site.config.js          # 站点构建（site-dist/ → GitHub Pages）
 ├── dist/                        # 构建产物
 └── package.json
 ```
 
 ---
 
-## 7. 🙏 致谢
+## 8. 🙏 致谢
 
 本项目基于 [gsplat.js](https://github.com/dylanebert/gsplat.js)（作者 Dylan Ebert，MIT 许可）。
 
@@ -182,6 +231,6 @@ npm run format
 
 ---
 
-## 8. ⚖️ 许可证
+## 9. ⚖️ 许可证
 
 MIT
