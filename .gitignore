@@ -159,3 +159,10 @@ _tidy_out.txt
 
 # ---- 一次性探针资产（P2：w/o 预算剪枝 174MB，只在本机做存在性测试，不入库）----
 scenes/point_cloud_quantised_half_noprune-*.ply
+
+# ---- 部署验证脚本（tools/verify_demo.mjs）的一次性输出：截图 / JSON 报告 / 抓包文本 ----
+#    线上现状与实测数据见 docs/DEPLOYMENT.md；只保留脚本本身，产物不入库
+_verify/
+
+# ---- 根目录一次性 scratch（探针输出、构建日志等临时文件）----
+_tmp_*
