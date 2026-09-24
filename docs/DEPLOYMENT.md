@@ -12,11 +12,14 @@
 | -- | -- |
 | 站点 URL | <https://chxxx.github.io/gs-mobile/>（HTTP 200） |
 | 托管方式 | GitHub Pages，Source = `pages` 分支根目录 |
-| 源码分支 | `cleanup/resume-prep`（当前开发分支）/ `main` |
+| 源码分支 | `main`（发布主干；2026-09-24 由 `cleanup/resume-prep` **快进合并**而来，两者当前指向同一提交） · `cleanup/resume-prep`（历史开发分支，名称为探索期遗留） |
 | 自动部署 | `.github/workflows/deploy-pages.yml`：push → `npm ci` → `npm run site:build` → 把 `site-dist/` 强推为 `pages` 的一次性提交 |
 | 站点构建配置 | `vite.site.config.js`（`base: './'`，产物 `site-dist/`，静态复制 `scenes/`、`scenes.json` 与各 bench 清单） |
 | 演示页 JS 包 | `assets/index-DNw9vmHu.js`（11 kB / gzip 4.7 kB）；本地 `npm run site:build` 产物哈希与之**完全一致** |
-| 最近一次部署 | commit `ea3e4f1`（`demo: add ?scene= deep-link preset …`）→ 工作流 run #26 成功后，线上即引用该包 |
+| 最近一次部署 | `5cc9d67`（2026-09-24，推送到 `main`）；该提交只改 README / `package.json`，站点产物与上一版一致（仍为 `assets/index-DNw9vmHu.js`） |
+
+> **分支说明**：`cleanup/resume-prep` 是探索期留下的分支名，它一度是 GitHub 仓库的默认分支；2026-09-24 已把它的全部提交**快进合并**进 `main`（未改写历史、未产生合并提交），两者当前指向同一提交。
+> 仓库默认分支的切换需在 GitHub 网页端（Settings → Branches）完成，本文不代为追踪该设置状态。
 | 场景清单 | `scenes.json`（3 个 r7 低秩 QPLY 场景） |
 
 ### 场景文件体积（决定首帧快慢的直接因素）
