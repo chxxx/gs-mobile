@@ -467,22 +467,72 @@ async function loadFile(file: File) {
     sceneSelect.value = "";
 }
 
+/**
+ * 解析 `?scene=` 直达参数（给"在线 Demo 直达链接"用；**不带参数时行为完全不变**，
+ * 访客仍然需要手动在下拉框里选择场景）。
+ *
+ *   ?scene=truck                     按文件名/显示名的子串匹配（大小写不敏感）
+ *   ?scene=2                         1 起算的下拉序号
+ *   ?scene=scenes/xxx.ply            直接给相对路径
+ *   ?scene=https://.../xxx.ply       直接给完整 URL（需目标站允许跨域）
+ *   ?scene=0 / ?scene=off            显式关闭预选
+ */
+function resolvePresetScene(options: { value: string; text: string }[]): { index: number; directUrl: string } {
+    let raw = "";
+    try {
+        raw = (new URLSearchParams(location.search).get("scene") || "").trim();
+    } catch {
+        /* ignore */
+    }
+    if (!raw || raw === "0" || raw.toLowerCase() === "off") return { index: -1, directUrl: "" };
+
+    const lower = raw.toLowerCase();
+    const exact = options.findIndex((o) => o.value.toLowerCase() === lower);
+    if (exact >= 0) return { index: exact, directUrl: "" };
+    const byText = options.findIndex((o) => o.text.toLowerCase().includes(lower));
+    if (byText >= 0) return { index: byText, directUrl: "" };
+    const byPath = options.findIndex((o) => o.value.toLowerCase().includes(lower));
+    if (byPath >= 0) return { index: byPath, directUrl: "" };
+    const asIndex = parseInt(raw, 10);
+    if (Number.isFinite(asIndex) && asIndex >= 1 && asIndex <= options.length) {
+        return { index: asIndex - 1, directUrl: "" };
+    }
+    if (/\.ply(\?|$)/i.test(raw) || /^https?:/i.test(raw)) return { index: -1, directUrl: raw };
+    return { index: -1, directUrl: "" };
+}
+
 async function populateSceneSelector() {
+    let scenes: { name: string; file: string }[] = [];
     try {
         const response = await fetch("scenes.json");
         if (!response.ok) {
             console.warn("scenes.json not found");
-            return;
-        }
-        const scenes: { name: string; file: string }[] = await response.json();
-        for (const scene of scenes) {
-            const option = document.createElement("option");
-            option.value = scene.file;
-            option.textContent = scene.name;
-            sceneSelect.appendChild(option);
+        } else {
+            scenes = await response.json();
         }
     } catch (err) {
         console.warn("Failed to load scenes.json:", err);
+    }
+
+    for (const scene of scenes) {
+        const option = document.createElement("option");
+        option.value = scene.file;
+        option.textContent = scene.name;
+        sceneSelect.appendChild(option);
+    }
+
+    // ?scene= 预选（缺省无参数 → 保持"手动选择后才渲染"的既有行为，不额外下载模型）
+    const preset = resolvePresetScene(scenes.map((s) => ({ value: s.file, text: s.name })));
+    if (preset.index >= 0) {
+        const option = sceneSelect.options[preset.index + 1]; // +1: 第 0 项是占位 "-- Select a scene --"
+        if (option) {
+            sceneSelect.value = option.value;
+            console.info(`[scene] ?scene= 预选：${option.textContent}`);
+            void loadFromUrl(option.value);
+        }
+    } else if (preset.directUrl) {
+        console.info(`[scene] ?scene= 直接加载：${preset.directUrl}`);
+        void loadFromUrl(preset.directUrl);
     }
 }
 
