@@ -1580,17 +1580,34 @@ async function main() {
         snap.sorts = sortCount;
         return snap;
     };
-    window.__FLUXGS_BENCH_FRAME__ = () => {
+    // [BENCH INSTRUMENTATION] 离屏论文协议（`benchmode=offscreen-paper-match`）需要的两个入口：
+    //   - `__FLUXGS_BENCH_GL__()`：把渲染器**自己在用的** WebGL2 上下文交出去。驱动页据此在**它的**上下文上
+    //     建立离屏 FBO（`OffscreenRenderTarget`，与本文臂 `WebGLRenderer.createOffscreenTarget()` 同一个类）。
+    //     只读暴露：驱动页只做 bind/unbind 与 fenceSync，不改变本文件任何渲染路径。
+    //   - `__FLUXGS_BENCH_FRAME_OFFSCREEN__()`：渲染**恰好一帧**、但**不做 `gl.finish()`**。
+    //     它替代 `__FLUXGS_BENCH_FRAME__` 用在离屏协议里：论文口径的离屏协议不做每帧硬同步，
+    //     GPU 进度改由驱动页的**非阻塞**栅栏门（fenceSync + clientWaitSync(0)，积压上限 3 帧）负责 ——
+    //     两臂（本文臂/本臂）用的是同一个类、同一套策略。累计量（frames/覆盖率）与同步版逐字同源。
+    window.__FLUXGS_BENCH_GL__ = () => {
+        try { return gl; } catch (e) { return null; }
+    };
+    /** 一帧的公共实现：`sync=true` 时额外做一次 `gl.finish()`（参考协议）；离屏协议传 false。 */
+    const __fluxBenchStep = (sync) => {
         frame(performance.now());      // 恰好渲染一帧（manual 模式下帧末不会自行排帧）
-        const tSync0 = performance.now();
-        try {
-            gl.finish();               // 每帧渲染提交后同步一次（与本文臂逐帧对称）
-        } catch (e) { /* 上下文丢失时忽略 */ }
-        const syncMs = performance.now() - tSync0;
+        let syncMs = 0;
+        if (sync) {
+            const tSync0 = performance.now();
+            try {
+                gl.finish();           // 每帧渲染提交后同步一次（与本文臂逐帧对称）
+            } catch (e) { /* 上下文丢失时忽略 */ }
+            syncMs = performance.now() - tSync0;
+        }
         if (__fluxBenchState) {
             __fluxBenchState.frames++;
             __fluxBenchState.sync.push(syncMs);
-            // 覆盖率先测一次（仅统计，不参与计时）：与本文臂 covered% 对照，判断两臂负载是否同量级
+            // 覆盖率先测一次（仅统计，不参与计时）：与本文臂 covered% 对照，判断两臂负载是否同量级。
+            // 注意：离屏协议下这一帧读的是**当前绑定的 framebuffer**（驱动页绑定的离屏 FBO），
+            // 因此覆盖率量的仍是"这一帧真正画出来的画面"，而不是默认 framebuffer 里的空图。
             if (__fluxBenchState.frames === 1 && __fluxBenchState.coveredPct === 0) {
                 try {
                     const pw = gl.canvas.width;
@@ -1613,6 +1630,8 @@ async function main() {
         }
         return { t: performance.now(), syncMs: syncMs };
     };
+    window.__FLUXGS_BENCH_FRAME__ = () => __fluxBenchStep(true);
+    window.__FLUXGS_BENCH_FRAME_OFFSCREEN__ = () => __fluxBenchStep(false);
     window.__FLUXGS_BENCH_END__ = () => {
         const s = __fluxBenchState;
         const out = {
@@ -1624,6 +1643,10 @@ async function main() {
             coveredPct: s ? s.coveredPct : 0,
             canvasW: gl.canvas.width,
             canvasH: gl.canvas.height,
+            // [BENCH INSTRUMENTATION] 顶点着色器实际生效的 focal / viewport（见 resize() 的落盘）：
+            // 这两项 + canvasW/H 即 splat 像素尺寸的全部输入（与 downsample 无关）
+            focalApplied: (window.__FLUXGS_STATS__ && window.__FLUXGS_STATS__.focalApplied) || null,
+            viewportUniform: (window.__FLUXGS_STATS__ && window.__FLUXGS_STATS__.viewportUniform) || null,
             dpr: devicePixelRatio,
             downsample: downsample,
             points: vertexCount,
@@ -1803,6 +1826,17 @@ async function main() {
         );
 
         gl.uniform2fv(u_viewport, new Float32Array([projW, projH]));
+
+        // [BENCH INSTRUMENTATION] 记录**决定 splat 屏幕尺寸的两个 uniform 的实际生效值**。
+        // 顶点着色器里：点半径 ∝ focal（cov2d 由 J 构造，J 里只有 focal/cam.z），
+        // 并按 viewport 归一（gl_Position 的 majorAxis/viewport 项）——
+        // 因此「focal + viewport + 画布尺寸」就是 splat 像素大小的**全部输入**，
+        // 与 `downsample` 无关（后者只影响下面两行的画布尺寸，且在 benchres 模式下被覆盖）。
+        // 逐轮落盘可实测核对：若有人误把 focal 除以 downsample，这里会直接显形为 3.6× 的值。
+        if (window.__FLUXGS_STATS__) {
+            window.__FLUXGS_STATS__.focalApplied = [camera.fx, camera.fy];
+            window.__FLUXGS_STATS__.viewportUniform = [projW, projH];
+        }
 
         gl.canvas.width = Math.round(innerWidth / downsample);
         gl.canvas.height = Math.round(innerHeight / downsample);

@@ -284,15 +284,19 @@ export function warmupFrames(): number {
     return Number.isFinite(n) && n >= 0 ? n : 0;
 }
 /** 测帧驱动方式：timer = `setTimeout(0)` 链（**参考协议**：与 Flux-GS 自带测帧逐帧同构）；
- *  raf = 每个 requestAnimationFrame 渲染并统计一帧（在屏口径，会被屏幕刷新率封顶）。 */
-export type ThroughputDriver = "raf" | "timer";
+ *  raf = 每个 requestAnimationFrame 渲染并统计一帧（在屏口径，会被屏幕刷新率封顶）；
+ *  msgchannel = `MessageChannel` 消息任务链（**离屏协议**：不经 rAF，因此不挂在 vsync/合成器上，
+ *  也不受浏览器对连续嵌套 `setTimeout(0)` 的 4ms 级钳制，让提交速率只受 CPU/GPU 实际能力限制）。 */
+export type ThroughputDriver = "raf" | "timer" | "msgchannel";
 /**
  * 帧驱动口径（**两臂 FPS 可比性的前提**，2026-09-16 对齐基线）：
- *   1. `?driver=timer|raf` 显式覆盖优先；
- *   2. 否则 `proto=flux`（参考协议）取 `timer`；
- *   3. 其余情况取 `raf`（旧的默认值，只用于在屏口径的观察/历史数据对照）。
+ *   1. `?driver=timer|raf|msgchannel` 显式覆盖优先；
+ *   2. 否则 `benchmode=offscreen-paper-match`（离屏论文协议）取 `msgchannel`；
+ *   3. 否则 `proto=flux`（参考协议）取 `timer`；
+ *   4. 其余情况取 `raf`（旧的默认值，只用于在屏口径的观察/历史数据对照）。
  * 注意：rAF 每次只申请一个 vsync 间隔，**会被屏幕刷新率封顶**（60Hz 设备最多报 60），
- * 与基线不可比；正式采集保持 timer。两种取值都会写进结果头 `driver=`，可事后核对。
+ * 与基线不可比；正式采集保持 timer（在屏协议）或 msgchannel（离屏协议）。三种取值都会写进结果头
+ * `driver=`，可事后核对。
  *
  * 实现说明（2026-09-16）：`timer` 驱动现在由**两臂共用的** `driveThroughputFrames()` 实现
  * （本文臂与 Flux-GS 臂调用同一个函数：后者逐帧调 iframe 的 `__FLUXGS_BENCH_FRAME__`）。
@@ -301,23 +305,258 @@ export type ThroughputDriver = "raf" | "timer";
  */
 export function throughputDriver(): ThroughputDriver {
     const explicit = param("driver", "");
-    if (explicit === "raf" || explicit === "timer") return explicit;
+    if (explicit === "raf" || explicit === "timer" || explicit === "msgchannel") return explicit;
+    if (benchMode() === BENCH_MODE_OFFSCREEN) return "msgchannel";
     return PROTO_FLUX ? "timer" : "raf";
+}
+
+// ------------------------------------------------------------------ 非 vsync 的 tick（离屏协议）
+/**
+ * `MessageChannel` 任务链：一个 0 字节消息投递到另一端口，收到后 resolve。
+ *
+ * 为什么不是 `setTimeout(0)`/rAF：
+ *   - `setTimeout(0)` 会经过定时器队列，Chrome 对连续嵌套定时器按 4ms 级处理（本项目实测地板
+ *     4.3–5.4ms），于是"帧率"变成驱动节奏的上限而不是渲染能力（见 `calibrateTimerFloor`）；
+ *   - rAF 与屏幕刷新对齐，在屏时天然被 vsync 封顶（60/120Hz 设备报不出别的数）。
+ * `postMessage` 的任务不受上面两者约束：它只让出**一个宏任务**，速率由事件循环与 CPU/GPU 决定。
+ *
+ * 单个通道复用（端口长连）：每帧新建 MessageChannel 会给每帧加一次构造/GC 开销，
+ * 在"要测到 100+ FPS"的场景里这层开销不可忽略；这里只建一个通道，用 FIFO 等待队列保证
+ * 每个 tick 恰好被唤醒一次、且顺序与投递顺序一致。
+ */
+let tickChannel: MessageChannel | null = null;
+const tickWaiters: Array<() => void> = [];
+
+function messageChannelTick(): Promise<void> {
+    return new Promise<void>((resolve) => {
+        if (!tickChannel) {
+            const channel = new MessageChannel();
+            channel.port1.onmessage = () => {
+                const next = tickWaiters.shift();
+                if (next) next();
+            };
+            channel.port1.start();
+            tickChannel = channel;
+        }
+        tickWaiters.push(resolve);
+        tickChannel.port2.postMessage(0);
+    });
+}
+
+/** 两臂共用的 tick 原语（同一 `driver` 取值 ⇒ 同一让出机制）。 */
+export function throughputTick(driver: ThroughputDriver): Promise<void> {
+    if (driver === "raf") return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    if (driver === "msgchannel") return messageChannelTick();
+    return new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
 /** 测帧数（与旧口径一致：默认 300 帧，`?frames=N` 覆盖）。 */
 export function benchFrameCount(): number {
     return parseInt(param("frames", "300"), 10) || 300;
 }
-/** 测帧分辨率（与旧口径一致：默认 1600×1063，`?res=WxH` 覆盖）。 */
+
+// ------------------------------------------------------------------ 两种基准协议（并列存在，互不改变）
+/**
+ * **离屏论文协议**（`benchmode=offscreen-paper-match`）：复刻 Flux-GS（Du et al. 2026, §5.1）的
+ * 离屏基准测试协议 —— 渲染到离屏 framebuffer、脱离屏幕 vsync、warm-up 之后多轮连续 run 取平均。
+ * 它与下面缺省的**在屏真实协议**并列存在：两套数字分别报告，**谁都不覆盖谁**。
+ */
+export const BENCH_MODE_OFFSCREEN = "offscreen-paper-match";
+/** **在屏真实协议**（缺省）：渲染到真实呈现的 canvas，逐帧 `gl.finish()` 同步，反映用户真实体感。 */
+export const BENCH_MODE_ONSCREEN = "onscreen-realworld";
+export type BenchMode = typeof BENCH_MODE_OFFSCREEN | typeof BENCH_MODE_ONSCREEN;
+
+/**
+ * 当前协议模式。**缺省 = 在屏真实协议**，因此不带参数的链接行为与历史版本逐字相同
+ * （现有 `onscreen-realworld` 行为零改动是"两套数字并列可比"的前提）。
+ * 接受 `?benchmode=offscreen-paper-match`（也接受简写 `offscreen`）。
+ */
+export function benchMode(): BenchMode {
+    const v = param("benchmode", "").trim().toLowerCase();
+    return v === BENCH_MODE_OFFSCREEN || v === "offscreen" ? BENCH_MODE_OFFSCREEN : BENCH_MODE_ONSCREEN;
+}
+
+/**
+ * 离屏协议缺省配置（论文口径的工程化取值，全部可用 URL 覆盖；两个 mode 各自独立）：
+ *   - `warmupFrames = 90`：论文只说"a short warm-up period to mitigate thermal and initialization
+ *     effects"。取 90 帧而不是论文未给出的具体值，是因为本文臂与 Flux 臂都有 ~100 帧量级的
+ *     纹理上传/排序流水线爬升，90 帧能把这段留在窗口外；`?warmup=N` 覆盖；
+ *   - `numRuns = 5`：论文说 "computed over multiple consecutive runs"，缺省 5 轮取平均（另报标准差）；
+ *     `?runs=N` 覆盖；
+ *   - `framesPerRun = 300`：沿用本仓库历史测帧长度（`?frames=N` 覆盖），使"离屏"与"在屏"两种协议
+ *     的**每轮帧数完全一致**，唯一的差别只剩渲染目标与驱动方式；
+ *   - `maxFencesInFlight = 3`：非阻塞 GPU 进度检查的积压上限，`?fences=N` 覆盖。
+ */
+export const OFFSCREEN_DEFAULTS = {
+    warmupFrames: 90,
+    numRuns: 5,
+    framesPerRun: 300,
+    maxFencesInFlight: 3,
+} as const;
+
+/** 离屏协议的 run 数（`?runs=N`，缺省 5；<1 或非数字回落到缺省）。 */
+export function offscreenRunCount(): number {
+    const n = parseInt(param("runs", String(OFFSCREEN_DEFAULTS.numRuns)), 10);
+    return Number.isFinite(n) && n >= 1 ? n : OFFSCREEN_DEFAULTS.numRuns;
+}
+/**
+ * 离屏协议的预热帧数（`?warmup=N`）：**注意与在屏协议缺省不同**（在屏缺省 10 / proto=flux 为 0，
+ * 那是历史口径，本次不动）。离屏协议缺省 90，见 `OFFSCREEN_DEFAULTS` 的说明。
+ */
+export function offscreenWarmupFrames(): number {
+    const n = parseInt(param("warmup", String(OFFSCREEN_DEFAULTS.warmupFrames)), 10);
+    return Number.isFinite(n) && n >= 0 ? n : OFFSCREEN_DEFAULTS.warmupFrames;
+}
+/** 离屏协议每个 run 的帧数（与在屏协议的 `frames=` 共用同一个 URL 参数，保证两协议每轮帧数一致）。 */
+export function offscreenFramesPerRun(): number {
+    return benchFrameCount();
+}
+/** 离屏协议的 GPU 栅栏积压上限（`?fences=N`；`sync=fence` 模式下生效）。 */
+export function offscreenMaxFencesInFlight(): number {
+    const n = parseInt(param("fences", String(OFFSCREEN_DEFAULTS.maxFencesInFlight)), 10);
+    return Number.isFinite(n) && n >= 1 ? n : OFFSCREEN_DEFAULTS.maxFencesInFlight;
+}
+
+/**
+ * 离屏协议的**驱动降频**（`?tickevery=N`，缺省 16）：每多少帧让出一次事件循环。
+ *
+ * 为什么需要（2026-09-26 真机实测）：手机上 `await throughputTick("msgchannel")` 每次要 **~43ms**
+ * （GPU 队列饱和时主线程宏任务被拖到 ~2 个 vsync 之后），而同一轮的渲染提交只要 0.2ms、
+ * 排空等 GPU 只要 22ms/帧 ⇒ "逐帧让出"会把吞吐卡在 ~23 FPS，量到的是**驱动节奏**而不是 GPU。
+ * 论文协议要的是"连续提交帧"，不是"每帧让出一次"，因此缺省每 16 帧让出一次
+ * （缺省值记在结果字段 `offscreen_tick_every=`；`?tickevery=1` 可退回逐帧旧口径做 A/B）。
+ */
+export function offscreenTickEvery(): number {
+    const n = parseInt(param("tickevery", "16"), 10);
+    return Number.isFinite(n) && n >= 1 ? n : 16;
+}
+
+/**
+ * 离屏协议的 **GPU 同步/计时策略**（`?sync=gputimer|each|fence`，缺省 `gputimer`）：
+ *   - `gputimer`（缺省）：`EXT_disjoint_timer_query_webgl2` 计时查询，读**每帧 GPU 真实执行毫秒**，
+ *     FPS 取 `1000/中位毫秒`。**2026-09-26 现场实测的结论：本环境（无头 Edge + 不呈现的 FBO）
+ *     里 `gl.finish()`/`clientWaitSync`/1×1 `readPixels` 都不阻塞**，墙钟口径只能测到提交速率
+ *     （37k–67k FPS，物理上不可能），只有计时查询能给出可信的 GPU 口径；
+ *   - `each`：每帧 `gl.finish()` + 1×1 `readPixels`（墙钟口径；在能真正阻塞的环境里同样正确）；
+ *   - `fence`：纯非阻塞栅栏门 + 每 run 排空（保留给"环境确实支持 clientWaitSync 阻塞"的场景）；
+ *   - `batch`（**2026-09-26 真机后追加**）：逐帧零同步 + **run 末一次性** `finish()`+1×1 `readPixels`，
+ *     并把该 run 的计时终点取在排空之后（`timingEndAfterDrain`）。手机上缺计时扩展且
+ *     `clientWaitSync` 不阻塞（`fence` ⇒ 2500 FPS 提交速率）、每帧 `readPixels` 又太贵
+ *     （`each` ⇒ 13.8 FPS 全同步延迟）时，只有它能给出"吞吐"口径 —— 也是 `gputimer` 的自动回落目标。
+ * 四者都写进结果字段 `offscreen_sync_policy=` 与 `offscreen_fps_source=`，报告可据此核对。
+ */
+export function offscreenSyncMode(): "each" | "fence" | "gputimer" | "batch" | "natural" | "none" {
+    const v = param("sync", "gputimer").trim().toLowerCase();
+    if (v === "fence") return "fence";
+    if (v === "each") return "each";
+    if (v === "batch") return "batch";
+    if (v === "natural") return "natural"; // 自然模式：rAF 逐帧 + 每帧一次 1×1 readPixels（不攒帧、不强制 drain）
+    if (v === "none") return "none"; // 零仪器基准：rAF 逐帧 + 门不做任何 GL 侧同步/查询/排空（见 resolveOffscreenSyncMode）
+    return "gputimer";
+}
+
+/**
+ * **自然模式**（`?sync=natural`）的判定与 30 秒计时预算（`?natsecs=N`，缺省 30）。
+ *
+ * 为什么需要它（2026-09-28 用户质疑）：`batch` 模式是"攒 30~40 帧不同步、末尾一次 readPixels 拉平"，
+ * 真实使用中浏览器每帧都被 vsync 节流、不会攒下几十帧欠账 ⇒ `batch` 只能代表**极限吞吐能力**，
+ * 不能代表**用户实际交互的流畅度**。自然模式 = `driver=raf`（vsync 边界）+ 每帧一次 1×1 `readPixels`
+ * （立即收口，不攒帧、不强制 drain）+ 按**墙钟时间**跑满预算，用于回答"两种模式结论是否一致"。
+ */
+export function isNaturalMode(): boolean {
+    return param("sync", "").trim().toLowerCase() === "natural";
+}
+
+/**
+ * 需要**墙钟预算 + 逐秒窗口统计**的模式（2026-09-28 追加 `none`）：
+ *   - `natural`：体感代理口径（每帧 `finish()`+1×1 `readPixels`）；
+ *   - `none`：**零仪器基准**（门不做任何 GL 侧同步/查询/排空，帧间隔 = rAF 回调时间戳之差）。
+ * 两者共用 `?natsecs=N`（缺省 30）的时间预算与 `NW/NMIN/NMAX/NMEAN/NSD` 统计，
+ * 便于直接做 A/B：`none` 与 `natural` 之差 = 逐帧同步仪器的净开销。
+ */
+export function isWallClockBudgetMode(): boolean {
+    const v = param("sync", "").trim().toLowerCase();
+    return v === "natural" || v === "none";
+}
+
+export function naturalSeconds(): number {
+    const n = parseInt(param("natsecs", "30"), 10);
+    return Number.isFinite(n) && n >= 1 ? n : 30;
+}
+
+/** 均值/标准差/极值（`n = 0` 时全 0；`n = 1` 时 std = 0）。总体标准差（除以 n），不是样本标准差。 */
+export interface MeanStd {
+    n: number;
+    mean: number;
+    std: number;
+    min: number;
+    max: number;
+    median: number;
+}
+export function meanStd(values: readonly number[]): MeanStd {
+    const nums = values.filter((v) => Number.isFinite(v));
+    if (nums.length === 0) return { n: 0, mean: 0, std: 0, min: 0, max: 0, median: 0 };
+    const mean = nums.reduce((a, b) => a + b, 0) / nums.length;
+    const variance = nums.reduce((a, b) => a + (b - mean) * (b - mean), 0) / nums.length;
+    return {
+        n: nums.length,
+        mean,
+        std: Math.sqrt(variance),
+        min: Math.min(...nums),
+        max: Math.max(...nums),
+        median: median(nums) ?? 0,
+    };
+}
+/** `mean±std` 的一行格式（两臂同格式；缺样本写 `-`）。 */
+export function formatMeanStd(s: MeanStd | undefined, digits = 1): string {
+    if (!s || s.n === 0) return "-";
+    return `${s.mean.toFixed(digits)}±${s.std.toFixed(digits)}`;
+}
+
+/**
+ * **诚实标注（强制）**：离屏协议的数字必须与在屏数字同时出现，并附带本段说明。
+ * 两臂（bench.ts / bench-flux.ts）都用这一份常量写进结果文本与报告，避免"其中一臂忘了标"。
+ */
+export const OFFSCREEN_DISCLAIMER_ZH =
+    "Offscreen-PaperMatch FPS 是复刻 Flux-GS 论文离屏基准协议（渲染到离屏帧缓冲、脱离屏幕 vsync、" +
+    "warm-up 后多轮平均）测得的数值，用于与论文报告数字做同协议对比，不代表用户在真实设备屏幕上" +
+    "感受到的帧率。真实使用场景下的帧率请参考 Onscreen-Realworld FPS 列。";
+export const OFFSCREEN_DISCLAIMER_EN =
+    "Offscreen-PaperMatch FPS follows the off-screen benchmarking protocol of the Flux-GS paper " +
+    "(rendering into an offscreen frame buffer, decoupled from screen vsync, averaged over multiple " +
+    "runs after a warm-up). It is meant for a like-for-like comparison against the numbers reported " +
+    "in the paper and does NOT represent the frame rate a user perceives on a real screen. " +
+    "For real-world frame rates, read the Onscreen-Realworld FPS column.";
+/** 写进结果文本的标注行（`#` 前缀 = 注释，报表脚本按前缀跳过）。 */
+export function offscreenDisclaimerLines(): string[] {
+    return [`# [:disclaimer] ${OFFSCREEN_DISCLAIMER_ZH}`, `# [:disclaimer-en] ${OFFSCREEN_DISCLAIMER_EN}`];
+}
+/**
+ * `?resscale=K`（0<K≤1；缺省 1 = 与历史结果逐字无差别）：把**测帧目标分辨率与像素焦距一起**按 K 缩放
+ * ⇒ 保持**同一 FOV**、只改"要填多少像素"。用途：在**现有测帧协议内**亲手验证"渲染像素数"是不是
+ * 正交变量（对照 flux 生产模式的自适应降采样：点数 > 500000 ⇒ 1× CSS）。
+ * 缩放结果会同步反映在结果头的 `res=` 与 `fx=` 上（自证，不依赖日志）。
+ */
+export function resScaleParam(): number {
+    const v = parseFloat(param("resscale", "1"));
+    if (!Number.isFinite(v) || v <= 0 || v > 1) return 1;
+    return v;
+}
+/** 测帧分辨率（与旧口径一致：默认 1600×1063，`?res=WxH` 覆盖；`?resscale=K` 按比例缩小）。 */
 export function resolution(): { w: number; h: number } {
     const parts = param("res", "1600x1063").split("x");
-    return { w: parseInt(parts[0], 10) || 1600, h: parseInt(parts[1], 10) || 1063 };
+    const w0 = parseInt(parts[0], 10) || 1600;
+    const h0 = parseInt(parts[1], 10) || 1063;
+    const k = resScaleParam();
+    if (k === 1) return { w: w0, h: h0 };
+    return { w: Math.max(16, Math.round(w0 * k)), h: Math.max(16, Math.round(h0 * k)) };
 }
 /** 相机焦距参数所对应的实际像素焦距（与 bench-measure 的 applyFocalFromParam 一致）。
- *  父页面没有 camera 对象，结果头 `fx=` 优先用子页面每轮上报的真实值，取不到时才回退到这里。 */
+ *  父页面没有 camera 对象，结果头 `fx=` 优先用子页面每轮上报的真实值，取不到时才回退到这里。
+ *  `?resscale=K` 时像素焦距同步 ×K ⇒ FOV 不变（否则缩放分辨率会变成"拉近视角"，把两个变量搅在一起）。 */
 export function effectiveFocalPx(): number {
     const fx = parseFloat(param("fx", PROTO_FLUX ? "1159.588" : "0"));
-    return Number.isFinite(fx) && fx > 0 ? fx : 1132;
+    const base = Number.isFinite(fx) && fx > 0 ? fx : 1132;
+    return base * resScaleParam();
 }
 
 // ------------------------------------------------------------------ 动态相机挡位（`?spin=`：静止协议的效度自查）
@@ -403,10 +642,28 @@ export function spinSwingAmpDeg(): number {
  * 逐姿态的实测覆盖率与"裁剪盒内高斯数"写进 `sweep_cov=` / `sweep_seen=`（见 clipInsideRatio），
  * 用来**直接证明**两臂在这条轨迹上做的是等量的工作。
  */
-export type SpinMode = "rate" | "swing";
-/** `?spin_mode=swing`：往复摆动；缺省/其它值 = `rate`（历史口径，逐字不变）。 */
+export type SpinMode = "rate" | "swing" | "roll" | "static";
+/**
+ * `?spin_mode=swing`：往复摆动；`roll`：**绕相机自身视线轴的滚转**（位置不动、只转姿态 ⇒
+ * 用来做"转得一样猛、但视野内点集基本不变"的对照）；缺省/其它值 = `rate`（历史口径，逐字不变）。
+ */
 export function spinModeParam(): SpinMode {
-    return param("spin_mode", "").toLowerCase() === "swing" ? "swing" : "rate";
+    const v = param("spin_mode", "").toLowerCase();
+    if (v === "swing") return "swing";
+    if (v === "roll") return "roll";
+    if (v === "static") return "static";
+    return "rate";
+}
+/**
+ * `?baseyaw=D`（deg，±360）：把**基准机位**一次性绕竖直轴（过 `pivot`，缺省 = 相机自身位置）转过 D 度，
+ * 之后**不再随时间变化**。配合 `?spin_mode=static` 使用 ⇒ 得到一个"提交总量不变（仍是全量绘制）、
+ * 但取景角度自然落到某个可见占比"的**静止**机位（用来匹配 spin=1 转开后的 `sweep_seen`）。
+ * 缺省 0 ⇒ 历史路径逐字不变。
+ */
+export function baseYawParam(): number {
+    const v = parseFloat(param("baseyaw", "0"));
+    if (!Number.isFinite(v) || v === 0) return 0;
+    return Math.max(-360, Math.min(360, v));
 }
 /** `?pivot=x,y,z`：旋转轴心（世界坐标，竖直轴过该点）。缺省返回 null，由各臂自行取缺省值。 */
 export function spinPivotParam(): [number, number, number] | null {
@@ -433,6 +690,14 @@ export interface SpinSpec {
 /** 解析本轮轨迹；`?spin=0`/缺省 → null（静止协议，历史口径逐字不变）。 */
 export function resolveSpinSpec(windowFrames: number): SpinSpec | null {
     const window = Math.max(1, Math.round(windowFrames) || 1);
+    if (spinModeParam() === "static") {
+        // [BASEYAW 2026-09-29] 静止偏航机位：整段窗口位姿恒定（`spinYawDegAt` 返回常量）⇒
+        //   相机不转、不重排，但取景角度按 `?baseyaw=` 偏过 ⇒ 用来匹配"转动后"的 `sweep_seen`，
+        //   同时提交总量仍是全量（不动 `drawfrac`/`cull`）。
+        const d0 = baseYawParam();
+        if (d0 === 0) return null;
+        return { mode: "static", deg: d0, period: 0, window };
+    }
     if (spinModeParam() === "swing") {
         // swing 档：`spin=` 是**摆幅**（±deg，不适用 rate 档的 ±30°/帧 上限），夹到 ±180°
         const amp = spinSwingAmpDeg();
@@ -441,6 +706,16 @@ export function resolveSpinSpec(windowFrames: number): SpinSpec | null {
         // 周期下限 2 帧：1 帧以下不构成"摆动"，整条轨迹会退化成每帧正负跳变
         const period = Number.isFinite(raw) && raw >= 2 ? Math.min(100000, raw) : window;
         return { mode: "swing", deg: amp, period, window };
+    }
+    if (spinModeParam() === "roll") {
+        // [ROLL 2026-09-29] `spin=` 与 rate 档同口径（deg/帧，±30 上限），但绕**相机自身视线轴**转：
+        //   位置/朝向方向都不变 ⇒ 画面整体旋转、视野内点集与点数分布基本不变（用 `sweep_seen`/`sweep_cov` 实测确认）。
+        const rdeg = camSpinDegPerFrame();
+        if (rdeg === 0) return null;
+        // 守卫：滚转目前只有本文臂（gsplat）实现；基线臂仍按 yaw 注入视图矩阵 ⇒ 跨臂用 roll 会静默错轨迹。
+        //   这里直接退化为静止协议（结果行会显示 `spin=0.000`，不会静默出错）。
+        if (param("engine", "gsplat") !== "gsplat") return null;
+        return { mode: "roll", deg: rdeg, period: 0, window };
     }
     const deg = camSpinDegPerFrame();
     if (deg === 0) return null;
@@ -456,12 +731,16 @@ export function resolveSpinSpec(windowFrames: number): SpinSpec | null {
  * warmup/计帧划分一致：预热与计帧因此落在同一条轨迹上，起表点处不会跳一下。
  */
 export function spinYawDegAt(spec: SpinSpec, index: number): number {
-    if (spec.mode === "rate") return spec.deg * index;
+    // `static` = 常量偏航（不随时间变）；rate / roll 都是"匀速累加"（roll 的角 = 绕视线轴的滚转角）；
+    // 只有 swing 是正弦往复。
+    if (spec.mode === "static") return spec.deg;
+    if (spec.mode !== "swing") return spec.deg * index;
     return spec.deg * Math.sin((2 * Math.PI * index) / spec.period);
 }
 /** 该轨迹的**峰值角速度**（deg/帧）：`swing` 下 = 摆幅 × 2π / 周期（用来自查两臂是否都越过重排阈值）。 */
 export function spinPeakDegPerFrame(spec: SpinSpec): number {
-    return spec.mode === "rate" ? Math.abs(spec.deg) : Math.abs(spec.deg) * ((2 * Math.PI) / spec.period);
+    if (spec.mode === "static") return 0; // 常量偏航：角速度为 0（不转动）
+    return spec.mode !== "swing" ? Math.abs(spec.deg) : Math.abs(spec.deg) * ((2 * Math.PI) / spec.period);
 }
 /** 内容量扫描的姿态采样帧号：在 `[0, window-1]` 上均匀取 `k` 个（`k = 1` → 只取基准帧 0）。 */
 export function spinSampleFrames(spec: SpinSpec, k: number): number[] {
@@ -591,6 +870,90 @@ export function formatTriple(v: ArrayLike<number>, digits = 4): string {
 export function sceneBoundsRoundTags(r: { sceneMin?: string; sceneMax?: string; sceneDiag?: number }): string[] {
     if (!r.sceneMin || !r.sceneMax || typeof r.sceneDiag !== "number") return [];
     return [`scene_min=${r.sceneMin}`, `scene_max=${r.sceneMax}`, `scene_diag=${fmt(r.sceneDiag, 4)}`];
+}
+
+/**
+ * 逐轮行的**离屏协议标签**（两臂共用唯一实现；`benchmode=offscreen-paper-match` 时才有内容）。
+ * 字段名与结果头同名同格式，报表脚本可直接对齐：
+ *   `bench_mode=` / `offscreen_target=` / `offscreen_runs=` / `offscreen_frames_per_run=` /
+ *   `offscreen_warmup_frames=` / `offscreen_warmup_ms=` / `offscreen_fps=`（`mean±std`）/
+ *   `offscreen_fps_min|max|median=` / `offscreen_run_fps=`（逐 run 列表）/ `offscreen_frame_ms=` /
+ *   `offscreen_fence_wait_ms=` / `offscreen_fences=`（observed/limit）/ `offscreen_driver_floor_ms=` /
+ *   `offscreen_driver_capped=` / `offscreen_sync_policy=`。
+ *
+ * **不做任何"美化"**：没有离屏数据（在屏协议）时返回空数组，所以历史逐轮行格式逐字不变。
+ */
+export function offscreenRoundTags(r: {
+    benchMode?: string;
+    offscreenTarget?: string;
+    offscreenRuns?: number;
+    offscreenFramesPerRun?: number;
+    offscreenWarmupFrames?: number;
+    offscreenWarmupMs?: number;
+    offscreenFpsMean?: number;
+    offscreenFpsStd?: number;
+    offscreenFpsMin?: number;
+    offscreenFpsMax?: number;
+    offscreenFpsMedian?: number;
+    offscreenFrameMsMedian?: number;
+    offscreenFenceWaitMs?: number;
+    offscreenFencesMax?: number;
+    offscreenFencesLimit?: number;
+    offscreenDriverFloorMs?: number;
+    offscreenDriverCapped?: boolean;
+    offscreenRunFpsList?: string;
+    offscreenSyncPolicy?: string;
+    offscreenFpsSource?: string;
+    // 驱动降频（`?tickevery=N`）：让出频率 / 让出次数 / 让出耗时中位数（ms）
+    offscreenTickEvery?: number;
+    offscreenTickCalls?: number;
+    offscreenTickMsMedian?: number;
+    /** 自然模式（`?sync=natural&driver=raf`）：逐秒窗口 FPS 统计（用户体感口径；NW=完整秒数） */
+    offscreenNatWinN?: number;
+    offscreenNatFpsMin?: number;
+    offscreenNatFpsMax?: number;
+    offscreenNatFpsMean?: number;
+    offscreenNatFpsSd?: number;
+    offscreenGpuMsMedian?: number;
+    offscreenGpuFpsMean?: number;
+    offscreenGpuFpsStd?: number;
+    offscreenGpuSamples?: number;
+    offscreenGpuMisses?: number;
+    offscreenGpuDiag?: string;
+}): string[] {
+    if (!r.benchMode || r.benchMode !== BENCH_MODE_OFFSCREEN) return [];
+    return [
+        `bench_mode=${r.benchMode}`,
+        `offscreen_target=${r.offscreenTarget ?? ""}`,
+        `offscreen_runs=${r.offscreenRuns ?? ""}`,
+        `offscreen_frames_per_run=${r.offscreenFramesPerRun ?? ""}`,
+        `offscreen_warmup_frames=${r.offscreenWarmupFrames ?? ""}`,
+        // 主指标：多轮 run 的 FPS 均值±标准差（论文口径的"平均 FPS"）
+        `offscreen_fps=${fmt(r.offscreenFpsMean, 1)}±${fmt(r.offscreenFpsStd, 1)}`,
+        `offscreen_fps_min=${fmt(r.offscreenFpsMin, 1)}`,
+        `offscreen_fps_max=${fmt(r.offscreenFpsMax, 1)}`,
+        `offscreen_fps_median=${fmt(r.offscreenFpsMedian, 1)}`,
+        `offscreen_run_fps=${r.offscreenRunFpsList ?? ""}`,
+        `offscreen_warmup_ms=${fmt(r.offscreenWarmupMs, 0)}`,
+        `offscreen_frame_ms=${fmt(r.offscreenFrameMsMedian, 2)}`,
+        // GPU 计时口径（本环境唯一可信）：FPS 的主指标在 gpu-timer 口径下就是 `1000 / gpu_ms`
+        `offscreen_fps_source=${r.offscreenFpsSource ?? ""}`,
+        `offscreen_gpu_ms=${fmt(r.offscreenGpuMsMedian, 3)}`,
+        `offscreen_gpu_fps=${fmt(r.offscreenGpuFpsMean, 1)}±${fmt(r.offscreenGpuFpsStd, 1)}`,
+        `offscreen_gpu_samples=${r.offscreenGpuSamples ?? ""}/${r.offscreenGpuMisses ?? ""}`,
+        // GPU 计时器的逐步诊断（空格换成 `_`，便于按空格分词的结果行解析）
+        `offscreen_gpu_diag=${(r.offscreenGpuDiag ?? "").replace(/\s+/g, "_")}`,
+        `offscreen_fence_wait_ms=${fmt(r.offscreenFenceWaitMs, 2)}`,
+        // 在途栅栏的实测峰值 / 上限：证明"没有无限积压"，且这是**非阻塞**检查的代价
+        `offscreen_fences=${r.offscreenFencesMax ?? ""}/${r.offscreenFencesLimit ?? ""}`,
+        `offscreen_driver_floor_ms=${fmt(r.offscreenDriverFloorMs, 2)}`,
+        `offscreen_driver_capped=${r.offscreenDriverCapped ? 1 : 0}`,
+        `offscreen_sync_policy=${r.offscreenSyncPolicy ?? ""}`,
+        // 驱动降频与让出代价（手机实测：逐帧 tick ≈ 43ms/帧 ⇒ 必须降频，否则量的是驱动不是 GPU）
+        `offscreen_tick_every=${r.offscreenTickEvery ?? ""}`,
+        `offscreen_tick_calls=${r.offscreenTickCalls ?? ""}`,
+        `offscreen_tick_ms_median=${fmt(r.offscreenTickMsMedian, 3)}`,
+    ];
 }
 
 /** 内容量扫描的一个姿态（两臂同名字段，逐姿态对齐核对）。 */
@@ -907,6 +1270,46 @@ export function spinPose(
         quaternion: mulQuat(spinQuatDeg(deg), q0),
     };
 }
+/** 绕**相机自身视线轴**（本体 Z 轴）转 `deg` 度的四元数 (x, y, z, w)；与 `spinQuatDeg` 对称。 */
+export function spinRollQuatDeg(deg: number): [number, number, number, number] {
+    const half = (deg * Math.PI) / 180 / 2;
+    return [0, 0, Math.sin(half), Math.cos(half)];
+}
+/**
+ * `roll` 档的**位姿形式**：**位置不动**，姿态**右乘**本体 Z 旋转（`q0 ⊗ Rz(deg)`）⇒ 相机原地绕视线轴滚转。
+ * 与 `rollViewMatrix` 等价（`W·Rz` 的逆 = `Rz⁻¹·V`），用法与 `spinPose` 对称。
+ */
+export function spinRollPose(
+    p0: [number, number, number],
+    q0: [number, number, number, number],
+    deg: number,
+): { position: [number, number, number]; quaternion: [number, number, number, number] } {
+    return { position: [p0[0], p0[1], p0[2]], quaternion: mulQuat(q0, spinRollQuatDeg(deg)) };
+}
+/** 列主序 4×4 绕 Z 轴旋转 `Rz(deg)`（只用于**视图空间**的滚转）。 */
+export function rotZMatrix(deg: number): number[] {
+    const r = (deg * Math.PI) / 180;
+    const c = Math.cos(r);
+    const s = Math.sin(r);
+    // 列主序：第 0 列 = (c, s, 0)、第 1 列 = (-s, c, 0)、第 2 列 = (0, 0, 1)
+    return [c, s, 0, 0, -s, c, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+}
+/**
+ * `roll` 档的**视图矩阵**：相机世界变换 `W → W·Rz(deg)` ⇒ `V = W⁻¹ → Rz(-deg)·V`（**左乘**，作用在视图空间）
+ * ⇒ 画面整体旋转，但**看向的方向与相机位置都不变** ⇒ `sweep_seen`/`sweep_cov` 应基本不变（实测确认）。
+ */
+export function rollViewMatrix(view16: number[], deg: number): number[] {
+    return mulMat4(rotZMatrix(-deg), [...view16]);
+}
+/** 轨迹 → 视图矩阵的统一入口（按 `spec.mode` 分派；两臂共用，避免轨迹定义分叉）。 */
+export function spinViewMatrix(
+    spec: SpinSpec,
+    view16: number[],
+    deg: number,
+    pivot: [number, number, number],
+): number[] {
+    return spec.mode === "roll" ? rollViewMatrix(view16, deg) : orbitViewMatrix(view16, deg, pivot);
+}
 /** 两个"矩阵/数组"逐元素最大绝对差（对账用：长度不等返回 Infinity）。 */
 export function maxMatrixDiff(a: ArrayLike<number>, b: ArrayLike<number>): number {
     if (a.length !== b.length) return Infinity;
@@ -1035,11 +1438,9 @@ export async function driveThroughputFrames(spec: DriveThroughputSpec): Promise<
         aborted: true,
         note: "",
     };
-    const nextTick = (): Promise<void> =>
-        new Promise<void>((resolve) => {
-            if (driver === "raf") requestAnimationFrame(() => resolve());
-            else setTimeout(resolve, 0);
-        });
+    // tick 原语来自两臂共用的 `throughputTick()`（raf / timer / msgchannel 三种驱动各一个分支）：
+    // 离屏协议用 msgchannel（不挂 vsync、不吃 setTimeout 钳制），在屏/参考协议沿用 raf / timer。
+    const nextTick = (): Promise<void> => throughputTick(driver);
 
     const tWarmup0 = performance.now();
     for (let i = 0; i < warmup; i++) {
@@ -1280,7 +1681,15 @@ export function throughputFields(v: ThroughputFieldValues): string[] {
         // 为什么要加 swing：`rate` 一路往一个方向转，转到某个角度时画面内容可能变少，"fps 不掉"就有
         // 第二种解释（要画的东西少了）；`swing` 让相机在基准机位附近往复，整段窗口看着同一片内容。
         // 逐姿态的实测内容量写进逐轮行 `sweep_cov=` / `sweep_seen=` / `sweep_drawn=`（见 clipInsideRatio）。
-        `spin_def=${v.spinMode === "swing" ? "amplitude_deg_of_sine_swing_about_base_view" : "deg_per_frame_about_vertical_axis_through_pivot"}`,
+        `spin_def=${
+            v.spinMode === "swing"
+                ? "amplitude_deg_of_sine_swing_about_base_view"
+                : v.spinMode === "roll"
+                  ? "deg_per_frame_about_camera_view_axis"
+                  : v.spinMode === "static"
+                    ? "static_base_yaw_offset_deg"
+                    : "deg_per_frame_about_vertical_axis_through_pivot"
+        }`,
         `spin=${fmt(v.spinDeg ?? 0, 3)}`,
         `spin_mode=${v.spinMode ?? "rate"}`,
         `spin_period=${v.spinPeriod === undefined ? "-" : String(v.spinPeriod)}`,
@@ -1564,6 +1973,76 @@ export interface RoundResult extends SegTimingFields {
     timerFloorSrc?: string;
     /** true = 本轮帧率已被驱动地板卡住（`1/fps ≤ timer_floor_ms × 1.05`），不能当渲染极限读 */
     fpsCapped?: boolean;
+    // ---------------------------------------------------------------- 离屏论文协议（benchmode=offscreen-paper-match）
+    /** 本轮使用的基准协议：`onscreen-realworld`（缺省）| `offscreen-paper-match`（离屏，复刻论文 §5.1） */
+    benchMode?: string;
+    /** 离屏渲染目标指纹（如 `fbo:1600x1063`）；在屏协议不打印 */
+    offscreenTarget?: string;
+    /** 离屏协议：每个 run 计的帧数（与在屏协议的 `frames` 相同，保证两协议每轮帧数一致） */
+    offscreenFramesPerRun?: number;
+    /** 离屏协议：预热帧数（不计入任何统计） */
+    offscreenWarmupFrames?: number;
+    /** 离屏协议：预热阶段耗时（墙钟 ms，仅诊断） */
+    offscreenWarmupMs?: number;
+    /** 离屏协议：run 数（多轮取平均的轮数） */
+    offscreenRuns?: number;
+    /** 离屏协议：各 run FPS 的均值（**主指标**，与论文 147/151 FPS 同协议对比用） */
+    offscreenFpsMean?: number;
+    /** 离屏协议：各 run FPS 的（总体）标准差 */
+    offscreenFpsStd?: number;
+    /** 离屏协议：各 run FPS 的最小 / 最大 / 中位数（诊断：看轮间抖动） */
+    offscreenFpsMin?: number;
+    offscreenFpsMax?: number;
+    offscreenFpsMedian?: number;
+    /** 离屏协议：各 run 均帧间隔（含 GPU 进度检查）的中位数（ms） */
+    offscreenFrameMsMedian?: number;
+    /** 离屏协议：非阻塞 GPU 进度检查累计耗时 / 观察到的最大在途栅栏数 / 栅栏积压上限 */
+    offscreenFenceWaitMs?: number;
+    offscreenFencesMax?: number;
+    offscreenFencesLimit?: number;
+    /** 离屏协议：本模式的实测驱动地板（msgchannel 空转校准，ms）与是否被它卡住 */
+    offscreenDriverFloorMs?: number;
+    offscreenDriverCapped?: boolean;
+    /** 离屏协议：逐 run FPS 列表（逗号分隔，如 `147.2,146.8,...`） */
+    offscreenRunFpsList?: string;
+    /** 离屏协议：GPU 同步策略说明（`fence_sync_clientwait0_cap3` 之类，两臂同字面量） */
+    offscreenSyncPolicy?: string;
+    /** 离屏协议：驱动降频（每多少帧让出一次）/ 让出次数 / 让出耗时中位数（ms） */
+    offscreenTickEvery?: number;
+    offscreenTickCalls?: number;
+    offscreenTickMsMedian?: number;
+    /** 自然模式（`?sync=natural&driver=raf`）：逐秒窗口 FPS 统计（用户体感口径；NW=完整秒数） */
+    offscreenNatWinN?: number;
+    offscreenNatFpsMin?: number;
+    offscreenNatFpsMax?: number;
+    offscreenNatFpsMean?: number;
+    offscreenNatFpsSd?: number;
+    /** 离屏协议 FPS 的口径来源：`gpu-timer`（GPU 计时查询，推荐）/ `wall-clock`（帧间隔） */
+    /**
+     * [LAB 2026-09-28] 与 flux 臂**同结构、同 tag 名**的耗时分解（总量 ms）：`T`=tick 让出、`F`=帧内计算+GL 提交、
+     * `G`=帧间纯等待、`E`=run 末收尾(drain+等待)、`RA`/`RB`=E 的两段、`RAf/RAp/RAw/RAo/RAsc`=drainAll 三段账目与次数、
+     * `EW/ER`=预热末/run 末 drain、`WAIT`=门自记账、`P/S`=发给 sort worker 的矩阵次数/真正排序次数、`WU`=预热耗时、
+     * `EL`=各 run 计时窗之和、`SMP`=计帧总数、`SUM`=T+F+G+E、`RES=EL−SUM`（对账余项，应 ≈ −EW）。
+     * 为什么必须要有：`cpuMs` 在离屏口径里 = `1000/fps`（fps 的倒数，非独立测量），`syncMs` = `fenceWaitMs/帧数`
+     * （把**排空**摊到每帧）⇒ 二者都无法回答"帧循环本身很慢"时的"时间去哪了"（2026-09-28 用户指出的矛盾）。
+     */
+    offscreenLabNote?: string;
+
+    offscreenFpsSource?: string;
+    /** 离屏协议：每帧 GPU 真实执行时间的中位数（ms，来自 EXT_disjoint_timer_query_webgl2） */
+    offscreenGpuMsMedian?: number;
+    /** 离屏协议：GPU 受限帧率（= 1000 / GPU 中位毫秒）的均值与标准差（`fpsSource=gpu-timer` 时即主指标） */
+    offscreenGpuFpsMean?: number;
+    offscreenGpuFpsStd?: number;
+    /** 离屏协议：有效 GPU 计时样本数 / 被丢弃样本数（诊断：样本太少说明查询回读没跟上） */
+    offscreenGpuSamples?: number;
+    offscreenGpuMisses?: number;
+    /**
+     * 离屏协议：GPU 计时器的**逐步诊断**一行摘要。`ext=1(fetched=1,null=0) create=12/0/0 begin=12/0 end=12/0
+     * seq(overwrite=0,orphanEnd=0) probe=12/12/0 resultErr=0 drop(disjoint=0,range=0) ctxLost=0 samples=12
+     * pending=0 err=-` —— 每段单独可读，用于判定"扩展没拿到 / 调用时序错 / 驱动不完整"。
+     */
+    offscreenGpuDiag?: string;
     /** 本轮的像素口径（`forced` = 统一像素协议；本文臂恒为 forced） */
     resMode?: string;
     /** 本轮实际完成的测帧数（应等于 frames 参数） */
@@ -1774,6 +2253,37 @@ export const ROUND_RESULT_NUM_KEYS = [
     "syncP90",
     "frameP50",
     "frameP90",
+    // 离屏论文协议（`benchmode=offscreen-paper-match`）：多轮平均 + 栅栏诊断的数值字段
+    "offscreenFramesPerRun",
+    "offscreenWarmupFrames",
+    "offscreenWarmupMs",
+    "offscreenRuns",
+    "offscreenFpsMean",
+    "offscreenFpsStd",
+    "offscreenFpsMin",
+    "offscreenFpsMax",
+    "offscreenFpsMedian",
+    "offscreenFrameMsMedian",
+    "offscreenFenceWaitMs",
+    "offscreenFencesMax",
+    "offscreenFencesLimit",
+    "offscreenDriverFloorMs",
+    // GPU 计时口径（本环境唯一可信的 FPS 口径）
+    "offscreenGpuMsMedian",
+    "offscreenGpuFpsMean",
+    "offscreenGpuFpsStd",
+    "offscreenGpuSamples",
+    "offscreenGpuMisses",
+    // 驱动降频（`?tickevery=N`）与让出代价：手机端判断"瓶颈是驱动还是 GPU"的依据（**数值字段**）
+    "offscreenTickEvery",
+    "offscreenTickCalls",
+    "offscreenTickMsMedian",
+    // 自然模式（`?sync=natural&driver=raf`）逐秒窗口 FPS 统计
+    "offscreenNatWinN",
+    "offscreenNatFpsMin",
+    "offscreenNatFpsMax",
+    "offscreenNatFpsMean",
+    "offscreenNatFpsSd",
 ] as const satisfies readonly (keyof RoundResult)[];
 /** 字符串字段（列表类字段也在这里，逐姿态/逐帧数据用逗号分隔） */
 export const ROUND_RESULT_STR_KEYS = [
@@ -1787,6 +2297,16 @@ export const ROUND_RESULT_STR_KEYS = [
     "timeline",
     "timerFloorSrc",
     "resMode",
+    // 离屏论文协议：模式名 / 渲染目标指纹 / GPU 同步策略 / 逐 run FPS 列表 / FPS 口径
+    "benchMode",
+    "offscreenTarget",
+    "offscreenSyncPolicy",
+    "offscreenRunFpsList",
+    "offscreenFpsSource",
+    // [LAB 2026-09-28] 耗时分解段（与 flux 的 `|lab…` 同结构；见 RoundResult.offscreenLabNote）
+    "offscreenLabNote",
+    // GPU 计时器的逐步诊断（扩展/创建/begin/end/时序/探测各段）
+    "offscreenGpuDiag",
     "poseKey",
     "poseSrc",
     "spinPivot",
@@ -1817,6 +2337,8 @@ export const ROUND_RESULT_BOOL_KEYS = [
     "contextLost",
     "loseCtx",
     "fpsCapped",
+    // 离屏论文协议：msgchannel 驱动地板是否卡住了本轮的帧率
+    "offscreenDriverCapped",
     "sortLagOn",
 ] as const satisfies readonly (keyof RoundResult)[];
 /** 三张表的并集（`copyRoundResultFields` 的遍历对象） */
@@ -2066,6 +2588,44 @@ export function hopUrlFor(nextUrl: string): string {
     url.searchParams.set("delay", String(delay));
     url.searchParams.set("next", nextUrl);
     return url.href;
+}
+
+// ------------------------------------------------------------------ 完成页（零 GL 收尾，2026-09-28 真机现场后新增）
+/**
+ * 离屏论文档**跑完回传之后**把本页整页换成"完成页"（`bench-done.html`，零 GL/零 Worker）。
+ *
+ * 为什么需要：手机端（微信 XWEB / Adreno 740）同一进程里"同时活着的 bench 页"会吃掉 WebGL 上下文与显存配额——
+ * 跑完的页面即使不再操作，仍攥着上下文 + 61 万/73.9 万点的显存，到第 8~9 个任务时
+ * `canvas.getContext('webgl2')` 直接返回 **null**（不是 context lost，清理/等待都救不回来；
+ * 见 `perPageMode()` 与 `bench-flux.ts` 里 `probeWebGL2()` 的说明）。
+ * 现场证据：36 秒内开出 4 条链接（4 个 bench 页同时活着）⇒ 4 条全 `ok=0`；
+ * 把标签页关掉 + 微信重启后 smoke 两条全 `ok=1`。
+ *
+ * 整页替换是**唯一确定性**释放本页全部上下文/显存的办法，且**不改任何测量**：
+ * 它发生在结果回传完成之后，既不进 fetch/parse/首帧，也不进任何 FPS 口径。
+ *
+ * 开关：`?done=0` 关闭；`?done=1` 强制（本地验证用，不要求 `report=`）；缺省 = 仅当带 `report=`
+ * （外部测试者流程）且**回传成功**时才跳（回传失败时留在结果卡上，方便测试者复制文本）。
+ */
+export const DONE_PAGE = "bench-done.html";
+/** 完成页读取结果原文用的 sessionStorage 键（同源整页跳转，键跨页可见）。 */
+export const DONE_TEXT_KEY = "ch7_done_text";
+/** 回传结束后按需跳完成页；`?done=` 语义见上。`partial=true`（整轮任务中途中止）时**不跳**：留给测试者看"重启后续跑"提示。 */
+export function gotoDonePageIfEnabled(info: { ok: boolean; u?: string; text?: string; partial?: boolean }): void {
+    if (info.partial) return;
+    const mode = param("done", "");
+    const enabled = mode === "1" || (mode !== "0" && param("report", "") !== "" && info.ok);
+    if (!enabled) return;
+    try {
+        if (info.text) sessionStorage.setItem(DONE_TEXT_KEY, info.text);
+    } catch {
+        /* 隐私模式可能禁用 sessionStorage：完成页拿不到原文也能显示状态与提示 */
+    }
+    const url = new URL(DONE_PAGE, location.href);
+    url.searchParams.set("u", info.u || "-");
+    url.searchParams.set("ok", info.ok ? "1" : "0");
+    // 先让结果卡渲染出来（测试者能瞥见状态），再整页替换：本页上下文/显存随之确定性释放
+    setTimeout(() => location.replace(url.href), 900);
 }
 
 export function jobTimeoutMs(): number {

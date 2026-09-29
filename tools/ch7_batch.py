@@ -366,9 +366,14 @@ def cmd_link(args):
     if fast:
         print("⚠ rounds=%d < 协议要求的 %d：本批只用于【跑通链路 / 看趋势】，不得进表；"
               "正式采集请去掉 --rounds（或写 --rounds %d）" % (rounds, proto_rounds, proto_rounds))
+    if getattr(args, "smoke", False):
+        print("⚠ 摸底档（--smoke）：frames=30 & warmup=10 & runs=1 & diag=1 —— 真机上 1–2 分钟看清"
+              "「跑不跑得完 / 实际生效的同步策略 / 数字量级」，**不得进表**（frames 不是协议值）。")
     print("-" * 100)
     print(C.build_url(args.base, group, keys[0], platform=args.platform, report=report,
                       rtok=args.token, subset=profile_arg, rounds=rounds, hopms=args.hopms or None,
+                      protocol=getattr(args, "protocol", "onscreen-realworld"),
+                      smoke=getattr(args, "smoke", False), sync=getattr(args, "sync", None),
                       u="%s-%s-%s" % (args.name, args.platform, override or group)))
     if group == C.GRP_FLUX and not profile_arg:
         print("ℹ Flux-GS 很慢：建议改成分 3 片发（--subset bicycle,flowers,garden,stump,treehill,room,counter,kitchen,bonsai"
@@ -601,6 +606,16 @@ def build_parser():
     p5.add_argument("--hopms", type=int, default=0,
                     help="轮间零上下文中转页停留毫秒（0=用页面默认 1500；手机上下文紧张时加到 3000–5000，§12.8）")
     p5.add_argument("--arm", default=None, choices=[None, "r7", "std45"], help="仅表 7-5 需要")
+    p5.add_argument("--protocol", default="onscreen-realworld",
+                    choices=["onscreen-realworld", "offscreen-paper-match"],
+                    help="基准协议：缺省 onscreen-realworld（历史口径，行为与以前完全一致）；"
+                         "offscreen-paper-match = 复刻论文 §5.1 的离屏协议"
+                         "（benchmode/runs=5/warmup=90/fences=3/sync=gputimer，两臂同参数）")
+    p5.add_argument("--smoke", action="store_true",
+                    help="摸底档：frames=30&warmup=10&runs=1&diag=1（真机上最短链路，"
+                         "只为看「跑不跑得完 / 实际同步策略 / 数字量级」，**不得进表**）")
+    p5.add_argument("--sync", default=None, choices=["gputimer", "fence", "each"],
+                    help="离屏协议显式指定同步策略（摸底 A/B：缺省回落链 vs 强制 fence）")
     p5.set_defaults(func=cmd_link)
 
     p6 = sub.add_parser("status", help="现状一眼看全：隧道状态 / 最新回传原文 / 已落盘轮次 / 下一步命令")

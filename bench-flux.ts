@@ -40,6 +40,7 @@ import {
     camSpinDegPerFrame,
     clipInsideRatio,
     driveThroughputFrames,
+    gotoDonePageIfEnabled,
     hopUrlFor,
     maxMatrixDiff,
     mulMat4,
@@ -66,6 +67,21 @@ import {
     sweepSampleCount,
     throughputFields,
     viewCameraPosition,
+    // 两种基准协议（`?benchmode=`，缺省 = 在屏真实协议）
+    BENCH_MODE_OFFSCREEN,
+    benchMode,
+    meanStd,
+    offscreenDisclaimerLines,
+    offscreenMaxFencesInFlight,
+    offscreenRoundTags,
+    offscreenRunCount,
+    offscreenSyncMode,
+    offscreenTickEvery,
+    isNaturalMode,
+    isWallClockBudgetMode,
+    naturalSeconds,
+    offscreenWarmupFrames,
+    throughputDriver,
 } from "./bench-shared";
 import type {
     DriveThroughputStats,
@@ -75,6 +91,25 @@ import type {
     SweepResult,
     SweepSample,
 } from "./bench-shared";
+// 离屏论文协议的测帧内核（**两臂共用同一份纯协议实现**）+ 离屏渲染目标/非阻塞栅栏门
+// （后者来自本仓库 src/，是一份与渲染器无关的 GL 小工具：本文臂与基线臂套的是同一个类）
+import { runOffscreenProtocol, offscreenAsThroughputStats, resolveOffscreenSyncMode, syncPolicyLabelWithNote } from "./bench-offscreen";
+import type { OffscreenGateSample, OffscreenProtocolResult } from "./bench-offscreen";
+import {
+    NonBlockingFrameGate,
+    OffscreenGpuTimer,
+    OffscreenRenderTarget,
+} from "./src/renderers/webgl/utils/OffscreenBenchTarget";
+import type { GlTimerQueryApi } from "./src/renderers/webgl/utils/OffscreenBenchTarget";
+// [CLR/BAND 2026-09-28] 与本文臂**同实现、同 FBO 配置**的 pure-clear 探针 + 带标签工具
+import {
+    bandTag,
+    clearProbeIterationsFromUrl,
+    clearProbeRepsFromUrl,
+    clearProbeResolutionsFromUrl,
+    formatClearProbeTags,
+    runClearProbeOnDevice,
+} from "./src/renderers/webgl/utils/OffscreenBenchTarget";
 
 // ------------------------------------------------------------------ DOM
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -171,6 +206,10 @@ interface FluxBenchEnd {
     canvasH: number;
     dpr: number;
     downsample: number;
+    /** [BENCH] 顶点着色器实际生效的 focal（`[focal.x, focal.y]`，单位=画布像素；点尺寸 ∝ 它） */
+    focalApplied?: number[] | null;
+    /** [BENCH] 顶点着色器实际生效的 viewport uniform（`[projW, projH]`；点尺寸按它归一） */
+    viewportUniform?: number[] | null;
     points: number;
     /** BEGIN 之后**真正完成**的排序次数（效度自查）：静止机位下基线 worker 的早退会让它停在 1 */
     sorts?: number;
@@ -292,6 +331,50 @@ interface RoundResult extends SegTimingFields {
     dumped?: number;
     /** 本轮渲染器解码出的真实点数（`__FLUXGS_BENCH_END__.points`）：核对点数档与负载量级 */
     points?: number;
+    // ---------------------------------------------------------------- 离屏论文协议（两臂同名字段）
+    /** 本轮使用的基准协议：`onscreen-realworld`（缺省）| `offscreen-paper-match`（离屏，复刻论文 §5.1） */
+    benchMode?: string;
+    /** 离屏渲染目标指纹（如 `fbo:1600x1063`）；在屏协议不打印 */
+    offscreenTarget?: string;
+    offscreenFramesPerRun?: number;
+    offscreenWarmupFrames?: number;
+    offscreenWarmupMs?: number;
+    offscreenRuns?: number;
+    /** 各 run FPS 的均值/标准差/极值（**主指标**，与论文 147/151 FPS 同协议对比用） */
+    offscreenFpsMean?: number;
+    offscreenFpsStd?: number;
+    offscreenFpsMin?: number;
+    offscreenFpsMax?: number;
+    offscreenFpsMedian?: number;
+    offscreenFrameMsMedian?: number;
+    offscreenFenceWaitMs?: number;
+    offscreenFencesMax?: number;
+    offscreenFencesLimit?: number;
+    offscreenDriverFloorMs?: number;
+    offscreenDriverCapped?: boolean;
+    offscreenRunFpsList?: string;
+    offscreenSyncPolicy?: string;
+    /** 离屏协议：驱动降频（每多少帧让出一次）/ 让出次数 / 让出耗时中位数（ms） */
+    offscreenTickEvery?: number;
+    offscreenTickCalls?: number;
+    offscreenTickMsMedian?: number;
+    /** 自然模式（`?sync=natural&driver=raf`）：逐秒窗口 FPS 统计（用户体感口径；NW=完整秒数） */
+    offscreenNatWinN?: number;
+    offscreenNatFpsMin?: number;
+    offscreenNatFpsMax?: number;
+    offscreenNatFpsMean?: number;
+    offscreenNatFpsSd?: number;
+    /** 离屏协议 FPS 的口径来源：`gpu-timer`（GPU 计时查询，推荐）/ `wall-clock`（帧间隔） */
+    offscreenFpsSource?: string;
+    /** 每帧 GPU 真实执行时间的中位数（ms，`EXT_disjoint_timer_query_webgl2`） */
+    offscreenGpuMsMedian?: number;
+    /** GPU 受限帧率（= 1000 / GPU 中位毫秒）的均值/标准差（`fpsSource=gpu-timer` 时即主指标） */
+    offscreenGpuFpsMean?: number;
+    offscreenGpuFpsStd?: number;
+    /** 有效 GPU 计时样本数 / 丢弃样本数（诊断） */
+    offscreenGpuSamples?: number;
+    offscreenGpuMisses?: number;
+    offscreenGpuDiag?: string;
 }
 interface BenchState {
     v: number;
@@ -507,6 +590,15 @@ type FluxWindow = Window & {
     __FLUXGS_BENCH_END__?: () => FluxBenchEnd;
     /** 内容量扫描：在指定姿态渲染一帧并回报覆盖率/实例数/投影矩阵（测帧窗口之后调用，不进计时） */
     __FLUXGS_BENCH_SWEEP__?: (view16: number[]) => FluxBenchSweep | null;
+    /**
+     * [BENCH INSTRUMENTATION] 离屏论文协议（`benchmode=offscreen-paper-match`）需要的两个入口：
+     *   - `__FLUXGS_BENCH_GL__()`：交出渲染器**自己在用的** WebGL2 上下文（本页据此在**它的**上下文上
+     *     建离屏 FBO —— 与本文臂 `WebGLRenderer.createOffscreenTarget()` 用的是同一个类，两臂同协议）；
+     *   - `__FLUXGS_BENCH_FRAME_OFFSCREEN__()`：渲染恰好一帧、**不做 `gl.finish()`**
+     *     （非阻塞 GPU 进度检查由驱动页用 `NonBlockingFrameGate` 负责，两臂同一套策略）。
+     */
+    __FLUXGS_BENCH_GL__?: () => WebGL2RenderingContext | null;
+    __FLUXGS_BENCH_FRAME_OFFSCREEN__?: () => FluxBenchFrame | null;
 };
 
 /** 轮询等待渲染器暴露注入接口并调用（钩子在 main() 里 fetch 之后才定义，需要等一下）。 */
@@ -770,6 +862,269 @@ async function driveFluxFrames(
 }
 
 /**
+ * 空 `FluxBenchEnd`（只用于"离屏协议 + 渲染器没交出 END 钩子"的极端情况）：
+ * 各字段给"未取到"的安全值，绝不让 `undefined.frames` 之类的读法把整轮炸掉。
+ */
+function emptyFluxEnd(): FluxBenchEnd {
+    return {
+        frames: 0,
+        syncSamples: [],
+        coveredPct: 0,
+        canvasW: 0,
+        canvasH: 0,
+        dpr: 0,
+        downsample: 0,
+        points: 0,
+        view: [],
+    };
+}
+
+/**
+ * **离屏论文协议（基线臂）**：在 Flux-GS **自己的 WebGL2 上下文**上建离屏 FBO，用 driver=msgchannel 的
+ * 协议内核跑 `warmup → N×frames` 帧，每帧渲染后只做**非阻塞**栅栏检查。
+ *
+ * 与本文臂的对称性（这是"两臂在同一协议下比较"的全部依据，缺一项则该轮不可比）：
+ *   - 渲染目标：同一个 `OffscreenRenderTarget` 类（`src/renderers/webgl/utils/OffscreenBenchTarget.ts`）；
+ *     本文臂由 `WebGLRenderer.createOffscreenTarget()` 内部绑定，本臂在这里显式 bind/unbind，
+ *     因为 vendored 参考实现不能在它自己的 `frame()` 里插我们的绑定逻辑。
+ *   - 驱动：同一个 `runOffscreenProtocol()` 内核（msgchannel tick；不经 rAF、不吃 setTimeout 钳制）。
+ *   - GPU 进度检查：同一个 `NonBlockingFrameGate` 类（`fenceSync` + `clientWaitSync(0)`，上限 3 帧）。
+ *     注意本臂**不再走** `__FLUXGS_BENCH_FRAME__`（那个入口内部自带 `gl.finish()`），
+ *     而是走 `__FLUXGS_BENCH_FRAME_OFFSCREEN__`（只渲染、不同步）。
+ *   - 分辨率/机位：iframe 仍由 `benchres=` 钉在同一个 res 上，viewProj 由同一套机位注入逻辑驱动。
+ */
+/**
+ * [INJ 2026-09-29 实验A] **反向因果验证**：往 flux 臂人为植入"每帧 N MB 的 `bufferData` 重分配"。
+ *
+ * 为什么这样做：候选①（本文臂每帧用 `bufferData` 重新分配约 2.4 MB 的深度序缓冲）只能靠
+ * "改掉它看有没有变快"来验证；但**更强的证据是反着来**：把一个同模式的资源开销塞进 flux，
+ * 看它的 `gpu_ms` 是否出现与 ours 劣势**同量级**的上升。
+ *   · 植入后 flux 明显变慢（且幅度与 ours 的劣势相近）⇒ 候选① 成立的强因果证据；
+ *   · 植入后 flux 几乎不动 ⇒ 候选① 不是主因 ⇒ 精力转向候选②（tile 架构）。
+ * 参数：`?injmb=2.4`（缺省 0 = 完全关闭，行为与历史一致；内容为占位数据，不影响渲染结果）。
+ */
+const injBytes = 0; // [2026-09-29 止血] 临时**硬关闭**注入：先让 flux 渲染路径回到 12:42/12:50 那两条成功数据时的状态，
+// 用来一刀切开"我加的注入代码 vs 环境/启动开关"这两类原因（见 _diag.cmd / _ver*.log）。
+// 原实现（IIFE 读 ?injmb=）：实验 A 定位到原因后再恢复。
+let injBuf: WebGLBuffer | null = null;
+let injData: Uint8Array | null = null;
+let injProg: WebGLProgram | null = null;
+let injLoc = -1;
+
+/**
+ * [INJ-CONSUME 2026-09-29] 让注入的 buffer **被 GPU 真正消费**。
+ *
+ * 为什么必须补这一步：只做 `createBuffer + bufferData` 时，驱动完全可能把这次上传
+ * **推迟或丢弃**（无任何消费者）；而本文臂的深度序 buffer 是被 draw call 当**顶点属性**读的
+ * ⇒ "GPU 必须等上传完成才能继续"这一点才是我们想复刻的开销模式。
+ * 做法：一次性建一个 1 点的小程序，把注入 buffer 绑成它的顶点属性并 `drawArrays(POINTS,0,1)`；
+ * 顶点着色器**真的读了** a.x/a.y（只是乘一个极小系数），而 `z=2` 保证落在裁剪体外 ⇒
+ * **不会写任何像素**、不影响渲染结果，但强制消费了这次上传。
+ */
+function injEnsureProgram(g: WebGL2RenderingContext): void {
+    if (injProg) return;
+    const vs = g.createShader(g.VERTEX_SHADER);
+    const fs = g.createShader(g.FRAGMENT_SHADER);
+    if (!vs || !fs) return;
+    g.shaderSource(
+        vs,
+        "attribute vec4 a; void main(){ gl_Position = vec4(a.x*1e-30, a.y*1e-30, 2.0, 1.0); }",
+    );
+    g.shaderSource(fs, "precision lowp float; void main(){ gl_FragColor = vec4(0.0); }");
+    g.compileShader(vs);
+    g.compileShader(fs);
+    const p = g.createProgram();
+    if (!p) return;
+    g.attachShader(p, vs);
+    g.attachShader(p, fs);
+    g.linkProgram(p);
+    injProg = p;
+    injLoc = g.getAttribLocation(p, "a");
+}
+
+/** 结果行里的注入标记（MB/帧；0 = 关闭）——供事后按"是否植入"筛数据。 */
+const injTag = (injBytes / 1048576).toFixed(1);
+
+
+/** [LAB 2026-09-28] 本臂耗时分解累加器（父页内直接可读；写进结果行的 `offscreen_note=|lab...` 段） */
+const fluxLab = {
+    tickMs: 0,
+    frameMs: 0,
+    gapMs: 0,
+    endRunMs: 0,
+    drainMs: 0,
+    waitMs: 0,
+    // 三段账目 + 预热/run 拆分（与本文臂同结构）
+    finishMs: 0,
+    readPixelsMs: 0,
+    fencePollMs: 0,
+    bindMs: 0,
+    drainCalls: 0,
+    waitTotalMs: 0,
+    drainWarmMs: 0,
+    drainRunMs: 0,
+    endRunCalls: 0,
+    // [RECON 2026-09-28] 与本文臂**同口径**的对账量（缺了它们 flux 就无法做与 ours 相同的验收）：
+    //   EL = 各 run 计时窗之和（`off.runs[].elapsedMs` 相加）、SMP = 计帧总数、TK = 让出频率；
+    //   SUM = T+F+G+E（原始四项）、SUM2 = F+(G−T)+E（`tick` 落在帧间，去重后）。
+    elMs: 0,
+    smp: 0,
+    sum: 0,
+    sum2: 0,
+    tickEvery: 0,
+};
+/** [BENCH 2026-09-28] iframe 内顶点着色器**实际生效**的 focal / viewport（splat 像素尺寸的全部输入）。
+ *  来源：`__FLUXGS_BENCH_END__` 快照里的 `focalApplied`/`viewportUniform`（由 main.js 的 resize() 落盘）。
+ *  作用：把"downsample 是否污染了点尺寸"从"代码推断"升级为"每轮实测可核"——若 focal/2 != fx 或
+ *  viewportUniform != [resW,resH]，结果行会直接显形。 */
+let lastFocalApplied: number[] | null = null;
+let lastViewportUniform: number[] | null = null;
+
+async function driveFluxOffscreenRuns(
+    cw: FluxWindow,
+    framesPerRun: number,
+    warmupFrames: number,
+    numRuns: number,
+    target: OffscreenRenderTarget,
+    gate: NonBlockingFrameGate,
+    spin: SpinInjection | null,
+): Promise<OffscreenProtocolResult> {
+    // [LAB 2026-09-28] 本臂耗时分解（与本文臂同结构；写进父页 `offscreen_note=` 的 `|lab...` 段）
+    fluxLab.tickMs = 0;
+    fluxLab.frameMs = 0;
+    fluxLab.gapMs = 0;
+    fluxLab.endRunMs = 0;
+    fluxLab.drainMs = 0;
+    fluxLab.waitMs = 0;
+    const begin = cw.__FLUXGS_BENCH_BEGIN__;
+    const step = cw.__FLUXGS_BENCH_FRAME_OFFSCREEN__;
+    if (typeof begin !== "function" || typeof step !== "function") {
+        throw new Error(
+            "Flux-GS 渲染器未暴露离屏测帧入口（__FLUXGS_BENCH_FRAME_OFFSCREEN__/__FLUXGS_BENCH_BEGIN__）：" +
+                "请确认 render_shared/main.js 的 [BENCH INSTRUMENTATION] 钩子未被覆盖",
+        );
+    }
+    begin.call(cw, { frames: numRuns * framesPerRun + warmupFrames });
+    // 视觉消歧（2026-09-26 真机反馈："Flux 离屏时屏上还能看到渲染"）：测量前把**画布**清成黑一次。
+    // 之后所有帧都画进离屏 FBO、画布不再更新 —— "黑屏 + 进度文字"即离屏生效的直观证据；
+    // 若其后画布仍出现新画面，说明这一轮没有真正离屏（那才是 bug，需查 FBO 绑定是否被覆盖）。
+    {
+        const gl0 = cw.__FLUXGS_BENCH_GL__?.() ?? null;
+        if (gl0) {
+            try {
+                gl0.bindFramebuffer(gl0.FRAMEBUFFER, null);
+                gl0.clearColor(0, 0, 0, 1);
+                gl0.clear(gl0.COLOR_BUFFER_BIT);
+                gl0.flush();
+            } catch {
+                /* 上下文丢失时忽略 */
+            }
+        }
+    }
+    const setCam = cw.__FLUXGS_SET_CAM__;
+    const gateSample = (): OffscreenGateSample => ({
+        fenceWaitMs: gate.waitTotalMs,
+        fencesMax: gate.maxInFlightSeen,
+        fencesLimit: gate.maxInFlight,
+        forcedDrains: gate.forcedDrains,
+        firstPollSignaled: gate.firstPollSignaled,
+    });
+    const timer = gate.gpuTimer;
+    const off = await runOffscreenProtocol({
+        framesPerRun,
+        numRuns,
+        warmupFrames,
+        // `batch` 策略：计时终点必须取在 run 末排空之后（否则只量到提交速率）
+        timingEndAfterDrain: gate.mode === "batch",
+        // 驱动降频：本臂帧由父页直接调用（无 postMessage 往返），但仍与本文臂用同一个缺省，保证口径一致
+        tickEveryFrames: offscreenTickEvery(),
+        // 自然模式：驱动取自 URL（`driver=raf` = vsync 边界），按 30 秒墙钟跑满（与本文臂同口径）
+        driver: throughputDriver(),
+        durationMs: isWallClockBudgetMode() ? naturalSeconds() * 1000 : undefined,
+        hooks: {
+            beforeFrame: () => gate.beginFrame(),
+            renderFrame: (run, frame) => {
+                if (spin && typeof setCam === "function") {
+                    // 帧号从预热第一帧起连续计数（run<0 = 预热）；与本文臂同一条轨迹、同一取号方式
+                    const index = run < 0 ? frame : warmupFrames + run * framesPerRun + frame;
+                    setCam.call(cw, orbitViewMatrix(spin.v0, spinYawDegAt(spin.spec, index), spin.pivot));
+                }
+                // 渲染目标绑定/解绑包住"恰好一帧"：这一帧的全部绘制命令落在离屏 FBO 上
+                target.bind();
+                try {
+                    step.call(cw);
+                    // [INJ 2026-09-29 实验A] 每帧注入 N MB 的 `bufferData` 重分配（同上下文、同队列），
+                    //   并**用一次 1 点 draw 真正消费它**（否则驱动可能推迟/丢弃这次上传 ⇒ 严重低估开销）。
+                    //   缺省不执行（`?injmb=` 未给）。占位数据与画面无关；该 draw 落在裁剪体外 ⇒ 不写像素。
+                    if (injBytes > 0) {
+                        const g = cw.__FLUXGS_BENCH_GL__?.() ?? null;
+                        if (g) {
+                            if (!injBuf) injBuf = g.createBuffer();
+                            if (!injData) injData = new Uint8Array(injBytes);
+                            g.bindBuffer(g.ARRAY_BUFFER, injBuf);
+                            g.bufferData(g.ARRAY_BUFFER, injData, g.DYNAMIC_DRAW);
+                            injEnsureProgram(g);
+                            if (injProg && injLoc >= 0) {
+                                g.useProgram(injProg);
+                                g.enableVertexAttribArray(injLoc);
+                                g.vertexAttribPointer(injLoc, 4, g.FLOAT, false, 0, 0);
+                                g.drawArrays(g.POINTS, 0, 1); // ← 强制消费（GPU 必须读完这次上传）
+                            }
+                        }
+                    }
+                } finally {
+                    target.unbind();
+                }
+            },
+            // ★ 必须**驱动门**（本帧收口：gputimer→end 计时查询 / fence→插栅栏并轮询 /
+            //   each→finish+1×1 readPixels），再返回累计快照。缺这一行就会让整条同步/计时通路空转。
+            afterFrame: () => {
+                gate.afterFrame();
+                return gateSample();
+            },
+            endRun: async () => {
+                const isWarm = fluxLab.endRunCalls++ === 0; // 第 1 次 = 预热末尾那次
+                const tDrain = performance.now();
+                gate.drainAll();
+                const drainMs = performance.now() - tDrain;
+                fluxLab.drainMs += drainMs;
+                if (isWarm) fluxLab.drainWarmMs += drainMs;
+                else fluxLab.drainRunMs += drainMs;
+                const tWait = performance.now();
+                // 等 GPU 计时查询回读（本环境 CPU 提交远快于 GPU 执行，不等就一个样本都取不到）
+                await timer?.waitForPending(3000);
+                fluxLab.waitMs += performance.now() - tWait;
+            },
+            gpuMsSamples: () => timer?.samples ?? [],
+            gpuMisses: () => timer?.misses ?? 0,
+            gpuDiag: () => timer?.diagLine() ?? "",
+        },
+    });
+    // [LAB] 把协议内核的三段合计抄进本臂的 lab 记录（父页直接用，不需要跨文档传）
+    fluxLab.tickMs = off.tickMsTotal;
+    fluxLab.frameMs = off.frameMsTotal;
+    fluxLab.gapMs = off.gapMsTotal;
+    fluxLab.endRunMs = off.endRunMsTotal;
+    // [RECON 2026-09-28] 对账量（定义与本文臂 `bench-measure.ts` 的 `|lab…` 完全一致）
+    fluxLab.elMs = off.runs.reduce((a, r) => a + r.elapsedMs, 0);
+    fluxLab.smp = off.renderedFrames;
+    fluxLab.tickEvery = off.tickEvery;
+    fluxLab.sum = off.tickMsTotal + off.frameMsTotal + off.gapMsTotal + off.endRunMsTotal;
+    fluxLab.sum2 = off.frameMsTotal + (off.gapMsTotal - off.tickMsTotal) + off.endRunMsTotal;
+    // [LAB] 三段账目快照（finish / readPixels / fence 轮询 / bind 开销 / 调用次数 / 门自记账合计）
+    {
+        const b = gate.drainBreakdown;
+        fluxLab.finishMs = b.finishMs;
+        fluxLab.readPixelsMs = b.readPixelsMs;
+        fluxLab.fencePollMs = b.fencePollMs;
+        fluxLab.bindMs = b.bindOverheadMs;
+        fluxLab.drainCalls = b.drainCalls;
+        fluxLab.waitTotalMs = b.waitTotalMs;
+    }
+    return off;
+}
+
+/**
  * **内容量扫描（基线臂）**：沿**与本文臂同一条轨迹**取 k 个姿态，逐个姿态渲染一帧并回报内容量读数。
  *
  * 与本文臂的 `BenchContext.contentSweep()` 逐项对应（字段同名同格式）：
@@ -958,13 +1313,152 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
             }
         }
 
-        // 测帧：共享驱动（两臂同一个函数）逐帧调 iframe 的 __FLUXGS_BENCH_FRAME__（渲染 + gl.finish()）。
-        // BEGIN 在首个真实帧**之后**调用：native 档下机位就此冻结；forced 档在 load 时已冻结。
-        const {
-            stats: bench,
-            end,
-            spinErr,
-        } = await driveFluxFrames(cw, st.benchFrames, st.warmupFrames, 240000 + st.warmupFrames * 2000, spin);
+        // 测帧：两条协议各走各的内核，但共用同一组结果字段与统计口径（见 bench-offscreen 的转换表）。
+        //   - 在屏真实协议（缺省）：共享驱动（两臂同一个函数）逐帧调 iframe 的 `__FLUXGS_BENCH_FRAME__`
+        //     （渲染 + `gl.finish()`）。BEGIN 在首个真实帧**之后**调用：native 档下机位就此冻结；
+        //   - 离屏论文协议：`driveFluxOffscreenRuns()`（FBO + msgchannel + warm-up + N 轮平均），
+        //     走**不带 `gl.finish()`** 的 `__FLUXGS_BENCH_FRAME_OFFSCREEN__`，GPU 进度由非阻塞栅栏门负责。
+        const mode = benchMode();
+        let bench: DriveThroughputStats;
+        let end: FluxBenchEnd;
+        let spinErr: number | undefined;
+        if (mode === BENCH_MODE_OFFSCREEN) {
+            const framesPerRun = st.benchFrames;
+            const numRuns = offscreenRunCount();
+            const warmupFrames = st.warmupFrames;
+            // `force=native` 下本臂的画布尺寸由它自己的自适应策略决定（与 res 无关）→ 离屏 FBO 的
+            // 尺寸无从确定，且 native 档本来就不允许跨方法比 FPS。这里显式拒绝，避免测出"FBO 尺寸
+            // 与它实际光栅化的像素数不一致"的数（那种数的 fps 无法解释）。
+            if (resolutionMode() !== "forced") {
+                throw new Error(
+                    "离屏论文协议要求统一像素协议（`force=native` 下画布尺寸由 Flux-GS 自适应决定，" +
+                        "与离屏 FBO 尺寸无从对齐）：请去掉 `force=native` 或改用 `?force=WxH`",
+                );
+            }
+            // 渲染目标建在**它自己的寄存器上下文**上：同一个 `OffscreenRenderTarget` 类，与本文臂一致
+            const gl = cw.__FLUXGS_BENCH_GL__?.() ?? null;
+            if (!gl) {
+                throw new Error(
+                    "Flux-GS 未交出 WebGL2 上下文（__FLUXGS_BENCH_GL__ 缺失）：无法在它的上下文上建立离屏渲染目标",
+                );
+            }
+            const target = new OffscreenRenderTarget(gl, st.resW, st.resH);
+            if (!target.ready) {
+                const reason = target.reason;
+                target.dispose();
+                throw new Error(`Flux-GS 的离屏渲染目标不可用：${reason}`);
+            }
+            // GPU 计时器（`EXT_disjoint_timer_query_webgl2`）：本环境唯一可信的"GPU 真实耗时"仪器。
+            // 取不到扩展时按**回落链**退回 `fence`（非阻塞栅栏），并把"实际策略 + 回落原因"写进结果，
+            // 不静默。2026-09-26 真机教训：以前退回 `each`（每帧 `finish()` + 1×1 `readPixels`）→
+            // 手机上每帧 70ms、报出 13.8 FPS，与论文口径不可比（同一台设备在屏口径 ~200 FPS）。
+            const gpuTimer = new OffscreenGpuTimer(gl as unknown as GlTimerQueryApi);
+            const decided = resolveOffscreenSyncMode(offscreenSyncMode(), gpuTimer.supported);
+            const gpuMode = decided.mode;
+            const gate = new NonBlockingFrameGate(
+                gl,
+                offscreenMaxFencesInFlight(),
+                gpuMode,
+                {
+                    // 1×1 同步读回必须读在**离屏目标**上（我们的 renderFrame 每帧结束时已解绑）
+                    withTargetBound: <T>(fn: () => T) => {
+                        target.bind();
+                        try {
+                            return fn();
+                        } finally {
+                            target.unbind();
+                        }
+                    },
+                },
+                // 计时器始终传入：门只在 gputimer 模式下使用它，但它的逐步诊断在真机上是唯一现场证据
+                gpuTimer,
+            );
+            let off: OffscreenProtocolResult;
+            try {
+                off = await withTimeout(
+                    driveFluxOffscreenRuns(cw, framesPerRun, warmupFrames, numRuns, target, gate, spin),
+                    240000 + warmupFrames * 2000 + framesPerRun * numRuns * 400,
+                    `driveFluxOffscreenRuns(${framesPerRun}f x ${numRuns}run)`,
+                );
+            } finally {
+                // 目标、栅栏门与计时器用完就地释放（FBO 占 res 尺寸显存：1600×1063×4 ≈ 6.8MB）
+                gate.drainAll();
+                gpuTimer.drain();
+                target.dispose();
+            }
+            if (!off.completed) {
+                throw new Error(`离屏协议未跑完（runs=${off.runs.length}/${off.numRuns} ${off.note}）`);
+            }
+            if (!off.plausible) {
+                throw new Error(`离屏协议读数不可信：${off.implausibleReason}`);
+            }
+            bench = offscreenAsThroughputStats(off);
+            // ---- 离屏协议专有结果字段（与本文臂**同名字段同格式**，报表脚本可直接并排）----
+            base.benchMode = mode;
+            base.offscreenTarget = target.label;
+            base.offscreenRuns = off.runs.length;
+            base.offscreenFramesPerRun = off.framesPerRun;
+            base.offscreenWarmupFrames = off.warmupFrames;
+            base.offscreenWarmupMs = off.warmupMs;
+            base.offscreenFpsMean = off.fps.mean;
+            base.offscreenFpsStd = off.fps.std;
+            base.offscreenFpsMin = off.fps.min;
+            base.offscreenFpsMax = off.fps.max;
+            base.offscreenFpsMedian = off.fps.median;
+            base.offscreenFrameMsMedian = off.frameMsMedian;
+            base.offscreenFenceWaitMs = off.fenceWaitMs;
+            base.offscreenFencesMax = off.fencesMax;
+            base.offscreenFencesLimit = off.fencesLimit;
+            base.offscreenDriverFloorMs = off.driverFloorMs;
+            base.offscreenDriverCapped = off.driverCapped;
+            base.offscreenRunFpsList = off.runs.map((r) => r.fps.toFixed(1)).join(",");
+            base.offscreenSyncPolicy = syncPolicyLabelWithNote(gpuMode, gate.maxInFlight, decided.fallback);
+            base.offscreenTickEvery = off.tickEvery;
+            base.offscreenTickCalls = off.tickCalls;
+            base.offscreenTickMsMedian = off.tickMsMedian;
+            // 自然模式逐秒窗口 FPS（写进 flux 的 `offscreen_note=|lab…NW…` 段）
+            base.offscreenNatWinN = off.natWinN;
+            base.offscreenNatFpsMin = off.natFpsMin;
+            base.offscreenNatFpsMax = off.natFpsMax;
+            base.offscreenNatFpsMean = off.natFpsMean;
+            base.offscreenNatFpsSd = off.natFpsSd;
+            // GPU 计时口径（本环境唯一可信的口径）：主指标 = 1000 / GPU 中位毫秒
+            base.offscreenFpsSource = off.fpsSource;
+            base.offscreenGpuMsMedian = off.gpuMsMedian;
+            base.offscreenGpuFpsMean = off.gpuFps.n > 0 ? off.gpuFps.mean : undefined;
+            base.offscreenGpuFpsStd = off.gpuFps.n > 0 ? off.gpuFps.std : undefined;
+            base.offscreenGpuSamples = off.gpuSamples;
+            base.offscreenGpuMisses = off.gpuMisses;
+            base.offscreenGpuDiag = off.gpuDiag;
+            end = typeof cw.__FLUXGS_BENCH_END__ === "function" ? cw.__FLUXGS_BENCH_END__.call(cw) : emptyFluxEnd();
+            // 轨迹对账：末帧（= 预热 + 全部计帧 - 1）注入的目标视图 vs 渲染器回报的视图（同 1e-3 舍入口径）
+            if (spin) {
+                const lastIndex = warmupFrames + numRuns * framesPerRun - 1;
+                const expected = orbitViewMatrix(spin.v0, spinYawDegAt(spin.spec, lastIndex), spin.pivot).map(
+                    (v) => Math.round(v * 1000) / 1000,
+                );
+                spinErr =
+                    Array.isArray(end.view) && end.view.length === 16 ? maxMatrixDiff(expected, end.view) : undefined;
+            }
+            console.log(
+                `[bench-flux][offscreen] runs=${off.runs.length} ` +
+                    `fps(run)=${off.runs.map((r) => r.fps.toFixed(1)).join("/")} ` +
+                    `fps(mean±std)=${off.fps.mean.toFixed(1)}±${off.fps.std.toFixed(1)} ` +
+                    `warmup=${off.warmupMs.toFixed(0)}ms fence(wait/max)=${off.fenceWaitMs.toFixed(2)}ms/${off.fencesMax} ` +
+                    `driver_floor=${off.driverFloorMs.toFixed(2)}ms capped=${off.driverCapped ? 1 : 0}`,
+            );
+        } else {
+            const onscreen = await driveFluxFrames(
+                cw,
+                st.benchFrames,
+                st.warmupFrames,
+                240000 + st.warmupFrames * 2000,
+                spin,
+            );
+            bench = onscreen.stats;
+            end = onscreen.end;
+            spinErr = onscreen.spinErr;
+        }
         base.fps = bench.fps;
         base.frames = bench.rendered;
         base.elapsedMs = bench.elapsedMs;
@@ -995,6 +1489,10 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
         base.resH = end.canvasH || base.resH;
         base.dpr = end.dpr;
         base.downsample = end.downsample;
+        // [BENCH] 记下着色器**实际生效**的 focal / viewport（splat 像素尺寸的全部输入）：
+        //   写进 `offscreen_note=|lab…FOC…PVP…` 供逐轮核对（证明 `downsample=` 没污染点尺寸）
+        lastFocalApplied = Array.isArray(end.focalApplied) ? end.focalApplied : null;
+        lastViewportUniform = Array.isArray(end.viewportUniform) ? end.viewportUniform : null;
         base.points = end.points;
         base.coveredPct = end.coveredPct;
         // 静态轮：`pose=` = 渲染器回报的视图（= 全程机位）。动态轮（`?spin=`）：必须写**第 0 帧**视图
@@ -1101,7 +1599,8 @@ function buildResultText(st: BenchState): string {
     const roundStats = st.results.filter((r) => r.ok);
     lines.push(
         ...throughputFields({
-            driver: "timer",
+            // 帧驱动：在屏/参考协议恒为 timer；离屏论文协议为 msgchannel（不挂 vsync、不吃 setTimeout 钳制）
+            driver: benchMode() === BENCH_MODE_OFFSCREEN ? "msgchannel" : "timer",
             resMode: resolutionMode(),
             timerFloorMs: median(roundStats.map((r) => r.timerFloorMs ?? 0).filter((v) => v > 0)),
             timerFloorRounds: roundStats.find((r) => r.timerFloorRounds)?.timerFloorRounds,
@@ -1129,6 +1628,84 @@ function buildResultText(st: BenchState): string {
             fade: "n/a",
         }),
     );
+    // ---- 基准协议（`?benchmode=`）：与本文臂**同名字段同格式**，两套数字并列报告 ----
+    const mode = benchMode();
+    lines.push(`bench_mode=${mode}`);
+    if (mode === BENCH_MODE_OFFSCREEN) {
+        const offRounds = roundStats.filter((r) => typeof r.offscreenFpsMean === "number");
+        const perRoundMean = meanStd(offRounds.map((r) => r.offscreenFpsMean as number));
+        const perRoundStd = meanStd(offRounds.map((r) => r.offscreenFpsStd as number));
+        lines.push(`offscreen_target=${roundStats.find((r) => r.offscreenTarget)?.offscreenTarget ?? ""}`);
+        lines.push(
+            `offscreen_runs=${roundStats.find((r) => typeof r.offscreenRuns === "number")?.offscreenRuns ?? ""}`,
+        );
+        lines.push(
+            `offscreen_frames_per_run=${
+                roundStats.find((r) => typeof r.offscreenFramesPerRun === "number")?.offscreenFramesPerRun ?? ""
+            }`,
+        );
+        lines.push(
+            `offscreen_warmup_frames=${
+                roundStats.find((r) => typeof r.offscreenWarmupFrames === "number")?.offscreenWarmupFrames ?? ""
+            }`,
+        );
+        // 表头主指标（与论文 147/151 FPS 同协议对比用）：逐轮均值的均值 ± 逐轮标准差
+        lines.push(`offscreen_fps_mean=${fmt(perRoundMean.mean, 1)}`);
+        lines.push(`offscreen_fps_std=${fmt(perRoundStd.mean, 1)}`);
+        lines.push(`offscreen_sync_policy=${roundStats.find((r) => r.offscreenSyncPolicy)?.offscreenSyncPolicy ?? ""}`);
+        lines.push(`offscreen_driver_floor_ms=${fmt(roundStats[0]?.offscreenDriverFloorMs, 2)}`);
+        lines.push(
+            `offscreen_note=${offscreenRunCount()}runs_x${roundStats[0]?.offscreenFramesPerRun ?? ""}frames_after_` +
+                `${offscreenWarmupFrames()}warmup_frames_on_offscreen_fbo` +
+                // [LAB 2026-09-28] 与本文臂同结构的耗时分解（本臂帧由父页直接驱动，故在父页直接可得）：
+                //   T=tick 让出累计、F=帧内计算+GL提交累计、G=帧间纯等待累计、E=run 末收尾累计（ms，全部为**合计**）；
+                //   RA/RB = E 的两段（A=排空 finish+1×1 readPixels；B=GPU 计时查询回读等待）。
+                //   手机上 gpu 扩展不可用（见 offscreen_gpu_samples=0/0）⇒ RB 应≈0，RA 即真实排空耗时。
+                `|labT${fluxLab.tickMs.toFixed(1)}F${fluxLab.frameMs.toFixed(1)}G${fluxLab.gapMs.toFixed(1)}` +
+                `E${fluxLab.endRunMs.toFixed(1)}RA${fluxLab.drainMs.toFixed(1)}RB${fluxLab.waitMs.toFixed(1)}` +
+                `N${roundStats[0]?.points ?? ""}` +
+                // 三段账目 + 预热/run 拆分 + 门自记账合计（与本文臂同结构；用于核对自记账与外部 RA 的差额）
+                `RAf${fluxLab.finishMs.toFixed(1)}RAp${fluxLab.readPixelsMs.toFixed(1)}` +
+                `RAw${fluxLab.fencePollMs.toFixed(1)}RAo${fluxLab.bindMs.toFixed(1)}` +
+                `RAsc${fluxLab.drainCalls}EW${fluxLab.drainWarmMs.toFixed(1)}` +
+                `ER${fluxLab.drainRunMs.toFixed(1)}WAIT${fluxLab.waitTotalMs.toFixed(1)}` +
+                // [BENCH 2026-09-28] 着色器实际生效的 focal / viewport —— **splat 像素尺寸的全部输入**
+                //   （点半径 ∝ focal、按 viewport 归一；见官方 main.js:1815/1824 与顶点着色器 1340-1373）。
+                //   实测判据：FOC 应 == 结果头 `fx=`，PVP 应 == 实测画布 `res=`；若有人把 focal 除以
+                //   downsample，FOC 会变成 3.6× 的值 —— 也就是说这一项让该质疑变成可实测证伪。
+                `FOC${lastFocalApplied ? lastFocalApplied.map((v) => v.toFixed(1)).join(",") : "-"}` +
+                `PVP${lastViewportUniform ? lastViewportUniform.map((v) => v.toFixed(0)).join(",") : "-"}` +
+                `WU${roundStats[0]?.offscreenWarmupMs ?? ""}` +
+                // 自然模式逐秒窗口 FPS（与本文臂同结构）
+                `NW${roundStats[0]?.offscreenNatWinN ?? 0}` +
+                `NMIN${roundStats[0]?.offscreenNatFpsMin ?? 0}` +
+                `NMAX${roundStats[0]?.offscreenNatFpsMax ?? 0}` +
+                `NMEAN${(roundStats[0]?.offscreenNatFpsMean ?? 0).toFixed(1)}` +
+                `NSD${(roundStats[0]?.offscreenNatFpsSd ?? 0).toFixed(2)}` +
+                // [RECON 2026-09-28] 与本文臂**同 tag 名**的对账段：让 flux 也能通过"分项之和 vs elapsed"的同一套验收。
+                //   P/S：本臂的排序发生在官方渲染器内部，不在此层计数，故写 `-`
+                //   （与本文臂的 sort-worker 计数**不同源**，禁止横向比较）。
+                `P-S-` +
+                `EL${fluxLab.elMs.toFixed(1)}SMP${fluxLab.smp}` +
+                `SUM${fluxLab.sum.toFixed(1)}RES${(fluxLab.elMs - fluxLab.sum).toFixed(1)}` +
+                `SUM2${fluxLab.sum2.toFixed(1)}RES2${(fluxLab.elMs - fluxLab.sum2).toFixed(1)}` +
+                `TK${fluxLab.tickEvery}` +
+                // [INJ 2026-09-29 实验A] 记录本条的"每帧注入带宽"（MB/帧；0 = 关闭）⇒ 结果行自带实验标记
+                `INJ${injTag}` +
+                // [CLR/BAND 2026-09-28] 与本文臂**同实现、同 FBO 配置**的纯 clear 探针（两臂都必须测）
+                //   + 带标签（flux 阈值 18/14 ms/帧，按 flux 自己的量级定，不与 ours 共用阈值）。
+                `${bandTag(fluxLab.smp > 0 ? fluxLab.drainRunMs / fluxLab.smp : NaN, 18, 14)}` +
+                `${formatClearProbeTags(
+                    runClearProbeOnDevice(
+                        clearProbeResolutionsFromUrl(),
+                        clearProbeIterationsFromUrl(),
+                        clearProbeRepsFromUrl(),
+                    ),
+                )}`,
+        );
+        // **诚实标注（强制）**：与本文臂同一份常量，`#` 注释行由报表脚本跳过
+        lines.push(...offscreenDisclaimerLines());
+    }
     // 本臂载入期口径分解（对应本文臂结果头的 `parse_def=`；**两臂的这两个字段不能直接相减比较**）：
     //   decode_ms = responseEnd → **解码 + 主纹理上传**完成（render_shared/main.js:1854-1855）
     //   tex_ms    = 解码完成 → **SH 纹理上传**完成（main.js:1870）
@@ -1199,6 +1776,8 @@ function buildResultText(st: BenchState): string {
             // 见 bench-measure.sortLagProbe），所以这里不打印该组字段 —— 字段的定义与格式仍由
             // 两臂共用的 sortLagRoundTags() 给出，将来基线侧若要补探针，直接调它即可。
             ...(r.spinNote ? [`spin_note=${r.spinNote.replace(/\s+/g, "_")}`] : []),
+            // 离屏论文协议逐轮明细（与本文臂同名字段同格式）；在屏协议的轮次一个都不打印
+            ...offscreenRoundTags(r),
         ];
         if (!r.ok) tags.push(`err=${r.err ?? ""}`);
         lines.push(tags.join(" "));
@@ -1329,7 +1908,9 @@ function finishBench(st: BenchState): void {
         : `测试完成：成功 ${okCount}/${st.results.length} 轮。请复制下方文本并发送给测试发起人。`;
     resultCard.style.display = "flex";
     if (autoReport) {
+        // 结果回传结束后按需整页换成零 GL 的"完成页"（手机端上下文/显存配额，见 bench-shared.gotoDonePageIfEnabled）
         void submitReport(reportUrl, text, param("rtok")).then((ok) => {
+            gotoDonePageIfEnabled({ ok, u: st.u, text });
             if (ok) {
                 rcSummary.textContent = rcSummary.textContent.replace(REPORT_SUBMITTING, REPORT_DONE);
                 rcNote.textContent = "结果已回传，无需任何操作。";
@@ -1382,8 +1963,12 @@ function buildStateFromParams(): BenchState {
     const resW = parseInt(parts[0], 10) || 1600;
     const resH = parseInt(parts[1], 10) || 1063;
     const benchFrames = parseInt(param("frames", "300"), 10) || 300;
-    // 参考协议（Flux-GS 原协议）**没有预热帧**；默认 0。旧 1600×1063 对照口径可用 warmup=10。
-    const warmupFrames = Math.max(0, parseInt(param("warmup", "0"), 10) || 0);
+    // 预热帧数按协议取缺省：
+    //   - 在屏/参考协议（缺省）：Flux-GS 原协议**没有预热帧**（默认 0；旧 1600×1063 对照口径可用 warmup=10）；
+    //   - 离屏论文协议（`benchmode=offscreen-paper-match`）：论文要求 "a short warm-up period"，默认 90。
+    // `?warmup=N` 对两者都是显式覆盖（与本文臂 bench-case.ts 的取法逐字一致）。
+    const warmupDefault = benchMode() === BENCH_MODE_OFFSCREEN ? offscreenWarmupFrames() : 0;
+    const warmupFrames = Math.max(0, parseInt(param("warmup", String(warmupDefault)), 10) || 0);
     const profile = param("profile", selProfile.value);
     return {
         v: 1,

@@ -21,11 +21,15 @@
  */
 import { BenchCase, measureOneRound } from "./bench-measure";
 import {
+    BENCH_MODE_OFFSCREEN,
     CAM_FLUX,
     ERR_CONTEXT_LOST,
     ERR_WEBGL_UNAVAILABLE,
     benchFrameCount,
+    benchMode,
     caseSpecFromUrl,
+    offscreenRunCount,
+    offscreenWarmupFrames,
     param,
     postTo,
     resolution,
@@ -272,6 +276,16 @@ async function main(): Promise<void> {
         dataset: spec.dataset,
         demo: false,
     };
+    // ---- 基准协议（`?benchmode=`，缺省 = 在屏真实协议，行为与历史版本逐字相同）----
+    // 离屏论文协议的预热缺省值（90 帧）与在屏口径（10 帧 / proto=flux 时 0 帧）**不同**：
+    // 两个 mode 各自取各自的缺省，`?warmup=N` 对两者都是显式覆盖。每轮帧数两协议共用（`?frames=`）。
+    const mode = benchMode();
+    const warmup = mode === BENCH_MODE_OFFSCREEN ? offscreenWarmupFrames() : warmupFrames();
+    log(
+        "boot",
+        `benchmode=${mode} warmup=${warmup} frames=${benchFrameCount()}` +
+            (mode === BENCH_MODE_OFFSCREEN ? ` runs=${offscreenRunCount()}` : ""),
+    );
     reportProgress("loading");
     log("load", `开始加载 ${spec.modelUrl}`);
     const result = await measureOneRound(ctx, meta, spec.round, {
@@ -280,7 +294,9 @@ async function main(): Promise<void> {
         resW: res.w,
         resH: res.h,
         frames: benchFrameCount(),
-        warmup: warmupFrames(),
+        warmup,
+        mode,
+        numRuns: mode === BENCH_MODE_OFFSCREEN ? offscreenRunCount() : undefined,
         signal: loadAbort.signal,
         onPhase: (p) => {
             reportProgress(p);
@@ -300,6 +316,16 @@ async function main(): Promise<void> {
     result.ctxCreate = ctxAttempts;
     result.loseCtx = caseCtx ? caseCtx.loseContextCalled : false;
     resultSent = true;
+    // [BENCH INSTRUMENTATION] 把本轮结果对象挂到 window 上（**只读**，不参与任何计时/统计）：
+    //   本地无头实跑（tools/ch7_paper_protocol_run.py / _tmp_ch7probe/cdp.mjs）可以直接读取它，
+    //   而不必依赖父页面的队列状态机把整份 [RESULT] 文本拼出来 —— 父页面在"整页重启 + 续跑"
+    //   路径上不一定在有限时间内走到 finishBench()，而**子页面的一轮结果本身就已经是完整口径**
+    //   （含离屏协议的 offscreen_* 全字段）。字段名与 postMessage 出去的完全一致。
+    try {
+        (window as unknown as { __BENCH_CASE_RESULT__?: unknown }).__BENCH_CASE_RESULT__ = result;
+    } catch {
+        /* 极老内核上 window 不可写时忽略 */
+    }
     log(
         "result",
         `ok=${result.ok ? 1 : 0} driver=${result.driver ?? "-"} frames=${result.frames ?? 0} ` +

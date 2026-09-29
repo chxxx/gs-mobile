@@ -63,6 +63,7 @@ import {
     expandProfile,
     fmt,
     hopDelayMs,
+    gotoDonePageIfEnabled,
     hopUrlFor,
     jobsPerDocument,
     jobTimeoutMs,
@@ -82,6 +83,14 @@ import {
     throughputDriver,
     throughputFields,
     warmupFrames,
+    // 两种基准协议（`?benchmode=`，缺省 = 在屏真实协议）：模式与缺省值都取自共享实现
+    BENCH_MODE_OFFSCREEN,
+    benchMode,
+    meanStd,
+    offscreenDisclaimerLines,
+    offscreenRoundTags,
+    offscreenRunCount,
+    offscreenWarmupFrames,
     // 结果字段法表 + 唯一的清洗/逐字段合并实现（见 bench-shared 顶部说明：这四处不再手工同步）
     copyRoundResultFields,
     sanitizeRoundResult,
@@ -400,6 +409,44 @@ function buildResultText(st: BenchState): string {
             fade: BENCH_FADE_LABEL,
         }),
     );
+    // ---- 基准协议（`?benchmode=`）----
+    // **两套数字并列报告，谁都不覆盖谁**：`bench_mode=` 说明本轮结果属于哪套协议；
+    // 在屏真实协议的行**不打印**任何 `offscreen_*` 字段（逐轮行由 offscreenRoundTags 守卫），
+    // 离屏论文协议的行则必须带上 offscreen_* 明细与下方的诚实标注。
+    const mode = benchMode();
+    lines.push(`bench_mode=${mode}`);
+    if (mode === BENCH_MODE_OFFSCREEN) {
+        const offRounds = okRounds.filter((r) => typeof r.offscreenFpsMean === "number");
+        // 表头汇总：各轮 `offscreen_fps_mean` 的均值与标准差（每轮内部已经是 N 个 run 的均值）
+        const perRoundMean = meanStd(offRounds.map((r) => r.offscreenFpsMean as number));
+        const perRoundStd = meanStd(offRounds.map((r) => r.offscreenFpsStd as number));
+        lines.push(`offscreen_target=${okRounds.find((r) => r.offscreenTarget)?.offscreenTarget ?? ""}`);
+        lines.push(`offscreen_runs=${okRounds.find((r) => typeof r.offscreenRuns === "number")?.offscreenRuns ?? ""}`);
+        lines.push(
+            `offscreen_frames_per_run=${
+                okRounds.find((r) => typeof r.offscreenFramesPerRun === "number")?.offscreenFramesPerRun ?? ""
+            }`,
+        );
+        lines.push(
+            `offscreen_warmup_frames=${
+                okRounds.find((r) => typeof r.offscreenWarmupFrames === "number")?.offscreenWarmupFrames ?? ""
+            }`,
+        );
+        // 表头主指标（与论文 147/151 FPS 同协议对比用）：逐轮均值的均值 ± 逐轮标准差
+        lines.push(`offscreen_fps_mean=${fmt(perRoundMean.mean, 1)}`);
+        lines.push(`offscreen_fps_std=${fmt(perRoundStd.mean, 1)}`);
+        lines.push(`offscreen_sync_policy=${okRounds.find((r) => r.offscreenSyncPolicy)?.offscreenSyncPolicy ?? ""}`);
+        lines.push(`offscreen_driver_floor_ms=${fmt(okRounds[0]?.offscreenDriverFloorMs, 2)}`);
+        lines.push(
+            `offscreen_note=${offscreenRunCount()}runs_x${okRounds[0]?.offscreenFramesPerRun ?? ""}frames_after_` +
+                `${offscreenWarmupFrames()}warmup_frames_on_offscreen_fbo` +
+                // [LAB 2026-09-28] 与 flux 臂同结构的耗时分解（`|lab…`，见 bench-measure 的 offscreenLabNote）：
+                //   `mark()` 时间线在真机结果里默认不落盘 ⇒ 分解必须走这里才看得到
+                `${okRounds[0]?.offscreenLabNote ?? ""}`,
+        );
+        // **诚实标注（强制）**：`#` 注释行，报表脚本按前缀跳过；报告生成器会原样带进表注
+        lines.push(...offscreenDisclaimerLines());
+    }
     // 本文臂载入期口径分解（与逐轮 `parse_ms=` 一一对应；Flux 臂的对应字段是 `decode_ms=`/`tex_ms=`）：
     //   parse_ms = responseEnd → loadSplat() 返回（PLY 读取 + 低秩解码 worker + 合并），**不含首次深度排序**；
     //   首次排序 + 首次真实绘制都落在 first_frame_ms 里（子页面 waitForSortedFrame 门禁保证排序已回传）。
@@ -414,13 +461,25 @@ function buildResultText(st: BenchState): string {
     // 机位来源（与 Flux-GS 臂的 `pose_src=` 同名字段）：ch7_baseline_report.py 用它核对
     // "两臂的机位口径是否同一档"，避免只靠人记得看 cam= 这一个参数
     lines.push(`pose_src=${CAM_FLUX ? "flux" : "auto"}`);
-    lines.push(`warmup=${warmupFrames()}`);
+    lines.push(`warmup=${benchMode() === BENCH_MODE_OFFSCREEN ? offscreenWarmupFrames() : warmupFrames()}`);
     lines.push(`fx=${Math.round(fx * 1000) / 1000}`);
     lines.push(`ts=${new Date().toISOString()}`);
     lines.push(`ua=${env.ua}`);
     lines.push(`gl_renderer=${env.gl_renderer}`);
     lines.push(`screen=${env.screen}`);
     lines.push(`dpr=${env.dpr}`);
+    // [RESS 2026-09-29] 两个诊断旋钮的**自证字段**（缺省 1 / 1024 ⇒ 与历史结果无差别）：
+    //   resscale = `?resscale=K`（测帧分辨率与焦距一起 ×K）；splatpx = `?splatPx=n`（每 splat 屏幕足迹上限）
+    lines.push(`resscale=${param("resscale", "1")}`);
+    lines.push(`splatpx=${param("splatPx", "1024")}`);
+    // [NOCT 2026-09-29] `?noct=1` = 跳过恒等颜色变换路径（诊断）；缺省 0 ⇒ 与历史无差别
+    lines.push(`noct=${param("noct", "0")}`);
+    // [NOSH 2026-09-29] `?nosh=1` = 强制关闭 SH（诊断：画面退化为 DC 颜色）；缺省 0 ⇒ 与历史无差别
+    lines.push(`nosh=${param("nosh", "0")}`);
+    // [SHDEG 2026-09-29] `?shdeg=N` = 把 SH 阶数压到 N（诊断）；缺省 -1 ⇒ 与历史无差别
+    lines.push(`shdeg=${param("shdeg", "-1")}`);
+    // [SHPROBE 2026-09-29] `?shprobe=fixedcoord` = SH 第二组 texel 读固定坐标（诊断）；缺省 '-' ⇒ 与历史无差别
+    lines.push(`shprobe=${param("shprobe", "-")}`);
     lines.push(`hardwareConcurrency=${env.hardwareConcurrency}`);
     lines.push(`deviceMemory=${env.deviceMemory}`);
     lines.push("--- per-round ---");
@@ -468,6 +527,10 @@ function buildResultText(st: BenchState): string {
         // 机位口径（**始终打印**，不受 diag 开关影响）：`pose=` 与 Flux-GS 臂逐轮行的同名同格式，
         // tools/ch7_baseline_report.py 据此跨臂核对"两臂是否同一个机位"。
         tags.push(`pose=${r.poseKey ?? ""}`, `pose_src=${r.poseSrc ?? ""}`);
+        // 离屏论文协议（`?benchmode=offscreen-paper-match`）逐轮明细：模式/渲染目标/run 数/预热帧数/
+        // 多轮 FPS 均值±标准差/逐 run 列表/栅栏代价与积压峰值/驱动地板。在屏协议的轮次**一个都不打印**
+        // （函数内部按 `bench_mode` 守卫）→ 历史逐轮行格式逐字不变。
+        tags.push(...offscreenRoundTags(r));
         // 动态相机（`?spin=`，效度自查）：`spin=0` = 静止协议（`pose=` 即全程机位）；
         // `spin>0` 时 `pose=` 只代表第 0 帧起始机位，`spin_err=` 是本轮轨迹对账误差（> 1e-3 = 两臂轨迹不一致）。
         // 标签由**两臂共用**的 spinRoundTags() 生成（`spin_mode=` 决定 `spin=` 的语义：rate=deg/帧，swing=摆幅）。
@@ -1068,7 +1131,9 @@ function finishBench(st: BenchState, note = "", keepState = false): void {
     if (autoReport) {
         // 只替换状态标记 / 追加一行提示，不整段重写 rcSummary：
         // 上面追加的"失败轮次明细""上下文耗尽说明"必须原样保留给测试者看
+        // 结果回传结束后按需整页换成零 GL 的"完成页"（手机端上下文/显存配额，见 bench-shared.gotoDonePageIfEnabled）
         void submitReport(reportUrl, text, param("rtok")).then((ok) => {
+            gotoDonePageIfEnabled({ ok, u: st.u, text, partial: !!note });
             if (ok) {
                 rcSummary.textContent = rcSummary.textContent.replace(REPORT_SUBMITTING, REPORT_DONE);
                 rcNote.textContent = "结果已回传，无需任何操作。";

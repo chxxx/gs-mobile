@@ -18,6 +18,7 @@
     "bench-shared.ts",
     "bench-chip.ts",
     "bench-flux.ts",
+    "bench-offscreen.ts",
     "src/**/*"
   ],
   "exclude": ["src/wasm/*"]

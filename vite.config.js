@@ -5,6 +5,7 @@ import dts from 'vite-plugin-dts';
 import compression from 'vite-plugin-compression';
 import { viteStaticCopy } from 'vite-plugin-static-copy';
 import compressionMiddleware from 'compression';
+import { ch7ReportPlugin as ch7ReportPluginImpl } from './tools/ch7_report_middleware.mjs';
 
 const throttleSpeedMbps = process.env.THROTTLE_SPEED ? parseFloat(process.env.THROTTLE_SPEED) : 0;
 
@@ -37,101 +38,21 @@ const CH7_MAX_BODY = 4 * 1024 * 1024;
  */
 const CH7_REPORT_TOKEN = process.env.CH7_REPORT_TOKEN || 'ch7-2026-phase4';
 
-/** 把 URL 里的 name 收敛成安全的文件名片段（中文/空格/斜杠/引号等一律换成 '_'）。 */
-function ch7SafeName(raw) {
-  const cleaned = String(raw || '')
-    .replace(/[^A-Za-z0-9._-]/g, '_')
-    .replace(/^[._]+/, '')
-    .slice(0, 64);
-  return cleaned || 'anon';
-}
-
 /** 本地时间戳 YYYYMMDD_HHmmss（到秒，避免同分钟的两个测试者撞名）。 */
 function ch7Stamp(d = new Date()) {
   const p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
-/** 同秒撞名时依次尝试 `<name>_<ts>-2.txt`、`-3.txt`… */
-function ch7TargetPath(name) {
-  const ts = ch7Stamp();
-  let file = join(CH7_RAW_DIR, `${name}_${ts}.txt`);
-  for (let n = 2; fs.existsSync(file); n++) {
-    file = join(CH7_RAW_DIR, `${name}_${ts}-${n}.txt`);
-  }
-  return file;
-}
-
+/**
+ * 回传端点的**实现**已移到 `tools/ch7_report_middleware.mjs`（2026-09-26）：
+ * 真机实测发现"手机连 dev server（未打包）导致每轮要几分钟"，改法是让隧道指向构建产物
+ * （`site-dist/`，整站 10 文件 0.42MB），而构建产物由 `vite preview` 伺服——
+ * 于是这段中间件必须 dev（`configureServer`）与 preview（`configurePreviewServer`）**共用同一份**，
+ * 否则两种伺服方式下的落盘目录/口令/命名规则会分叉。这里只做参数绑定。
+ */
 function ch7ReportPlugin() {
-  return {
-    name: 'configure-ch7-report',
-    configureServer(server) {
-      server.middlewares.use((req, res, next) => {
-        if (!req.url || !req.url.startsWith('/__ch7/report')) return next();
-        const cors = () => {
-          res.setHeader('Access-Control-Allow-Origin', '*');
-          res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-          res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-        };
-        if (req.method === 'OPTIONS') {
-          cors();
-          res.statusCode = 204;
-          res.end();
-          return;
-        }
-        const fail = (code, msg) => {
-          cors();
-          res.statusCode = code;
-          res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-          res.end(msg + '\n');
-          console.log(`[ch7-report] 拒收（${code}）：${msg}`);
-        };
-        if (req.method !== 'POST') return fail(405, 'only POST');
-        const url = new URL(req.url, 'http://localhost');
-        // 口令闸门：不符就"不读 body、不写盘"，并且**只在终端打印一行、不回显收到的值**（避免日志泄露口令）
-        if ((url.searchParams.get('token') || '') !== CH7_REPORT_TOKEN) {
-          req.resume();
-          return fail(403, 'token 不匹配');
-        }
-        const name = ch7SafeName(url.searchParams.get('name'));
-        const chunks = [];
-        let size = 0;
-        req.on('data', (c) => {
-          size += c.length;
-          if (size > CH7_MAX_BODY) {
-            req.destroy();
-            return fail(413, `body too large (>${CH7_MAX_BODY} bytes)`);
-          }
-          chunks.push(c);
-        });
-        req.on('error', () => {
-          /* 客户端中断（测试者提前关页面）：下面的 end 不会触发，静默即可 */
-        });
-        req.on('end', () => {
-          const body = Buffer.concat(chunks);
-          const text = body.toString('utf-8');
-          // 宽松但有效的协议校验：必须是跑批页面产出的结果文本，避免垃圾/探测请求污染数据目录
-          if (!text.includes('[RESULT]') || !text.includes('[END]')) {
-            return fail(400, 'not a [RESULT]...[END] report body');
-          }
-          try {
-            fs.mkdirSync(CH7_RAW_DIR, { recursive: true });
-            const file = ch7TargetPath(name);
-            // 先写 .part 再改名：报表脚本永远不会读到半截文件
-            fs.writeFileSync(file + '.part', body);
-            fs.renameSync(file + '.part', file);
-            cors();
-            res.statusCode = 200;
-            res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-            res.end(`OK ${file}\n`);
-            console.log(`[ch7-report] 已保存 ${file}（${body.length} 字节，name=${name}）`);
-          } catch (e) {
-            fail(500, `write failed: ${e && e.message ? e.message : e}`);
-          }
-        });
-      });
-    },
-  };
+  return ch7ReportPluginImpl({ rawDir: CH7_RAW_DIR, token: CH7_REPORT_TOKEN, maxBody: CH7_MAX_BODY });
 }
 
 // ---------------------------------------------------------------- ch7 静态请求埋点（2026-09-23 追加）

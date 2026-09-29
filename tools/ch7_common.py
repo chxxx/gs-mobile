@@ -331,7 +331,7 @@ def profile_for(group, platform, scene_key=""):
 
 
 def build_url(base, group, scene_key="", platform="", u=None, report="", rtok="", subset="",
-              rounds=None, hopms=None):
+              rounds=None, hopms=None, protocol="onscreen-realworld", smoke=False, sync=None):
     """按协议 §2/§12 生成一条 bench URL（每个协议参数都显式写出，不依赖页面默认值）。
 
     - `group=res` 保留 `frames=100` 并覆盖 `res`（协议 §5.4）；
@@ -340,9 +340,36 @@ def build_url(base, group, scene_key="", platform="", u=None, report="", rtok=""
       `/__ch7/report`，见 vite.config.js；不填则不自动回传，走人工「复制结果」）；
     - `subset` 用逗号分隔的场景 id 覆盖 `profile`（远程协助者分片跑时用）；
     - `rounds` 覆盖轮次（默认按协议 `rounds_for`；快速验证传 `FAST_ROUNDS=1`）。
+    - **`protocol`**（2026-09-26 追加，缺省 = 在屏真实协议 ⇒ 既有行为逐字不变）：
+        * `onscreen-realworld`：显式 `driver=timer&warmup=0`（§2 原口径，每帧 `gl.finish()` 同步）；
+        * `offscreen-paper-match`：追加 `benchmode=offscreen-paper-match&driver=msgchannel
+          &runs=5&warmup=90&fences=3&sync=gputimer`（复刻论文 §5.1 的离屏协议；
+          两臂共用同一套参数，唯一差别是渲染目标与循环驱动方式）。
+    - **`smoke`**（2026-09-26 追加，缺省 False ⇒ 既有链接逐字不变）：**摸底档**——把每轮工作量
+      压到最小（`frames=30&warmup=10&runs=1`）并打开屏上自诊断（`diag=1`），用于在真机上
+      1–2 分钟内看清三件事：页面能否跑完 / 实际生效的同步策略是哪条 / 数字量级是否合理。
+      **不得进正式表**（frames 不是协议值；结果行里会如实写着 `frames=30`）。
+    - **`sync`**（缺省 None）：显式覆盖离屏协议的同步策略（`gputimer|fence|each`），
+      摸底时用来 A/B 对比\"缺省回落链 vs 强制 fence\"在同一台设备上的差别。
     """
     params = dict(PROTO_PARAMS)
     params["rounds"] = str(rounds_for(group, rounds))
+    if protocol == "offscreen-paper-match":
+        params["benchmode"] = "offscreen-paper-match"
+        params["driver"] = "msgchannel"
+        params["warmup"] = "90"
+        params["runs"] = "5"
+        params["fences"] = "3"
+        params["sync"] = "gputimer"
+    if smoke:
+        # 摸底档：预热/帧数/run 数都取最小值；`diag=1` 打开屏上自诊断（bench.ts 的 startDiagLine）
+        params["frames"] = "30"
+        params["warmup"] = "10"
+        params["runs"] = "1"
+        params["fences"] = "3"
+        params["diag"] = "1"
+    if sync:
+        params["sync"] = str(sync)
     if hopms:
         # 轮间"零上下文中转页"停留时长（毫秒；页面默认 1500，上限 5000）。
         # 手机端出现 WebGL 上下文紧张时，加大它能让浏览器更充分回收上一个上下文（协议 §12.8）。
@@ -357,6 +384,13 @@ def build_url(base, group, scene_key="", platform="", u=None, report="", rtok=""
             params["rtok"] = rtok
     if u:
         params["u"] = u
+    # [2026-09-28] 环境变量覆盖：让桌面严格复核能在**不改其它调用方**的前提下对齐移动端配置。
+    #   CH7_FRAMES / CH7_RUNS / CH7_WARMUP —— 为空则不覆盖（默认行为完全不变）。
+    for _env_key in (("CH7_FRAMES", "frames"), ("CH7_RUNS", "runs"), ("CH7_WARMUP", "warmup"),
+                     ("CH7_RES", "res"), ("CH7_DPR", "dpr")):
+        _val = os.environ.get(_env_key[0], "").strip()
+        if _val:
+            params[_env_key[1]] = _val
     page = FLUX_PAGE if group == GRP_FLUX else BENCH_PAGE
     query = "&".join("%s=%s" % (k, v) for k, v in params.items() if str(v) != "")
     return "%s/%s?%s" % (base.rstrip("/"), page, query)

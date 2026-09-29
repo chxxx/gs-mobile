@@ -57,7 +57,18 @@ uniform highp sampler2D u_transforms;
 uniform highp usampler2D u_transformIndices;
 uniform highp sampler2D u_colorTransforms;
 uniform highp usampler2D u_colorTransformIndices;
+// [NOCT 2026-09-29] noct=1 且数据自证颜色变换为恒等（索引全 0 且块 0 = 单位矩阵）时置 0：
+//   跳过“每点索引 fetch + 4 个 texel 拼 mat4 + mat4×vec4”这条恒等路径（纯冗余开销）。
+//   缺省恒为 1 ⇒ 与历史行为逐字不变。
+uniform bool u_colorTransformEnabled;
 uniform bool u_useSH;
+// [SHDEG 2026-09-29] 诊断门控：允许把 SH 的**阶数**统一压到 N（-1 = 不干预、历史行为）。
+//   用途：把 SH 的“算术成本（degree 3 = 48 系数）”与“流量成本（每点固定读 6 个 texel）”分开。
+uniform int u_maxSHDegree;
+// [SHPROBE 2026-09-29] 诊断门控：shprobe=fixedcoord 时，SH 的**第二组** texel 改读固定坐标
+//   （L1 常驻、不再逐点独享）⇒ 指令数 / 解包次数 / 局部数组大小全部不变，
+//   只把"每点独享的 48 B 字节流量"移除 ⇒ 用来隔离"字节流量"与"解包/寄存器压力"。
+uniform bool u_shFixedCoord;
 uniform highp usampler2D u_sh_r;
 uniform highp usampler2D u_sh_g;
 uniform highp usampler2D u_sh_b;
@@ -70,6 +81,10 @@ uniform bool useDepthFade;
 uniform float depthFade;
 
 uniform float u_maxSplatSize;
+// [FOOT 2026-09-28] 屏幕足迹倍率（URL 参数 foot=K，缺省 1.0 = 原行为）。
+// 存在的唯一目的：把「每片元成本」从「每点成本」里分离出来——K 增大 ⇒ 每帧片元总面积按 ≈K² 增长，
+// 若离屏排空（ER/SMP）随片元面积线性变化，则归因单位应写成"每片元"而不是"每点"。
+uniform float u_footprintScale;
 
 const float SH_C0 = 0.28209479177387814;
 const float SH_C1 = 0.4886025119029199;
@@ -119,14 +134,20 @@ void fillSHFromPacked(in uvec4 packed0, in uvec4 packed1, in int offset, inout f
 vec3 evalSHRGB(int shIndex, uint degree, vec3 dir) {
     float shs[48];
 
-    uvec4 packedR0 = texelFetch(u_sh_r, ivec2(((uint(shIndex) & 0x3ffu) << 1), uint(shIndex) >> 10), 0);
-    uvec4 packedR1 = texelFetch(u_sh_r, ivec2(((uint(shIndex) & 0x3ffu) << 1) | 1u, uint(shIndex) >> 10), 0);
+    ivec2 shCoord0 = ivec2(((uint(shIndex) & 0x3ffu) << 1), uint(shIndex) >> 10);
+    // [SHPROBE] 第二组 texel：探针开启时读固定坐标（全点共享 ⇒ 常驻缓存），否则与历史逐字相同
+    ivec2 shCoord1 = u_shFixedCoord
+        ? ivec2(0, 0)
+        : ivec2(((uint(shIndex) & 0x3ffu) << 1) | 1u, uint(shIndex) >> 10);
 
-    uvec4 packedG0 = texelFetch(u_sh_g, ivec2(((uint(shIndex) & 0x3ffu) << 1), uint(shIndex) >> 10), 0);
-    uvec4 packedG1 = texelFetch(u_sh_g, ivec2(((uint(shIndex) & 0x3ffu) << 1) | 1u, uint(shIndex) >> 10), 0);
+    uvec4 packedR0 = texelFetch(u_sh_r, shCoord0, 0);
+    uvec4 packedR1 = texelFetch(u_sh_r, shCoord1, 0);
 
-    uvec4 packedB0 = texelFetch(u_sh_b, ivec2(((uint(shIndex) & 0x3ffu) << 1), uint(shIndex) >> 10), 0);
-    uvec4 packedB1 = texelFetch(u_sh_b, ivec2(((uint(shIndex) & 0x3ffu) << 1) | 1u, uint(shIndex) >> 10), 0);
+    uvec4 packedG0 = texelFetch(u_sh_g, shCoord0, 0);
+    uvec4 packedG1 = texelFetch(u_sh_g, shCoord1, 0);
+
+    uvec4 packedB0 = texelFetch(u_sh_b, shCoord0, 0);
+    uvec4 packedB1 = texelFetch(u_sh_b, shCoord1, 0);
 
     fillSHFromPacked(packedR0, packedR1, 0, shs);
     fillSHFromPacked(packedG0, packedG1, 1, shs);
@@ -235,16 +256,19 @@ void main () {
 
     if (lambda2 < 0.0) return;
     vec2 diagonalVector = normalize(vec2(cov2d[0][1], lambda1 - cov2d[0][0]));
-    vec2 majorAxis = min(sqrt(2.0 * lambda1), u_maxSplatSize) * diagonalVector;
-    vec2 minorAxis = min(sqrt(2.0 * lambda2), u_maxSplatSize) * vec2(diagonalVector.y, -diagonalVector.x);
+    vec2 majorAxis = min(sqrt(2.0 * lambda1) * u_footprintScale, u_maxSplatSize) * diagonalVector;
+    vec2 minorAxis = min(sqrt(2.0 * lambda2) * u_footprintScale, u_maxSplatSize) * vec2(diagonalVector.y, -diagonalVector.x);
 
-    uint colorTransformIndex = texelFetch(u_colorTransformIndices, ivec2(uint(index) & 0x3ffu, uint(index) >> 10), 0).x;
-    mat4 colorTransform = mat4(
-        texelFetch(u_colorTransforms, ivec2(0, colorTransformIndex), 0),
-        texelFetch(u_colorTransforms, ivec2(1, colorTransformIndex), 0),
-        texelFetch(u_colorTransforms, ivec2(2, colorTransformIndex), 0),
-        texelFetch(u_colorTransforms, ivec2(3, colorTransformIndex), 0)
-    );
+    mat4 colorTransform = mat4(1.0);
+    if (u_colorTransformEnabled) {
+        uint colorTransformIndex = texelFetch(u_colorTransformIndices, ivec2(uint(index) & 0x3ffu, uint(index) >> 10), 0).x;
+        colorTransform = mat4(
+            texelFetch(u_colorTransforms, ivec2(0, colorTransformIndex), 0),
+            texelFetch(u_colorTransforms, ivec2(1, colorTransformIndex), 0),
+            texelFetch(u_colorTransforms, ivec2(2, colorTransformIndex), 0),
+            texelFetch(u_colorTransforms, ivec2(3, colorTransformIndex), 0)
+        );
+    }
 
     vec4 color = vec4(
         (cov.w) & 0xffu,
@@ -275,6 +299,10 @@ void main () {
             }
         }
 
+        if (u_maxSHDegree >= 0 && degree > uint(u_maxSHDegree)) {
+            degree = uint(u_maxSHDegree);
+        }
+
         if (degree > 0u || u_bandIndex[0] < 0) {
             vec3 worldPosition = (transform * vec4(uintBitsToFloat(cen.xyz), 1.0)).xyz;
             vec3 cameraPosition = inverse(view)[3].xyz;
@@ -284,7 +312,7 @@ void main () {
         }
     }
 
-    vColor = colorTransform * color;
+    vColor = u_colorTransformEnabled ? colorTransform * color : color;
 
     vPosition = position;
     vSize = length(majorAxis);
@@ -350,10 +378,106 @@ class RenderProgram extends ShaderProgram {
     // Max on-screen splat footprint in px. Default 1024 = effectively uncapped
     // (cap disabled). The cap may be enabled for A/B or by the future adaptive
     // quality controller via ?splatPx=n / __PERF__.setMaxSplatSize(n).
-    private _maxSplatSize: number = 1024;
+    // [SPLATPX 2026-09-29] 该上限此前**只有注释提到、没有任何 URL 解析**（`?splatPx=` 是空的）⇒
+    //   之前那条 "splatPx=64 无变化" 属**未生效的假阴性**。现在按 `foot` 同款写法真正接线：
+    //   缺省 1024 = 与历史逐字一致（"effectively uncapped"）。
+    private _maxSplatSize: number = (() => {
+        try {
+            const v = parseFloat(new URLSearchParams(location.search).get("splatPx") || "");
+            return Number.isFinite(v) && v >= 8 && v <= 4096 ? v : 1024;
+        } catch {
+            return 1024;
+        }
+    })();
+    // [FOOT 2026-09-28] 屏幕足迹倍率：`?foot=K`（缺省 1 = **与历史结果逐位一致的原式**）。
+    //   用途：把"每点成本"与"每片元成本"分开——K↑ ⇒ 每帧片元总面积 ≈ K²↑。
+    //   放在字段初始化里（内联）是为了 bench / demo / 离屏目标三条路径都自动生效，不需要跨文档传参。
+    private _footprintScale: number = (() => {
+        try {
+            const v = parseFloat(new URLSearchParams(location.search).get("foot") || "");
+            return Number.isFinite(v) && v > 0 ? v : 1;
+        } catch {
+            return 1;
+        }
+    })();
     private _outlineColor: Color32 = new Color32(255, 165, 0, 255);
     private _renderData: RenderData | null = null;
     private _depthIndex: Uint32Array = new Uint32Array();
+    // [DEPTHUP 2026-09-29] 深度序上传模式：`?depthup=sub` ⇒ **预分配一次 + 每帧 `bufferSubData`**（不再重分配/孤儿化）；
+    //   缺省（不带该参数）= 历史行为**逐位不变**。`_depthUploads` 用于自证"这条路径在当前协议下到底有没有被执行"
+    //   （若为 0 ⇒ 候选① 的实验对象根本没被触发，可直接判定它不是主因）。
+    private _depthUpSub: boolean = (() => {
+        try {
+            return new URLSearchParams(location.search).get("depthup") === "sub";
+        } catch {
+            return false;
+        }
+    })();
+    private _depthUploads = 0;
+    private _depthBufBytes: number[] = [];
+    // [DRAWFRAC 2026-09-29] **点数抽样（纯诊断）**：`?drawfrac=K`（0<K<1；缺省 1 = 不抽样、行为逐字不变）。
+    //   把排序后的索引数组按**等间隔**抽样到 `round(len·K)` 条 ⇒ 绘制实例数随之下降（`drawArraysInstanced` 用
+    //   `depthIndex.length`）。抽样在**排序位置上均匀** ⇒ 保留整体深度分布，不是"只留最近的点"。
+    //   用途：分离"点数下降"与"相机转动"两个混杂变量（静止机位 + 降点数 的对照臂）。
+    private _drawFraction: number = (() => {
+        try {
+            const v = parseFloat(new URLSearchParams(location.search).get("drawfrac") || "");
+            return Number.isFinite(v) && v > 0 && v < 1 ? v : 1;
+        } catch {
+            return 1;
+        }
+    })();
+    // [NOCT 2026-09-29] 诊断门控（缺省关）：`?noct=1` ⇒ `u_colorTransformEnabled = 0`，
+    //   跳过每点「颜色变换索引 fetch + 4×texel 拼 mat4 + mat4×vec4」这条**恒等**路径
+    //   （`RenderData` 只用块 0 且块 0 为单位矩阵 ⇒ 输出逐像素不变）。
+    //   缺省（无该参数）恒为 1 ⇒ 与历史行为逐字不变。
+    private _noctRequested: boolean = (() => {
+        try {
+            return new URLSearchParams(location.search).get("noct") === "1";
+        } catch {
+            return false;
+        }
+    })();
+    // [NOSH 2026-09-29] 诊断门控（缺省关）：`?nosh=1` ⇒ 强制 `u_useSH = 0`（不取 SH 纹理、不算 SH），
+    //   用于判别"SH 路径（每点 6 次 16B fetch + 最多 degree 3 运算）"是不是每点成本的主要来源。
+    //   注意：这是**纯计时诊断**，画面会退化为只有 DC 颜色；缺省不变（历史行为逐字相同）。
+    private _noshRequested: boolean = (() => {
+        try {
+            return new URLSearchParams(location.search).get("nosh") === "1";
+        } catch {
+            return false;
+        }
+    })();
+    // [SHDEG 2026-09-29] 诊断门控（缺省 -1 = 不干预）：`?shdeg=N` 把 SH 阶数统一压到 N（0..3）。
+    //   用于分离 SH 的“算术成本”（degree 3 = 48 系数 vs 1 = 12）与“流量成本”（每点固定 6 个 texel）。
+    private _maxSHDegree: number = (() => {
+        try {
+            const v = parseInt(new URLSearchParams(location.search).get("shdeg") || "", 10);
+            return Number.isFinite(v) && v >= 0 && v <= 3 ? v : -1;
+        } catch {
+            return -1;
+        }
+    })();
+    // [SHPROBE 2026-09-29] 诊断门控（缺省关）：`?shprobe=fixedcoord` ⇒ SH 的第二组 texel 读固定坐标
+    //   （移除"每点独享 48 B"的流量，指令/解包/寄存器不变）⇒ 隔离"字节流量 vs 解包/寄存器压力"。
+    private _shFixedCoordProbe: boolean = (() => {
+        try {
+            return new URLSearchParams(location.search).get("shprobe") === "fixedcoord";
+        } catch {
+            return false;
+        }
+    })();
+    // ---- [LAB 2026-09-26] 排序/相机变化诊断计数器（只为测量口径诊断，不影响渲染行为）----
+    /** 每帧向 sort worker 发送 viewProj 的次数（= 渲染帧数） */
+    private _labSortPosts = 0;
+    /** worker 回包次数（worker 只在真正执行了排序后才回包）⇒ = 实际排序次数 */
+    private _labSortReplies = 0;
+    /** 相邻两帧 viewProj 16 个元素的最大绝对差（逐元素比较，不是 `includes`） */
+    private _labVpMaxDelta = 0;
+    /** viewProj 与上一帧**不完全逐元素相等**的帧数 */
+    private _labVpChangedFrames = 0;
+    private _labLastVp: Float32Array | null = null;
+    private _labFrames = 0;
     private _splatTexture: WebGLTexture | null = null;
     private _shTextures: [WebGLTexture | null, WebGLTexture | null, WebGLTexture | null] = [null, null, null];
     private _worker: Worker | null = null;
@@ -387,6 +511,9 @@ class RenderProgram extends ShaderProgram {
         let u_transformIndices: WebGLUniformLocation;
         let u_colorTransforms: WebGLUniformLocation;
         let u_colorTransformIndices: WebGLUniformLocation;
+        let u_colorTransformEnabled: WebGLUniformLocation;
+        let u_maxSHDegree: WebGLUniformLocation;
+        let u_shFixedCoord: WebGLUniformLocation;
 
         let u_useSH: WebGLUniformLocation;
         let u_sh_r: WebGLUniformLocation;
@@ -440,6 +567,8 @@ class RenderProgram extends ShaderProgram {
             this._worker = createSortWorker();
             this._worker!.onmessage = (e) => {
                 if (e.data.depthIndex) {
+                    // [LAB] worker 只在真正跑过排序后才回包 ⇒ 这个计数就是"实际排序次数"
+                    this._labSortReplies++;
                     const { depthIndex, workerMs, keptCount, totalCount } = e.data as {
                         depthIndex: Uint32Array;
                         workerMs?: number;
@@ -462,7 +591,18 @@ class RenderProgram extends ShaderProgram {
                         }
                     }
 
-                    this._depthIndex = depthIndex;
+                    // [DRAWFRAC 2026-09-29] 诊断抽样：把排序结果等间隔抽到 `round(len·K)` 条
+                    //   （K 的缺省 1 = 不抽样 ⇒ 与历史行为逐字相同）。抽样后长度即绘制实例数。
+                    let depthUse: Uint32Array = depthIndex;
+                    if (this._drawFraction < 1 && depthIndex.length > 1) {
+                        const take = Math.max(1, Math.round(depthIndex.length * this._drawFraction));
+                        const picked = new Uint32Array(take);
+                        for (let i = 0; i < take; i++) {
+                            picked[i] = depthIndex[Math.floor((i * depthIndex.length) / take)];
+                        }
+                        depthUse = picked;
+                    }
+                    this._depthIndex = depthUse;
                     const uploadStart = performance.now();
                     // Upload into a buffer that the just-submitted frame is NOT
                     // reading, then make it the buffer drawn from next frame.
@@ -470,9 +610,20 @@ class RenderProgram extends ShaderProgram {
                     // never re-upload on frames that reuse the previous order.
                     const target = (activeDepthBuffer + 1) % indexBuffers.length;
                     gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffers[target]);
-                    gl.bufferData(gl.ARRAY_BUFFER, depthIndex, gl.DYNAMIC_DRAW);
+                    if (this._depthUpSub) {
+                        // [DEPTHUP 2026-09-29] 修复路径：每个槽位只分配一次（点数变化才重分配），
+                        //   其余帧只做 `bufferSubData` 局部更新 ⇒ 消除每帧 2.4 MB 的重分配/孤儿化。
+                        if (this._depthBufBytes[target] !== depthUse.byteLength) {
+                            gl.bufferData(gl.ARRAY_BUFFER, depthUse.byteLength, gl.DYNAMIC_DRAW);
+                            this._depthBufBytes[target] = depthUse.byteLength;
+                        }
+                        gl.bufferSubData(gl.ARRAY_BUFFER, 0, depthUse);
+                    } else {
+                        gl.bufferData(gl.ARRAY_BUFFER, depthUse, gl.DYNAMIC_DRAW);
+                    }
                     gl.bindBuffer(gl.ARRAY_BUFFER, null);
                     activeDepthBuffer = target;
+                    this._depthUploads++; // [DEPTHUP] 自证计数（0 ⇒ 该路径从未执行）
                     if (perf.enabled) {
                         perf.sample("gl.depthIndexUpload.ms", performance.now() - uploadStart);
                     }
@@ -512,6 +663,8 @@ class RenderProgram extends ShaderProgram {
 
             u_maxSplatSize = gl.getUniformLocation(this.program, "u_maxSplatSize") as WebGLUniformLocation;
             gl.uniform1f(u_maxSplatSize, this.maxSplatSize);
+            // [FOOT 2026-09-28] 足迹倍率（缺省 1.0 ⇒ 与原行为一致；仅线性度实验时由 `?foot=K` 改变）
+            gl.uniform1f(gl.getUniformLocation(this.program, "u_footprintScale"), this._footprintScale);
 
             this._splatTexture = gl.createTexture() as WebGLTexture;
             u_texture = gl.getUniformLocation(this.program, "u_texture") as WebGLUniformLocation;
@@ -538,6 +691,18 @@ class RenderProgram extends ShaderProgram {
 
             u_useSH = gl.getUniformLocation(this.program, "u_useSH") as WebGLUniformLocation;
             gl.uniform1i(u_useSH, 0);
+            // [NOCT 2026-09-29] 缺省恒为 1（历史行为逐字不变）；`?noct=1` 时置 0（诊断：跳过恒等颜色变换路径）
+            u_colorTransformEnabled = gl.getUniformLocation(
+                this.program,
+                "u_colorTransformEnabled",
+            ) as WebGLUniformLocation;
+            gl.uniform1i(u_colorTransformEnabled, this._noctRequested ? 0 : 1);
+            // [SHDEG 2026-09-29] 缺省 -1 = 不干预（历史行为逐字不变）；`?shdeg=N` 时压到 N 阶
+            u_maxSHDegree = gl.getUniformLocation(this.program, "u_maxSHDegree") as WebGLUniformLocation;
+            gl.uniform1i(u_maxSHDegree, this._maxSHDegree);
+            // [SHPROBE 2026-09-29] 缺省 false = 不干预（历史行为逐字不变）
+            u_shFixedCoord = gl.getUniformLocation(this.program, "u_shFixedCoord") as WebGLUniformLocation;
+            gl.uniform1i(u_shFixedCoord, this._shFixedCoordProbe ? 1 : 0);
 
             u_sh_r = gl.getUniformLocation(this.program, "u_sh_r") as WebGLUniformLocation;
             u_sh_g = gl.getUniformLocation(this.program, "u_sh_g") as WebGLUniformLocation;
@@ -614,7 +779,7 @@ class RenderProgram extends ShaderProgram {
         };
 
         const uploadSphericalHarmonics = () => {
-            if (!this.renderData || !this.renderData.sphericalHarmonics) {
+            if (!this.renderData || !this.renderData.sphericalHarmonics || this._noshRequested) {
                 gl.uniform1i(u_useSH, 0);
                 return;
             }
@@ -799,6 +964,24 @@ class RenderProgram extends ShaderProgram {
                 this._lastSortRequestAt = performance.now();
             }
             this._worker?.postMessage({ viewProj: this._camera.data.viewProj.buffer, cullEnabled: this._cullEnabled });
+            // [LAB] 逐帧记录：发送次数 + viewProj 的**逐元素**变化幅度（与 worker 里那个 `includes` 判定无关）
+            this._labSortPosts++;
+            this._labFrames++;
+            {
+                const vp = this._camera.data.viewProj.buffer as unknown as Float32Array;
+                if (this._labLastVp && vp && vp.length === this._labLastVp.length) {
+                    let maxD = 0;
+                    let changed = false;
+                    for (let i = 0; i < vp.length; i++) {
+                        const d = Math.abs(vp[i] - this._labLastVp[i]);
+                        if (d > maxD) maxD = d;
+                        if (d !== 0) changed = true;
+                    }
+                    if (maxD > this._labVpMaxDelta) this._labVpMaxDelta = maxD;
+                    if (changed) this._labVpChangedFrames++;
+                }
+                if (vp) this._labLastVp = new Float32Array(vp);
+            }
 
             const drawSetupStart = performance.now();
             gl.viewport(0, 0, canvas.width, canvas.height);
@@ -914,6 +1097,32 @@ class RenderProgram extends ShaderProgram {
 
     get depthIndex() {
         return this._depthIndex;
+    }
+
+    /**
+     * [LAB 2026-09-26] 排序/相机变化诊断快照（**只用于测量口径诊断**，不参与渲染）：
+     * `posts` = 每帧发给 worker 的 viewProj 次数（=渲染帧数）；
+     * `sorts` = worker 回包次数（worker 只在真跑了排序后回包）⇒ 实际排序次数；
+     * `vpMaxDelta` = 相邻帧 viewProj 逐元素最大绝对差（0 = 逐帧数值完全相同）；
+     * `vpChanged` = 逐元素不完全相等的帧数。
+     */
+    get labStats(): { posts: number; sorts: number; frames: number; vpMaxDelta: number; vpChanged: number } {
+        return {
+            posts: this._labSortPosts,
+            sorts: this._labSortReplies,
+            frames: this._labFrames,
+            vpMaxDelta: this._labVpMaxDelta,
+            vpChanged: this._labVpChangedFrames,
+        };
+    }
+
+    resetLabStats(): void {
+        this._labSortPosts = 0;
+        this._labSortReplies = 0;
+        this._labVpMaxDelta = 0;
+        this._labVpChangedFrames = 0;
+        this._labFrames = 0;
+        this._labLastVp = null;
     }
 
     get splatTexture() {

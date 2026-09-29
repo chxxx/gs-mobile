@@ -3,6 +3,8 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { viteStaticCopy } from "vite-plugin-static-copy";
+import { resolve as resolvePath } from "node:path";
+import { ch7ReportPlugin } from "./tools/ch7_report_middleware.mjs";
 
 const dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -29,6 +31,14 @@ export default defineConfig(() => ({
     base: "./", // 相对路径，保证可部署在 https://<user>.github.io/<repo>/ 这类子路径下
     publicDir: false,
     plugins: [
+        // 真机结果自动回传（`/__ch7/report`）：与 dev server 共用**同一份**实现。
+        // 为什么构建产物也要有：手机经隧道访问时，跑 dev server（未打包、每轮重拉几百个模块）
+        // 会让"一个场景一轮"拖到几分钟；改用构建产物（整站 10 文件 0.42MB）后固定开销降一个数量级。
+        ch7ReportPlugin({
+            rawDir: resolvePath(dirname, "../thesis_project/data/ch7_measurements/raw"),
+            token: process.env.CH7_REPORT_TOKEN || "ch7-2026-phase4",
+            maxBody: 4 * 1024 * 1024,
+        }),
         viteStaticCopy({
             targets: [
                 // 场景数据在构建时静态复制，保持与根目录同源（场景 .ply 不入 site-dist 的版本管理）
@@ -54,6 +64,16 @@ export default defineConfig(() => ({
             ],
         }),
     ],
+    // 与根配置（vite.config.js）同款白名单：Vite 5.4 起对未知 Host 直接 403，
+    // 真机经 cloudflared 隧道访问时 Host 是 *.trycloudflare.com，漏掉就会"手机 403 打不开"。
+    server: {
+        host: true,
+        allowedHosts: ["localhost", "127.0.0.1", ".trycloudflare.com"],
+    },
+    preview: {
+        host: true,
+        allowedHosts: ["localhost", "127.0.0.1", ".trycloudflare.com"],
+    },
     build: {
         outDir: resolve(dirname, "site-dist"),
         emptyOutDir: true,
@@ -69,6 +89,8 @@ export default defineConfig(() => ({
                 benchFlux: resolve(dirname, "bench-flux.html"),
                 // 轮间中转页（bench.html/bench-flux.html 的 ?hop= 用：零 GL、零 Worker 的空白页）
                 benchHop: resolve(dirname, "bench-hop.html"),
+                // 收尾完成页（跑完回传成功后整页替换到本页：零 GL、零 Worker，见 bench-shared.gotoDonePageIfEnabled）
+                benchDone: resolve(dirname, "bench-done.html"),
             },
         },
     },
