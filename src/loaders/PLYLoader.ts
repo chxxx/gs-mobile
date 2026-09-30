@@ -18,6 +18,21 @@ import {
 import type { LowRankChunkResult } from "./QPLYLoaderUtils";
 import LowRankQPLYWorker from "./LowRankQPLYWorker.ts?worker&inline";
 const createLowRankWorker = () => new LowRankQPLYWorker();
+/**
+ * [阶段1 2026-09-30] `?lr=1`：**加载期不做 CPU 低秩重建**，只把每点 r 个 rank 系数（已反量化）按 half
+ * 打包（每点 1 个 RGBA32UI 纹素）交给渲染期用共享基重建颜色。
+ * 缺省 `false` ⇒ 既有"加载期重建 + 48-half 打包 + 3 张全 SH 纹理"路径**逐字不变**。
+ *
+ * ⚠️ **渲染侧尚未落地**（rank 纹理 + 基 UBO + 生产遍低秩分支，见 `docs/ch7_stage1_lowrank_plan.md` §3/§8）：
+ *    在渲染侧落地之前打开 `lr=1` 会拿到**空的 SH 打包缓冲** ⇒ 颜色错误，仅供开发调试，**不要用于采数**。
+ */
+const LOW_RANK_RENDER_ENABLED: boolean = (() => {
+    try {
+        return new URLSearchParams(location.search).get("lr") === "1";
+    } catch {
+        return false;
+    }
+})();
 
 type PlyProperty = {
     name: string;
@@ -202,6 +217,8 @@ class PLYLoader {
                                 end: number;
                                 splat?: ArrayBuffer;
                                 shRgb?: ArrayBuffer[];
+                                /** [阶段1] `?lr=1` 时 worker 回传的低秩载荷（每点 4×uint）；缺省路径为 null。 */
+                                lrRank?: ArrayBuffer | null;
                                 message?: string;
                             };
 
@@ -215,6 +232,7 @@ class PLYLoader {
                                 end: data.end,
                                 splat: data.splat as ArrayBuffer,
                                 shRgb: [data.shRgb![0], data.shRgb![1], data.shRgb![2]],
+                                lrRank: data.lrRank ?? null,
                             });
                         };
 
@@ -229,6 +247,7 @@ class PLYLoader {
                                 buffer: workerBuffers[index],
                                 start: chunk.start,
                                 end: chunk.end,
+                                wantLowRank: LOW_RANK_RENDER_ENABLED,
                             },
                             [workerBuffers[index]],
                         );
@@ -255,7 +274,7 @@ class PLYLoader {
         );
 
         const mergeStart = performance.now();
-        const merged = mergeLowRankChunks(results, vertexCount);
+        const merged = mergeLowRankChunks(results, vertexCount, LOW_RANK_RENDER_ENABLED);
         console.log(`Low-rank QPLY chunk merge: ${performance.now() - mergeStart} ms`);
 
         // 合并结果已经在 merged 里（mergeLowRankChunks 另行分配），分块结果与 worker 缓冲可以立即断开：
@@ -272,6 +291,17 @@ class PLYLoader {
             merged.shRgb,
             vertexCount,
             new Int32Array([-1, -1, -1]),
+            // [阶段1 2026-09-30] `?lr=1`：低秩载荷（基/rank 来自主线程的 prepared，packed 来自各 worker 合并）
+            merged.lrRank
+                ? {
+                      rank: prepared.rank,
+                      restCount: prepared.restCoefficientCount,
+                      basis: prepared.basis,
+                      packed: merged.lrRank,
+                      width: merged.shInfo.width,
+                      height: Math.ceil(vertexCount / merged.shInfo.width),
+                  }
+                : undefined,
         );
 
         const splat = new Splat(data);
@@ -289,7 +319,7 @@ class PLYLoader {
         arrayStart: number,
         inputSize: number,
     ): Splat {
-        const result = ParseLowRankQPLYBuffer(inputBuffer);
+        const result = ParseLowRankQPLYBuffer(inputBuffer, LOW_RANK_RENDER_ENABLED);
 
         const deserializeStart = performance.now();
         const data = SplatData.Deserialize(new Uint8Array(result.splatBuffer));

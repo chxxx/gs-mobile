@@ -523,7 +523,12 @@ type LowRankChunkResult = {
     end: number;
     splat: ArrayBuffer;
     shRgb: [ArrayBuffer, ArrayBuffer, ArrayBuffer];
+    /** [阶段1 2026-09-30] `?lr=1` 时的低秩载荷（每点 4×uint）；缺省路径为 null。 */
+    lrRank?: ArrayBuffer | null;
 };
+
+/** [阶段1 2026-09-30] 低秩 rank 纹理宽度（2048 宽、行尾补 0；每点 4×uint = 1 纹素）。 */
+const LR_RANK_TEX_WIDTH = 2048;
 
 function getLowRankSHInfo(vertexCount: number): LowRankSHInfo {
     const width = 2048;
@@ -700,18 +705,21 @@ function decodeLowRankRange(
     prepared: LowRankPrepared,
     start: number,
     end: number,
-): { splat: ArrayBuffer; shRgb: [Uint32Array, Uint32Array, Uint32Array] } {
+    wantLowRank: boolean = false,
+): { splat: ArrayBuffer; shRgb: [Uint32Array, Uint32Array, Uint32Array]; lrRank: Uint32Array | null } {
     const count = end - start;
 
     const splatBuffer = new ArrayBuffer(SplatData.RowLength * count);
     const splatFloat = new Float32Array(splatBuffer);
     const splatUint8 = new Uint8ClampedArray(splatBuffer);
 
-    const shRgb: [Uint32Array, Uint32Array, Uint32Array] = [
-        new Uint32Array(8 * count),
-        new Uint32Array(8 * count),
-        new Uint32Array(8 * count),
-    ];
+    // [阶段1 2026-09-30] 低秩快速路径：只出 `lrRank`（每点 4×uint = 8 half），
+    //   **不**分配 3 × 8·count 的 48-half 打包缓冲（610k 点时那是 3×19.5 MB）⇒ 也不做 `C@B`。
+    const lrRank: Uint32Array | null = wantLowRank ? new Uint32Array(4 * count) : null;
+
+    const shRgb: [Uint32Array, Uint32Array, Uint32Array] = wantLowRank
+        ? [new Uint32Array(0), new Uint32Array(0), new Uint32Array(0)]
+        : [new Uint32Array(8 * count), new Uint32Array(8 * count), new Uint32Array(8 * count)];
 
     const { rank, restCoefficientCount, basis, rowLength, vertexDataOffset, vertexCount } = prepared;
 
@@ -790,6 +798,16 @@ function decodeLowRankRange(
             rankCoeffs[j] = rankCodebooks[j][vertexBytes[base + rankOffsets[j]]];
         }
 
+        if (lrRank) {
+            // [阶段1] 每点 4×uint = 8 half（前 rank 个有效）⇒ 渲染期 1 次 texelFetch 拿到全部 a_j。
+            lrRank[4 * local + 0] = packHalf2x16(rankCoeffs[0], rank > 1 ? rankCoeffs[1] : 0);
+            lrRank[4 * local + 1] = packHalf2x16(rank > 2 ? rankCoeffs[2] : 0, rank > 3 ? rankCoeffs[3] : 0);
+            lrRank[4 * local + 2] = packHalf2x16(rank > 4 ? rankCoeffs[4] : 0, rank > 5 ? rankCoeffs[5] : 0);
+            lrRank[4 * local + 3] = packHalf2x16(rank > 6 ? rankCoeffs[6] : 0, 0);
+            // 跳过 coeffR/G/B 与 48-half 打包 —— 这两步正是表 7-5 里 130/282 ms 的主要部分。
+            continue;
+        }
+
         coeffR[0] = fdc0;
         coeffG[0] = fdc1;
         coeffB[0] = fdc2;
@@ -825,7 +843,7 @@ function decodeLowRankRange(
         }
     }
 
-    return { splat: splatBuffer, shRgb };
+    return { splat: splatBuffer, shRgb, lrRank };
 }
 
 /**
@@ -835,38 +853,52 @@ function decodeLowRankRange(
 function mergeLowRankChunks(
     results: LowRankChunkResult[],
     vertexCount: number,
-): { splatBuffer: ArrayBuffer; shRgb: [Uint32Array, Uint32Array, Uint32Array]; shInfo: LowRankSHInfo } {
+    wantLowRank: boolean = false,
+): {
+    splatBuffer: ArrayBuffer;
+    shRgb: [Uint32Array, Uint32Array, Uint32Array];
+    lrRank: Uint32Array | null;
+    shInfo: LowRankSHInfo;
+} {
     const shInfo = getLowRankSHInfo(vertexCount);
     const splatBuffer = new ArrayBuffer(SplatData.RowLength * vertexCount);
     const splatBytes = new Uint8Array(splatBuffer);
 
-    const shRgb: [Uint32Array, Uint32Array, Uint32Array] = [
-        new Uint32Array(shInfo.size),
-        new Uint32Array(shInfo.size),
-        new Uint32Array(shInfo.size),
-    ];
+    // [阶段1] `lr=1`：不分配 2048 宽的全 SH 打包缓冲（3×19.5 MB @610k），只合并 rank 载荷。
+    const shRgb: [Uint32Array, Uint32Array, Uint32Array] = wantLowRank
+        ? [new Uint32Array(0), new Uint32Array(0), new Uint32Array(0)]
+        : [new Uint32Array(shInfo.size), new Uint32Array(shInfo.size), new Uint32Array(shInfo.size)];
+
+    const rankHeight = Math.ceil(vertexCount / LR_RANK_TEX_WIDTH);
+    const lrRank: Uint32Array | null = wantLowRank
+        ? new Uint32Array(4 * LR_RANK_TEX_WIDTH * rankHeight)
+        : null;
 
     for (const result of results) {
         splatBytes.set(new Uint8Array(result.splat), result.start * SplatData.RowLength);
         shRgb[0].set(new Uint32Array(result.shRgb[0]), 8 * result.start);
         shRgb[1].set(new Uint32Array(result.shRgb[1]), 8 * result.start);
         shRgb[2].set(new Uint32Array(result.shRgb[2]), 8 * result.start);
+        if (lrRank && result.lrRank) {
+            // 每点 4 uint ⇒ 扁平偏移 = 4·idx（与 2048 宽纹素的行主序布局一致）
+            lrRank.set(new Uint32Array(result.lrRank), 4 * result.start);
+        }
     }
 
-    return { splatBuffer, shRgb, shInfo };
+    return { splatBuffer, shRgb, lrRank, shInfo };
 }
 
 /**
  * Synchronous full-decode entry point (single-threaded). Used as the compatible
  * fallback and for small files where worker startup would not pay off.
  */
-function ParseLowRankQPLYBuffer(inputBuffer: ArrayBuffer): ParsedQPLYResult {
+function ParseLowRankQPLYBuffer(inputBuffer: ArrayBuffer, wantLowRank: boolean = false): ParsedQPLYResult {
     const decodeStart = performance.now();
     const prepared = prepareLowRankQPLY(inputBuffer);
     const vertexCount = prepared.vertexCount;
 
     const vertexStart = performance.now();
-    const { splat, shRgb } = decodeLowRankRange(prepared, 0, vertexCount);
+    const { splat, shRgb, lrRank } = decodeLowRankRange(prepared, 0, vertexCount, wantLowRank);
     const vertexElapsed = performance.now() - vertexStart;
     const totalElapsed = performance.now() - decodeStart;
     console.log(`Low-rank QPLY vertex decode/SH pack: ${vertexElapsed} ms`);
@@ -875,11 +907,10 @@ function ParseLowRankQPLYBuffer(inputBuffer: ArrayBuffer): ParsedQPLYResult {
     // Expand the linear `8 * vertexCount` chunk to the full 2048-wide texture
     // payload (tail rows contain zero padding).
     const shInfo = getLowRankSHInfo(vertexCount);
-    const fullShRgb: [Uint32Array, Uint32Array, Uint32Array] = [
-        new Uint32Array(shInfo.size),
-        new Uint32Array(shInfo.size),
-        new Uint32Array(shInfo.size),
-    ];
+    // [阶段1] `lr=1` 时不需要 2048 宽的全 SH 打包缓冲（610k 点时 3×19.5 MB）⇒ 只在缺省路径分配。
+    const fullShRgb: [Uint32Array, Uint32Array, Uint32Array] = wantLowRank
+        ? [new Uint32Array(0), new Uint32Array(0), new Uint32Array(0)]
+        : [new Uint32Array(shInfo.size), new Uint32Array(shInfo.size), new Uint32Array(shInfo.size)];
 
     fullShRgb[0].set(shRgb[0], 0);
     fullShRgb[1].set(shRgb[1], 0);
@@ -893,6 +924,17 @@ function ParseLowRankQPLYBuffer(inputBuffer: ArrayBuffer): ParsedQPLYResult {
             fullShRgb,
             vertexCount,
             new Int32Array([-1, -1, -1]),
+            // [阶段1 2026-09-30] `?lr=1`：附带低秩载荷（basis/rank 来自 prepared，主线程已解析过）
+            wantLowRank && lrRank
+                ? {
+                      rank: prepared.rank,
+                      restCount: prepared.restCoefficientCount,
+                      basis: prepared.basis,
+                      packed: lrRank,
+                      width: LR_RANK_TEX_WIDTH,
+                      height: Math.ceil(vertexCount / LR_RANK_TEX_WIDTH),
+                  }
+                : undefined,
         ),
     };
 }
