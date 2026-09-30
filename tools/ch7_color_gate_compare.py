@@ -32,7 +32,8 @@ from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RAW = os.path.abspath(os.path.join(HERE, "..", "..", "thesis_project", "data", "ch7_measurements", "raw"))
-OUT = os.path.join(HERE, "out")
+# 输出固定放到被 gitignore 的 scratch 目录：本脚本从 `tools/` 与 `_tmp_ch7probe/` 两个位置跑都写这里
+OUT = os.path.abspath(os.path.join(HERE, "..", "_tmp_ch7probe", "out"))
 PREFIX = os.environ.get("CG_NAME", "colorgate")
 
 
