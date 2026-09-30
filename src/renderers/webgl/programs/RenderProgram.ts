@@ -311,10 +311,13 @@ function buildShCacheFragmentSource(): string {
         : uniformBlock;
     const shFunctionsForArm = (() => {
         if (!LR_ENABLED) return shFunctions;
-        // 截到**第一个函数定义**之前 = 只留常量表，再接低秩 GLSL
+        // 截到**第一个函数定义**之前 = 只留常量表，再接低秩 GLSL。
+        // ⚠️ 切片本身以 `#if (...)` 开头、以 `#endif` 收尾；从中间截断会**丢掉那个 `#endif`**
+        //    ⇒ 预处理器报 `'if' : unexpected end of file found in conditional block`（实测两次踩到：
+        //    第一次以为是 CRLF 匹配失败，其实是这里漏了收尾）。必须把 `#endif` 补回去。
         const cut = /\n(?:void|vec3|vec4|float|uint|uvec4|mat4)\s+[A-Za-z_]\w*\s*\(/.exec(shFunctions);
         const constants = cut ? shFunctions.slice(0, cut.index) : shFunctions;
-        return constants + "\n" + LR_SH_GLSL;
+        return constants + "\n#endif\n" + LR_SH_GLSL;
     })();
     return (
         /* glsl */ `#version 300 es
