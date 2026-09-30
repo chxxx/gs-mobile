@@ -34,18 +34,35 @@ abstract class ShaderProgram {
         this._program = gl.createProgram() as WebGLProgram;
         this._passes = passes || [];
 
+        // [SHFMT-DIAG 2026-09-29] 诊断：编译/链接失败的日志目前只进 `console.error`（真机上看不到），
+        //   导致 `?shfmt=f16` 失败时只能看到"画面空、无错误文本"。
+        //   规则：**只有 `?shfmt=f16` 实验期间**才把失败升级为异常（异常会落进 bench 回传的 `err=` 字段）；
+        //   缺省路径保持历史行为（只 console.error、不中断）⇒ 零回归面。
+        const reportShaderFailure = (stage: string, log: string | null): void => {
+            console.error(log);
+            let experimental = false;
+            try {
+                experimental = (new URLSearchParams(location.search).get("shfmt") ?? "").startsWith("f16");
+            } catch {
+                experimental = false;
+            }
+            if (experimental) {
+                throw new Error(`[shfmt=f16] shader ${stage} failed :: ${(log ?? "").replace(/\s+/g, " ").slice(0, 400)}`);
+            }
+        };
+
         const vertexShader = gl.createShader(gl.VERTEX_SHADER) as WebGLShader;
         gl.shaderSource(vertexShader, this._getVertexSource());
         gl.compileShader(vertexShader);
         if (!gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS)) {
-            console.error(gl.getShaderInfoLog(vertexShader));
+            reportShaderFailure("vertex-compile", gl.getShaderInfoLog(vertexShader));
         }
 
         const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER) as WebGLShader;
         gl.shaderSource(fragmentShader, this._getFragmentSource());
         gl.compileShader(fragmentShader);
         if (!gl.getShaderParameter(fragmentShader, gl.COMPILE_STATUS)) {
-            console.error(gl.getShaderInfoLog(fragmentShader));
+            reportShaderFailure("fragment-compile", gl.getShaderInfoLog(fragmentShader));
         }
 
         this._shaders.push(vertexShader, fragmentShader); // 供 dispose 删除，避免泄漏
@@ -54,7 +71,7 @@ abstract class ShaderProgram {
         gl.attachShader(this.program, fragmentShader);
         gl.linkProgram(this.program);
         if (!gl.getProgramParameter(this.program, gl.LINK_STATUS)) {
-            console.error(gl.getProgramInfoLog(this.program));
+            reportShaderFailure("link", gl.getProgramInfoLog(this.program));
         }
 
         /**

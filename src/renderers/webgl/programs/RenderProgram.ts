@@ -48,6 +48,30 @@ export function clearDiagFrameTimings(): void {
     diagFrameTimingSamples.length = 0;
 }
 
+// [SHFMT 2026-09-29] `?shfmt=f16` 的**唯一判据**，必须放在**模块作用域**（纯函数），不能依赖实例字段：
+//   基类 `ShaderProgram` 构造函数会在**派生类字段初始化之前**调用 `_getVertexSource()`，
+//   那一刻 `this._shF16` 还是 `undefined` ⇒ `#define SHFMT_F16` 不注入 ⇒ 着色器被编成缺省
+//   `usampler2D` 版本，而上传路径又（字段已初始化）往上绑 RGBA16F 纹理 ⇒ draw 被 GL 丢弃：
+//   `GL_INVALID_OPERATION: glDrawArraysInstanced: Mismatch between texture format and sampler type`
+//   ⇒ 整幅画面画不出来（2026-09-29 桌面端 + 真机复现的根因）。
+const SHFMT_PARAM: string = (() => {
+    try {
+        return new URLSearchParams(location.search).get("shfmt") ?? "";
+    } catch {
+        return "";
+    }
+})();
+/** `?shfmt=f16`：RGBA16F + 硬件采样（当前实现：每点 12 次 fetch、0 次 unpack，但 12 个 `vec4` 同时存活）。 */
+const SHFMT_F16_ENABLED: boolean = SHFMT_PARAM === "f16" || SHFMT_PARAM === "f16_incr";
+/**
+ * `?shfmt=f16_incr`：**判别实验** —— 与 f16 的取样次数完全相同（12 次），
+ *   但改成"边取边写 `shs[]`"（不声明 `rv[4]` 数组、任何时刻只活 1 个 `vec4`）。
+ *   用途：把 f16 变慢的两个可能原因分开 ——
+ *     回到缺省水平 ⇒ **寄存器/占用率压力**是主因；
+ *     仍与 f16 相同  ⇒ **取样次数翻倍**（RGBA16F 每 texel 只能装 4 个 half）是主因。
+ */
+const SHFMT_F16_INCR: boolean = SHFMT_PARAM === "f16_incr";
+
 const vertexShaderSource = /* glsl */ `#version 300 es
 precision highp float;
 precision highp int;
@@ -69,9 +93,22 @@ uniform int u_maxSHDegree;
 //   （L1 常驻、不再逐点独享）⇒ 指令数 / 解包次数 / 局部数组大小全部不变，
 //   只把"每点独享的 48 B 字节流量"移除 ⇒ 用来隔离"字节流量"与"解包/寄存器压力"。
 uniform bool u_shFixedCoord;
+// [SHFMT 2026-09-29] shfmt=f16 时走这条路：SH 以 RGBA16F 存储，texelFetch 直接得到 float
+//   ⇒ 去掉每点 24 次 unpackHalf2x16（精度与 packed half 位模式完全相同）。
+//   缺省 u_shF16=0 ⇒ 仍走下面的 usampler2D + 手工解包路径，行为逐字不变。
+// [SHFMT 2026-09-29] f16 变体**复用同一套 sampler 槽位**（同名、同单元 5/6/7），只在编译期
+//   把类型从 usampler2D 切成 sampler2D ⇒ **不新增任何 sampler**
+//   （教训：给顶点着色器加未使用 sampler 会让缺省路径掉 3×，见文档 §25）。
+//   缺省编译（无 SHFMT_F16）⇒ 这三行与改动前逐字相同。
+#ifdef SHFMT_F16
+uniform highp sampler2D u_sh_r;
+uniform highp sampler2D u_sh_g;
+uniform highp sampler2D u_sh_b;
+#else
 uniform highp usampler2D u_sh_r;
 uniform highp usampler2D u_sh_g;
 uniform highp usampler2D u_sh_b;
+#endif
 uniform ivec3 u_bandIndex;
 uniform mat4 projection, view;
 uniform vec2 focal;
@@ -134,24 +171,93 @@ void fillSHFromPacked(in uvec4 packed0, in uvec4 packed1, in int offset, inout f
 vec3 evalSHRGB(int shIndex, uint degree, vec3 dir) {
     float shs[48];
 
-    ivec2 shCoord0 = ivec2(((uint(shIndex) & 0x3ffu) << 1), uint(shIndex) >> 10);
-    // [SHPROBE] 第二组 texel：探针开启时读固定坐标（全点共享 ⇒ 常驻缓存），否则与历史逐字相同
-    ivec2 shCoord1 = u_shFixedCoord
-        ? ivec2(0, 0)
-        : ivec2(((uint(shIndex) & 0x3ffu) << 1) | 1u, uint(shIndex) >> 10);
+#ifdef SHFMT_F16
+    // [SHFMT 2026-09-29] RGBA16F 路径：**复用 u_sh_r/g/b**（编译期类型已切成 sampler2D），
+    //   每点每通道 4 个 texel（16 个 half，顺序与 packed 完全一致）⇒ texelFetch 直接给 float
+    //   ⇒ **0 次 unpackHalf2x16**；sampler 数量与缺省编译完全相同。
+    ivec2 c16 = ivec2(((uint(shIndex) & 0x3ffu) << 2), uint(shIndex) >> 10);
+#ifdef SHFMT_F16_INCR
+    // [SHFMT 2026-09-29] shfmt=f16_incr（判别实验）：取样次数与 f16 **完全相同**（12 次）、
+    //   同样 0 次 unpack，但**边取边写** ⇒ 任何时刻只活 1 个 vec4（不声明 rv[4]/gv[4]/bv[4] 数组）。
+    //   索引映射与 f16 分支逐位一致：系数 (4k+j)、通道 ch（R=0,G=1,B=2）⇒ shs[(4k+j)*3+ch]。
+    vec4 t;
+    t = texelFetch(u_sh_r, c16 + ivec2(0, 0), 0);
+    shs[0] = t.x; shs[3] = t.y; shs[6] = t.z; shs[9] = t.w;
+    t = texelFetch(u_sh_r, c16 + ivec2(1, 0), 0);
+    shs[12] = t.x; shs[15] = t.y; shs[18] = t.z; shs[21] = t.w;
+    t = texelFetch(u_sh_r, c16 + ivec2(2, 0), 0);
+    shs[24] = t.x; shs[27] = t.y; shs[30] = t.z; shs[33] = t.w;
+    t = texelFetch(u_sh_r, c16 + ivec2(3, 0), 0);
+    shs[36] = t.x; shs[39] = t.y; shs[42] = t.z; shs[45] = t.w;
+    t = texelFetch(u_sh_g, c16 + ivec2(0, 0), 0);
+    shs[1] = t.x; shs[4] = t.y; shs[7] = t.z; shs[10] = t.w;
+    t = texelFetch(u_sh_g, c16 + ivec2(1, 0), 0);
+    shs[13] = t.x; shs[16] = t.y; shs[19] = t.z; shs[22] = t.w;
+    t = texelFetch(u_sh_g, c16 + ivec2(2, 0), 0);
+    shs[25] = t.x; shs[28] = t.y; shs[31] = t.z; shs[34] = t.w;
+    t = texelFetch(u_sh_g, c16 + ivec2(3, 0), 0);
+    shs[37] = t.x; shs[40] = t.y; shs[43] = t.z; shs[46] = t.w;
+    t = texelFetch(u_sh_b, c16 + ivec2(0, 0), 0);
+    shs[2] = t.x; shs[5] = t.y; shs[8] = t.z; shs[11] = t.w;
+    t = texelFetch(u_sh_b, c16 + ivec2(1, 0), 0);
+    shs[14] = t.x; shs[17] = t.y; shs[20] = t.z; shs[23] = t.w;
+    t = texelFetch(u_sh_b, c16 + ivec2(2, 0), 0);
+    shs[26] = t.x; shs[29] = t.y; shs[32] = t.z; shs[35] = t.w;
+    t = texelFetch(u_sh_b, c16 + ivec2(3, 0), 0);
+    shs[38] = t.x; shs[41] = t.y; shs[44] = t.z; shs[47] = t.w;
+#else
+    vec4 rv0 = texelFetch(u_sh_r, c16 + ivec2(0, 0), 0);
+    vec4 rv1 = texelFetch(u_sh_r, c16 + ivec2(1, 0), 0);
+    vec4 rv2 = texelFetch(u_sh_r, c16 + ivec2(2, 0), 0);
+    vec4 rv3 = texelFetch(u_sh_r, c16 + ivec2(3, 0), 0);
+    vec4 gv0 = texelFetch(u_sh_g, c16 + ivec2(0, 0), 0);
+    vec4 gv1 = texelFetch(u_sh_g, c16 + ivec2(1, 0), 0);
+    vec4 gv2 = texelFetch(u_sh_g, c16 + ivec2(2, 0), 0);
+    vec4 gv3 = texelFetch(u_sh_g, c16 + ivec2(3, 0), 0);
+    vec4 bv0 = texelFetch(u_sh_b, c16 + ivec2(0, 0), 0);
+    vec4 bv1 = texelFetch(u_sh_b, c16 + ivec2(1, 0), 0);
+    vec4 bv2 = texelFetch(u_sh_b, c16 + ivec2(2, 0), 0);
+    vec4 bv3 = texelFetch(u_sh_b, c16 + ivec2(3, 0), 0);
+        vec4 rv[4] = vec4[4](rv0, rv1, rv2, rv3);
+        vec4 gv[4] = vec4[4](gv0, gv1, gv2, gv3);
+        vec4 bv[4] = vec4[4](bv0, bv1, bv2, bv3);
+        for (int k = 0; k < 4; k++) {
+            shs[(4 * k + 0) * 3 + 0] = rv[k].x;
+            shs[(4 * k + 0) * 3 + 1] = gv[k].x;
+            shs[(4 * k + 0) * 3 + 2] = bv[k].x;
+            shs[(4 * k + 1) * 3 + 0] = rv[k].y;
+            shs[(4 * k + 1) * 3 + 1] = gv[k].y;
+            shs[(4 * k + 1) * 3 + 2] = bv[k].y;
+            shs[(4 * k + 2) * 3 + 0] = rv[k].z;
+            shs[(4 * k + 2) * 3 + 1] = gv[k].z;
+            shs[(4 * k + 2) * 3 + 2] = bv[k].z;
+            shs[(4 * k + 3) * 3 + 0] = rv[k].w;
+            shs[(4 * k + 3) * 3 + 1] = gv[k].w;
+            shs[(4 * k + 3) * 3 + 2] = bv[k].w;
+        }
+#endif
+#else
+    {
+        ivec2 shCoord0 = ivec2(((uint(shIndex) & 0x3ffu) << 1), uint(shIndex) >> 10);
+        // [SHPROBE] 第二组 texel：探针开启时读固定坐标（全点共享 ⇒ 常驻缓存），否则与历史逐字相同
+        ivec2 shCoord1 = u_shFixedCoord
+            ? ivec2(0, 0)
+            : ivec2(((uint(shIndex) & 0x3ffu) << 1) | 1u, uint(shIndex) >> 10);
 
-    uvec4 packedR0 = texelFetch(u_sh_r, shCoord0, 0);
-    uvec4 packedR1 = texelFetch(u_sh_r, shCoord1, 0);
+        uvec4 packedR0 = texelFetch(u_sh_r, shCoord0, 0);
+        uvec4 packedR1 = texelFetch(u_sh_r, shCoord1, 0);
 
-    uvec4 packedG0 = texelFetch(u_sh_g, shCoord0, 0);
-    uvec4 packedG1 = texelFetch(u_sh_g, shCoord1, 0);
+        uvec4 packedG0 = texelFetch(u_sh_g, shCoord0, 0);
+        uvec4 packedG1 = texelFetch(u_sh_g, shCoord1, 0);
 
-    uvec4 packedB0 = texelFetch(u_sh_b, shCoord0, 0);
-    uvec4 packedB1 = texelFetch(u_sh_b, shCoord1, 0);
+        uvec4 packedB0 = texelFetch(u_sh_b, shCoord0, 0);
+        uvec4 packedB1 = texelFetch(u_sh_b, shCoord1, 0);
 
-    fillSHFromPacked(packedR0, packedR1, 0, shs);
-    fillSHFromPacked(packedG0, packedG1, 1, shs);
-    fillSHFromPacked(packedB0, packedB1, 2, shs);
+        fillSHFromPacked(packedR0, packedR1, 0, shs);
+        fillSHFromPacked(packedG0, packedG1, 1, shs);
+        fillSHFromPacked(packedB0, packedB1, 2, shs);
+    }
+#endif
 
     vec3 result = SH_C0 * vec3(shs[0], shs[1], shs[2]);
 
@@ -467,6 +573,17 @@ class RenderProgram extends ShaderProgram {
             return false;
         }
     })();
+    // [SHFMT 2026-09-29] `?shfmt=f16`：SH 系数纹理改用 **RGBA16F**（半精度浮点，与现在 unpackHalf2x16
+    //   还原出的半精度**位模式完全相同 ⇒ 零精度损失**），着色器 texelFetch 直接得到 float ⇒
+    //   **去掉每点 24 次 unpackHalf2x16**（实测已经证明成本就在这里，见文档 §24）。
+    //   边界（务必不要误解）：这只改"解压后数据如何存进 GPU 显存供着色器采样"这一步；
+    //   **不涉及训练、不涉及模型资产格式、不影响磁盘层面的低秩量化压缩方案**。
+    //   缺省（无该参数）⇒ 与历史行为逐字不变（仍是 RGBA32UI + 手工 unpack 路径）。
+    //   ⚠️ 取值必须来自模块作用域常量 `SHFMT_F16_ENABLED`：编译期（`_getVertexSource()` 在基类构造里
+    //   就被调用）与运行期（纹理上传）必须用**同一个**判据，否则会出现"着色器 usampler2D + 纹理 RGBA16F"。
+    private _shF16: boolean = SHFMT_F16_ENABLED;
+    /** `?shfmt=f16` 时额外创建的 3 张 RGBA16F SH 纹理（与 packed 纹理并存，缺省为 null）。 */
+    private _shTextures16: [WebGLTexture | null, WebGLTexture | null, WebGLTexture | null] = [null, null, null];
     // ---- [LAB 2026-09-26] 排序/相机变化诊断计数器（只为测量口径诊断，不影响渲染行为）----
     /** 每帧向 sort worker 发送 viewProj 的次数（= 渲染帧数） */
     private _labSortPosts = 0;
@@ -703,6 +820,8 @@ class RenderProgram extends ShaderProgram {
             // [SHPROBE 2026-09-29] 缺省 false = 不干预（历史行为逐字不变）
             u_shFixedCoord = gl.getUniformLocation(this.program, "u_shFixedCoord") as WebGLUniformLocation;
             gl.uniform1i(u_shFixedCoord, this._shFixedCoordProbe ? 1 : 0);
+            // [SHFMT 2026-09-29] f16 变体**复用单元 5/6/7**（类型已在编译期切成 sampler2D）
+            //   ⇒ 不需要任何额外 uniform 或额外 sampler；缺省路径与改动前逐字相同。
 
             u_sh_r = gl.getUniformLocation(this.program, "u_sh_r") as WebGLUniformLocation;
             u_sh_g = gl.getUniformLocation(this.program, "u_sh_g") as WebGLUniformLocation;
@@ -790,25 +909,79 @@ class RenderProgram extends ShaderProgram {
             gl.uniform3iv(u_bandIndex, sh.bandsIndices);
 
             for (let channel = 0; channel < 3; channel++) {
-                gl.activeTexture(gl.TEXTURE5 + channel);
-                gl.bindTexture(gl.TEXTURE_2D, this._shTextures[channel]);
+                if (!this._shF16) {
+                    // [SHFMT 2026-09-29] 缺省路径**逐字不变**（RGBA32UI packed + 手工解包）。
+                    //   f16 模式下这张 packed 纹理不会被任何东西采样（着色器编译期已切到 sampler2D + RGBA16F）
+                    //   ⇒ 不再重复上传：省掉每通道 ~19.5 MB（610k 点、3 通道合计 ~58 MB）。
+                    //   移动端显存本就紧张，重复占位可能让后续分配失败（症状正是"整幅画面画不出来"）。
+                    gl.activeTexture(gl.TEXTURE5 + channel);
+                    gl.bindTexture(gl.TEXTURE_2D, this._shTextures[channel]);
 
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
-                gl.texImage2D(
-                    gl.TEXTURE_2D,
-                    0,
-                    gl.RGBA32UI,
-                    sh.width,
-                    sh.height,
-                    0,
-                    gl.RGBA_INTEGER,
-                    gl.UNSIGNED_INT,
-                    sh.rgb[channel],
-                );
+                    gl.texImage2D(
+                        gl.TEXTURE_2D,
+                        0,
+                        gl.RGBA32UI,
+                        sh.width,
+                        sh.height,
+                        0,
+                        gl.RGBA_INTEGER,
+                        gl.UNSIGNED_INT,
+                        sh.rgb[channel],
+                    );
+                }
+
+                if (this._shF16) {
+                    // [SHFMT 2026-09-29] 同一份 packed-half 位模式，按"每点 16 个 half = 4 个 texel"重排：
+                    //   因为 packed 是 2048 宽 × 4 uint/texel（=16 B/texel，每点 2 texel = 32 B），
+                    //   RGBA16F 是 4096 宽 × 4 half/texel（=8 B/texel，每点 4 texel = 32 B）⇒ **每点字节数与
+                    //   字节顺序完全一致** ⇒ 只把 Uint32Array 重解释为 Uint16Array、行宽 ×2、高度不变
+                    //   ⇒ **零拷贝、且与 unpackHalf2x16 得到的半精度位模式完全相同（零精度损失）**。
+                    if (!this._shTextures16[channel]) {
+                        this._shTextures16[channel] = gl.createTexture() as WebGLTexture;
+                    }
+                    gl.activeTexture(gl.TEXTURE5 + channel);
+                    gl.bindTexture(gl.TEXTURE_2D, this._shTextures16[channel]);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+                    const packed = sh.rgb[channel];
+                    const halves = new Uint16Array(packed.buffer, packed.byteOffset, packed.length * 2);
+                    // 上传前先清空既有错误：否则上游遗留的 GL 错误会被误判成"这张纹理上传失败"。
+                    while (gl.getError() !== gl.NO_ERROR) {
+                        /* drain */
+                    }
+                    gl.texImage2D(
+                        gl.TEXTURE_2D,
+                        0,
+                        gl.RGBA16F,
+                        sh.width * 2,
+                        sh.height,
+                        0,
+                        gl.RGBA,
+                        gl.HALF_FLOAT,
+                        halves,
+                    );
+                    // [SHFMT-DIAG 2026-09-29] 上传失败（显存不足 / 格式不支持 / 尺寸越界）在真机上
+                    //   只会表现为"整幅画面画不出来"，所以 f16 实验期间把它升级为异常 ⇒ 落进报告的 `err=`。
+                    //   缺省路径完全不经过这里 ⇒ 零回归面。
+                    const uploadErr = gl.getError();
+                    if (uploadErr !== gl.NO_ERROR) {
+                        throw new Error(
+                            `[shfmt=f16] RGBA16F SH upload failed :: glError=0x${uploadErr.toString(16)} ` +
+                                `(ch=${channel}, ${sh.width * 2}x${sh.height}, bytes=${halves.byteLength})`,
+                        );
+                    }
+
+                    // f16 模式下单元 5/6/7 最终绑的是 RGBA16F 版本（sampler 类型也在编译期切成 sampler2D）
+                    // ⇒ 不再需要恢复 packed 绑定，也不存在 sampler/格式不匹配。
+                }
             }
 
             gl.activeTexture(gl.TEXTURE0);
@@ -1061,6 +1234,14 @@ class RenderProgram extends ShaderProgram {
                 }
             }
 
+            // [SHFMT 2026-09-29] `?shfmt=f16` 额外创建的 3 张 RGBA16F SH 纹理也必须成对删除：
+            //   否则"每轮新建上下文"的用法（bench-case 的 iframe）会在 GPU 侧逐轮累积句柄。
+            for (const texture of this._shTextures16) {
+                if (texture) {
+                    gl.deleteTexture(texture);
+                }
+            }
+
             for (const buffer of indexBuffers) {
                 gl.deleteBuffer(buffer);
             }
@@ -1175,7 +1356,16 @@ class RenderProgram extends ShaderProgram {
     }
 
     protected _getVertexSource() {
-        return vertexShaderSource;
+        // [SHFMT 2026-09-29] 只有 `?shfmt=f16` 时，才把 f16 那段（sampler 类型切换 + 单分支）**编译进**着色器；
+        //   缺省（不传 shfmt）⇒ 源码与改动前逐字相同 ⇒ **缺省路径的着色器二进制也相同**（零回归面）。
+        //   ⚠️ 必须用模块级 `SHFMT_F16_ENABLED`（不能用 `this._shF16`）：本函数在**基类构造函数**里
+        //   就被调用，那时派生类字段还没初始化（`this._shF16 === undefined`）⇒ 会编成缺省着色器。
+        //   ⚠️ 另外：`#define` 必须插在 `#version 300 es` **之后**（`#version` 必须是第一条有效语句）。
+        if (!SHFMT_F16_ENABLED) return vertexShaderSource;
+        const define = SHFMT_F16_INCR
+            ? "#define SHFMT_F16 1\n#define SHFMT_F16_INCR 1\n"
+            : "#define SHFMT_F16 1\n";
+        return vertexShaderSource.replace("#version 300 es", "#version 300 es\n" + define);
     }
 
     protected _getFragmentSource() {

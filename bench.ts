@@ -480,6 +480,8 @@ function buildResultText(st: BenchState): string {
     lines.push(`shdeg=${param("shdeg", "-1")}`);
     // [SHPROBE 2026-09-29] `?shprobe=fixedcoord` = SH 第二组 texel 读固定坐标（诊断）；缺省 '-' ⇒ 与历史无差别
     lines.push(`shprobe=${param("shprobe", "-")}`);
+    // [SHFMT 2026-09-29] `?shfmt=f16` = SH 用 RGBA16F + 硬件采样（去掉手工解包）；缺省 '-' ⇒ 与历史无差别
+    lines.push(`shfmt=${param("shfmt", "-")}`);
     lines.push(`hardwareConcurrency=${env.hardwareConcurrency}`);
     lines.push(`deviceMemory=${env.deviceMemory}`);
     lines.push("--- per-round ---");
