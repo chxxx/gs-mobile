@@ -755,6 +755,13 @@ Mismatch between texture format and sampler type (signed/unsigned/float/shadow).
 3. **附带事实（已读 Flux-GS 公开渲染实现核对）**：Flux-GS 同为 4 顶点 quad（**冗余为两者共有**，不是本文更慢的原因）；其 `computeSHChannel` 每通道只取 **1 个 RGBA32F 纹素**、只用 DC + 一阶共 4 个系数（更高阶由其网络部分承载；该仓库另有一段被注释掉的"取 12 纹素完整三阶"变体）、**0 次解包** ⇒ 每顶点 3 取样 / 0 解包 / 4 系数 vs 本文 6 取样 / 48 解包 / 16 系数 ⇒ 这解释了 3.7–5.6× 的量级差，**不是**纹理格式造成的。
 4. 今后任何"格式/布局/求值粒度"类优化：先确认口径是**顶点级还是 splat 级**，再算 fetch 次数与 texel 密度，最后在移动端做**同会话三臂**（缺省 / 变体 / 变体'）判别；只看"少了几条指令"会得出反向结论。
 
+> **4× 冗余的逐行证据链（2026-09-30 核对，可直接引用）**
+> - 顶点属性：`position` 的缓冲为 `[-2,-2, 2,-2, 2,2, -2,2]`（四个角点，`RenderProgram.ts` L845），且 `vertexAttribPointer` **无 divisor**（L1173）⇒ **逐顶点**；`index` 带 `gl.vertexAttribDivisor(indexAttribute, 1)`（L1177）⇒ **逐实例（逐 splat）**。⇒ 同一 splat 的 4 次调用**只有 `position` 不同，`index` 逐位相同**。
+> - 颜色路径与 `position` 完全无关：`cen`(L316)、`transform`/`transformIndex`(L319-331)、`cam`/`pos2d`(L333-334)、`cov`/`Vrk`/`J`/`T`/`cov2d`/`majorAxis`(L342-366)、`color`(L379-384)、`shIndex`/`degree`(L387-410) **只依赖 `index` 与 uniform**；`worldPosition`(L413)、`cameraPosition`(L414)、`dir = normalize(worldPosition - cameraPosition)`(L415) 只用 **splat 中心 + 相机位置**。
+> - ⇒ 4 个顶点取**同一批纹素、同一组系数、同一方向、同一段算术** ⇒ 颜色**数值恒等（bit-identical）**；唯一逐顶点输出是 `gl_Position` 的角点偏移（L439-442）与 `vPosition`（L423）。
+> - ⇒ 驱动**无法去重**：4 个顶点的属性不同 ⇒ 顶点着色器输入元组不同，不存在跨调用的公共子表达式消除；`flat` 限定符只省插值、不省计算 ⇒ **这 4× 是真实执行的工作量**。且**冗余不止 SH**：整段"逐 splat 常量"逻辑（cen/transform/cov2d/color/colorTransform）同样被重算 4 遍。
+> - ⇒ 由此，"每帧一次逐点颜色预计算 + quad 顶点各取 1 纹素"与现状**数值等价（零视觉风险）**，是首选验证方案；把 SH 挪到片段着色器则变成"逐覆盖像素"次数，仅当平均 splat 覆盖 < 4 像素才划算，故不采纳。
+
 ### 13.3 `?splatPx=` 假阴性（已修）与新增诊断旋钮
 
 - `?splatPx=` 此前**只有注释、没有任何 URL 解析** ⇒ 上轮 A2（`splatPx=64`）是 **no-op** ⇒ **撤回**"尾部/巨型 quad ≈0%"及由它推出的"片元面积项 ≈4–5%（两探针合并）"；片元/填充项量级改以 `res` 扫描为依据（≈20 ms/Mpx @ 基座视角）。
