@@ -2184,7 +2184,11 @@ class RenderProgram extends ShaderProgram {
                         gl.activeTexture(gl.TEXTURE0);
                         gl.useProgram(this._shCacheProgram);
                         gl.uniform1i(this._shCacheU["u_lrW"] ?? null, lr.width);
-                        gl.useProgram(this.program);
+                        // [阶段1 修复3] **不能**在这里切回主 pass 程序：紧跟其后的 `gl.drawArrays` 是**生产遍**的
+                        //   绘制（渲染目标 = 颜色 FBO）。若此时绑定的是主 pass 程序，就变成"主 pass 往它自己要
+                        //   采样的颜色纹理上画"（feedback loop）⇒ 每帧 `GL_INVALID_OPERATION`、draw 被跳过
+                        //   ⇒ 颜色缓存全 0 ⇒ 主 pass alpha=0 ⇒ 画面为空（存活探针 ok=0）。实测 22 次正是这个。
+                        //   生产遍结束后由下面的既有 `gl.useProgram(this.program)` 恢复。
                     }
                     gl.drawArrays(gl.TRIANGLES, 0, 3);
                     if (blendWas) gl.enable(gl.BLEND);
