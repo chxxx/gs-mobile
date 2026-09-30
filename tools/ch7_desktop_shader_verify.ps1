@@ -23,27 +23,33 @@ Get-CimInstance Win32_Process -Filter "Name='msedge.exe' or Name='chrome.exe'" -
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Write-Output "stale-diag-instances-cleaned"
 
-$base = "http://127.0.0.1:5176/bench.html?mode=bench&res_mode=forced&res=1600x1063&dpr=1&frames=20&cold=1" +
+$base = "http://127.0.0.1:5173/bench.html?mode=bench&res_mode=forced&res=1600x1063&dpr=1&frames=20&cold=1" +
         "&proto=flux&rounds=1&benchmode=offscreen-paper-match&profile=garden&sync=batch&driver=msgchannel" +
         "&runs=5&warmup=20&tickevery=16&fences=3&report=/__ch7/report?name=shfmt2&rtok=ch7-2026-phase4&u="
 
-foreach ($case in @(@("f16incr", "&shfmt=f16_incr"))) {
+foreach ($case in @(@("base", ""), @("pre", "&shpass=pre"), @("pref16", "&shpass=pre&shpackf16=1"))) {
     $tag = "fix2-" + $case[0]
     $url = $base + $tag + $case[1]
     $err = Join-Path $root ("_tmp_ch7probe\fix2_" + $case[0] + ".err")
     $out = Join-Path $root ("_tmp_ch7probe\fix2_" + $case[0] + ".out")
-    # 独立 profile ⇒ 不会挂到你正在用的浏览器实例上，也不会互相干扰
-    $profile = Join-Path $env:TEMP ("ch7diag_v3_" + $case[0])
+    # 每次运行**删掉 profile**：共用 profile 会让浏览器对 `?t=` 未变的模块命中磁盘缓存 ⇒ 可能测到**旧代码**
+    #   （2026-09-30 踩过：模块 transform 时间戳 15:36:58 却被 15:38 的运行复用 ⇒ 白跑好几轮）。
+    #   dev server 侧 transform 已是热的，冷启动代价很小 ⇒ 用"必定加载新代码"换掉那点缓存收益。
+    $profile = Join-Path $env:TEMP "ch7diag_v5_fresh"
+    Remove-Item -Recurse -Force $profile -ErrorAction SilentlyContinue
     $argLine = '--no-sandbox --no-first-run --no-default-browser-check --enable-logging=stderr ' +
                '--window-size=1600,1063 --window-position=0,0 --user-data-dir="' + $profile + '" "' + $url + '"'
     Write-Output ("run=" + $tag)
     $p = Start-Process -FilePath $exe -ArgumentList $argLine -PassThru -RedirectStandardError $err -RedirectStandardOutput $out
-    Start-Sleep -Seconds 30
+    Start-Sleep -Seconds 75
     if (-not $p.HasExited) { $p.Kill() }
     $c = @(Get-Content $err -ErrorAction SilentlyContinue)
     Write-Output ("--- " + $tag + " ---")
     Write-Output ("mismatchCount=" + (@($c | Select-String -SimpleMatch "Mismatch between texture format")).Count)
     Write-Output ("shfmtFailCount=" + (@($c | Select-String -SimpleMatch "[shfmt=f16]")).Count)
+    Write-Output ("shaderErrCount=" + (@($c | Select-String -SimpleMatch "ERROR:")).Count)
+    Write-Output ("glErrCount=" + (@($c | Select-String -SimpleMatch "GL_INVALID_OPERATION")).Count)
+    Write-Output ("shpassNoteCount=" + (@($c | Select-String -SimpleMatch "[shpass=pre]")).Count)
     $c | Select-String -SimpleMatch "[result] ok=" | Select-Object -Last 2 | ForEach-Object { "  " + $_.Line.Trim() }
     $c | Select-String -SimpleMatch "存活探针" | Select-Object -Last 1 | ForEach-Object { "  LIVENESS-FAIL-PRESENT" }
 }

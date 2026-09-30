@@ -72,6 +72,38 @@ const SHFMT_F16_ENABLED: boolean = SHFMT_PARAM === "f16" || SHFMT_PARAM === "f16
  */
 const SHFMT_F16_INCR: boolean = SHFMT_PARAM === "f16_incr";
 
+// [SHPASS-PRE 阶段一] `?shpass=pre`：用 Transform Feedback 把"逐 splat 颜色"从"每顶点一次（每 splat 4 次冗余）"
+//   改为"每 splat 一次"；第二遍主 pass 的 quad 顶点只读实例属性。
+//   Transform Feedback 是 WebGL2 **核心**功能（非扩展）⇒ 编译期判据用 `WebGL2RenderingContext` 是否存在；
+//   运行期在 `_initialize` 用真实 gl 复查，不支持则 `console.error` + 停用第一遍（**方案甲**：不改造基类）。
+const SHPASS_PRE_REQUESTED: boolean = (() => {
+    try {
+        return new URLSearchParams(location.search).get("shpass") === "pre";
+    } catch {
+        return false;
+    }
+})();
+/** `?shpass=pre&shpackf16=1`：TF 输出为 2×`packHalf2x16`（8 B/splat）而非 float32 `vec4`（16 B/splat）。 */
+const SHPASS_PRE_PACKF16: boolean = (() => {
+    try {
+        return new URLSearchParams(location.search).get("shpackf16") === "1";
+    } catch {
+        return false;
+    }
+})();
+const SHPASS_PRE_ENABLED: boolean = SHPASS_PRE_REQUESTED && typeof WebGL2RenderingContext !== "undefined";
+
+/**
+ * [SHPASS-PRE 阶段一] 第一遍（TF）program 的顶点源码：与主 pass **共用同一份 `vertexShaderSource`**，
+ * 只注入 `SHPASS_TF` 选中那个极小的 `main()` ⇒ `evalSHRGB` / `fillSHFromPacked` 不重复实现，
+ * 两遍的"逐 splat 颜色"代码逐行同源（等价性的结构性保证）。
+ */
+function buildTransformFeedbackVertexSource(): string {
+    const defines = ["#define SHPASS_TF 1"];
+    if (SHPASS_PRE_PACKF16) defines.push("#define SHPASS_PRE_PACKF16 1");
+    return vertexShaderSource.replace("#version 300 es", "#version 300 es\n" + defines.join("\n") + "\n");
+}
+
 const vertexShaderSource = /* glsl */ `#version 300 es
 precision highp float;
 precision highp int;
@@ -84,6 +116,10 @@ uniform highp usampler2D u_colorTransformIndices;
 // [NOCT 2026-09-29] noct=1 且数据自证颜色变换为恒等（索引全 0 且块 0 = 单位矩阵）时置 0：
 //   跳过“每点索引 fetch + 4 个 texel 拼 mat4 + mat4×vec4”这条恒等路径（纯冗余开销）。
 //   缺省恒为 1 ⇒ 与历史行为逐字不变。
+// [SHPASS-PRE 阶段一] 第二遍主 pass（SHPASS_PRE 且**非**第一遍 TF）既不采样 SH、也不做 colorTransform
+//   ⇒ 这一整段声明必须**整段排除**：否则会重演 §25 的「未使用 sampler 惩罚」
+//   （顶点着色器里多几个未使用的 sampler 就能让缺省路径掉 3×）。
+#if !defined(SHPASS_PRE) || defined(SHPASS_TF)
 uniform bool u_colorTransformEnabled;
 uniform bool u_useSH;
 // [SHDEG 2026-09-29] 诊断门控：允许把 SH 的**阶数**统一压到 N（-1 = 不干预、历史行为）。
@@ -110,6 +146,7 @@ uniform highp usampler2D u_sh_g;
 uniform highp usampler2D u_sh_b;
 #endif
 uniform ivec3 u_bandIndex;
+#endif // !SHPASS_PRE || SHPASS_TF（SH / colorTransform 相关声明到此为止）
 uniform mat4 projection, view;
 uniform vec2 focal;
 uniform vec2 viewport;
@@ -123,6 +160,9 @@ uniform float u_maxSplatSize;
 // 若离屏排空（ER/SMP）随片元面积线性变化，则归因单位应写成"每片元"而不是"每点"。
 uniform float u_footprintScale;
 
+// [SHPASS-PRE 阶段一] SH 常量与两个 SH 辅助函数：**缺省编译**与**第一遍 TF program** 需要；
+//   第二遍主 pass（SHPASS_PRE）已完全不需要 SH ⇒ 一并排除（函数体会引用上面那些 sampler）。
+#if !defined(SHPASS_PRE) || defined(SHPASS_TF)
 const float SH_C0 = 0.28209479177387814;
 const float SH_C1 = 0.4886025119029199;
 
@@ -303,6 +343,202 @@ vec3 evalSHRGB(int shIndex, uint degree, vec3 dir) {
 
     return clamp(result, vec3(0.0), vec3(1.0));
 }
+#endif // !SHPASS_PRE || SHPASS_TF（SH 常量 + 两个辅助函数）
+
+// =====================================================================================
+// [SHPASS-PRE 阶段一] 第一遍（Transform Feedback）：每个 splat 只算 **1 次颜色**
+//   本 program 由 #define SHPASS_TF 1 选中（与主 pass 共用同一份源码，因此
+//   evalSHRGB / fillSHFromPacked 不重复）；绘制方式 = gl.POINTS + RASTERIZER_DISCARD，
+//   一个顶点就是一个 splat。
+//   计算内容与主 pass 的「逐 splat 颜色」部分**逐行等价**，行号对应主 pass 原实现。
+//   注意：本遍**不做**视锥与 lambda2 < 0 的提前 return —— 那两处只决定「画不画」，
+//   提前判定完整保留在第二遍主 pass（语义「整体一起画/一起丢」不变）。
+// =====================================================================================
+#ifdef SHPASS_TF
+in int index; // 逐顶点属性：本例一个顶点 = 一个 splat（属性缓冲与主 pass 的 instance 属性同源）
+#ifdef SHPASS_PRE_PACKF16
+flat out uvec2 tfColorPacked; // 8 B/splat（2 × packHalf2x16）
+#else
+out vec4 tfColor;             // 16 B/splat（float32，等价性基准版本）
+#endif
+
+void main () {
+    // 任何提前返回/异常路径都要写入确定值，避免 TF 缓冲里留下未定义内容被第二遍读到
+#ifdef SHPASS_PRE_PACKF16
+    tfColorPacked = uvec2(0u, 0u);
+#else
+    tfColor = vec4(0.0);
+#endif
+
+    uvec4 cen = texelFetch(u_texture, ivec2((uint(index) & 0x3ffu) << 1, uint(index) >> 10), 0);              // ← 主 pass L316
+    uint transformIndex = texelFetch(u_transformIndices, ivec2(uint(index) & 0x3ffu, uint(index) >> 10), 0).x; // ← L319
+    uvec4 cov = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << 1) | 1u, uint(index) >> 10), 0);       // ← L342
+
+    vec4 color = vec4(                                                                                      // ← L379-384
+        (cov.w) & 0xffu,
+        (cov.w >> 8) & 0xffu,
+        (cov.w >> 16) & 0xffu,
+        (cov.w >> 24) & 0xffu
+    ) / 255.0;
+
+    if (u_useSH) {                                                                                          // ← L386
+        int shIndex = index;
+        uint degree = 3u;
+
+        if (u_bandIndex[0] >= 0) {                                                                          // ← L390-406
+            if (index <= u_bandIndex[0]) {
+                degree = 0u;
+            }
+            else if (index <= u_bandIndex[1]) {
+                degree = 1u;
+                shIndex = index - (u_bandIndex[0] + 1);
+            }
+            else if (index <= u_bandIndex[2]) {
+                degree = 2u;
+                shIndex = index - (u_bandIndex[0] + 1);
+            }
+            else {
+                degree = 3u;
+                shIndex = index - (u_bandIndex[0] + 1);
+            }
+        }
+
+        if (u_maxSHDegree >= 0 && degree > uint(u_maxSHDegree)) {                                           // ← L408-410
+            degree = uint(u_maxSHDegree);
+        }
+
+        if (degree > 0u || u_bandIndex[0] < 0) {                                                            // ← L412
+            mat4 transform = mat4(                                                                          // ← L320-325
+                texelFetch(u_transforms, ivec2(0, transformIndex), 0),
+                texelFetch(u_transforms, ivec2(1, transformIndex), 0),
+                texelFetch(u_transforms, ivec2(2, transformIndex), 0),
+                texelFetch(u_transforms, ivec2(3, transformIndex), 0)
+            );
+            vec3 worldPosition = (transform * vec4(uintBitsToFloat(cen.xyz), 1.0)).xyz;                      // ← L413
+            vec3 cameraPosition = inverse(view)[3].xyz;                                                      // ← L414
+            vec3 dir = normalize(worldPosition - cameraPosition);                                            // ← L415
+
+            color.rgb = evalSHRGB(shIndex, degree, dir);                                                     // ← L417
+        }
+    }
+
+    if (u_colorTransformEnabled) {                                                                          // ← L368-377 + L421
+        uint colorTransformIndex = texelFetch(u_colorTransformIndices, ivec2(uint(index) & 0x3ffu, uint(index) >> 10), 0).x;
+        mat4 colorTransform = mat4(
+            texelFetch(u_colorTransforms, ivec2(0, colorTransformIndex), 0),
+            texelFetch(u_colorTransforms, ivec2(1, colorTransformIndex), 0),
+            texelFetch(u_colorTransforms, ivec2(2, colorTransformIndex), 0),
+            texelFetch(u_colorTransforms, ivec2(3, colorTransformIndex), 0)
+        );
+        color = colorTransform * color;
+    }
+
+#ifdef SHPASS_PRE_PACKF16
+    tfColorPacked = uvec2(packHalf2x16(color.xy), packHalf2x16(color.zw));
+#else
+    tfColor = color;
+#endif
+}
+#elif defined(SHPASS_PRE)
+// [SHPASS-PRE 阶段一] 第二遍主 pass：颜色直接取**第一遍 TF 的实例属性** ⇒ 本分支不采样 SH 纹理、
+//   不解包、不 evalSHRGB（那些声明已在上面整段排除，避免 §25 的未使用 sampler 惩罚）。
+//   投影/协方差/长轴短轴仍按原样逐顶点计算（阶段一不搬这部分，保持变量单一）。
+//   实例属性由 TF buffer 以 interleaved 方式绑定（stride 16 B 或 8 B，divisor = 1）。
+in vec2 position; // 角点（逐顶点，无 divisor）
+in int index;     // 逐实例（divisor = 1）——cen/cov/selected 仍需按 splat 索引取
+#ifdef SHPASS_PRE_PACKF16
+in uvec2 a_colorPacked; // 实例属性：8 B/splat（2 × packHalf2x16）
+#else
+in vec4 a_color; // 实例属性：16 B/splat（float32，基准版本）
+#endif
+
+out vec4 vColor;
+out vec2 vPosition;
+out float vSize;
+out float vSelected;
+
+void main () {
+    uvec4 cen = texelFetch(u_texture, ivec2((uint(index) & 0x3ffu) << 1, uint(index) >> 10), 0);
+    float selected = float((cen.w >> 24) & 0xffu);
+
+    uint transformIndex = texelFetch(u_transformIndices, ivec2(uint(index) & 0x3ffu, uint(index) >> 10), 0).x;
+    mat4 transform = mat4(
+        texelFetch(u_transforms, ivec2(0, transformIndex), 0),
+        texelFetch(u_transforms, ivec2(1, transformIndex), 0),
+        texelFetch(u_transforms, ivec2(2, transformIndex), 0),
+        texelFetch(u_transforms, ivec2(3, transformIndex), 0)
+    );
+
+    if (selected < 0.5) {
+        selected = texelFetch(u_transforms, ivec2(4, transformIndex), 0).x;
+    }
+
+    mat4 viewTransform = view * transform;
+
+    vec4 cam = viewTransform * vec4(uintBitsToFloat(cen.xyz), 1);
+    vec4 pos2d = projection * cam;
+
+    float clip = 1.2 * pos2d.w;
+    if (pos2d.z < -pos2d.w || pos2d.z > pos2d.w || pos2d.x < -clip || pos2d.x > clip || pos2d.y < -clip || pos2d.y > clip) {
+        gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+        return;
+    }
+
+    uvec4 cov = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << 1) | 1u, uint(index) >> 10), 0);
+    vec2 u1 = unpackHalf2x16(cov.x), u2 = unpackHalf2x16(cov.y), u3 = unpackHalf2x16(cov.z);
+    mat3 Vrk = mat3(u1.x, u1.y, u2.x, u1.y, u2.y, u3.x, u2.x, u3.x, u3.y);
+
+    mat3 J = mat3(
+        focal.x / cam.z, 0., -(focal.x * cam.x) / (cam.z * cam.z),
+        0., -focal.y / cam.z, (focal.y * cam.y) / (cam.z * cam.z),
+        0., 0., 0.
+    );
+
+    mat3 T = transpose(mat3(viewTransform)) * J;
+    mat3 cov2d = transpose(T) * Vrk * T;
+
+    cov2d[0][0] += 0.3;
+    cov2d[1][1] += 0.3;
+
+    float mid = (cov2d[0][0] + cov2d[1][1]) / 2.0;
+    float radius = length(vec2((cov2d[0][0] - cov2d[1][1]) / 2.0, cov2d[0][1]));
+    float lambda1 = mid + radius, lambda2 = mid - radius;
+
+    if (lambda2 < 0.0) return;
+    vec2 diagonalVector = normalize(vec2(cov2d[0][1], lambda1 - cov2d[0][0]));
+    vec2 majorAxis = min(sqrt(2.0 * lambda1) * u_footprintScale, u_maxSplatSize) * diagonalVector;
+    vec2 minorAxis = min(sqrt(2.0 * lambda2) * u_footprintScale, u_maxSplatSize) * vec2(diagonalVector.y, -diagonalVector.x);
+
+    // 颜色来自第一遍（已含 SH 求值与 colorTransform，与原 L421 的终值一致）
+#ifdef SHPASS_PRE_PACKF16
+    vColor = vec4(unpackHalf2x16(a_colorPacked.x), unpackHalf2x16(a_colorPacked.y));
+#else
+    vColor = a_color;
+#endif
+
+    vPosition = position;
+    vSize = length(majorAxis);
+    vSelected = selected;
+
+    float scalingFactor = 1.0;
+
+    if (useDepthFade) {
+        float depthNorm = (pos2d.z / pos2d.w + 1.0) / 2.0;
+        float near = 0.1; float far = 100.0;
+        float normalizedDepth = (2.0 * near) / (far + near - depthNorm * (far - near));
+        float start = max(normalizedDepth - 0.1, 0.0);
+        float end = min(normalizedDepth + 0.1, 1.0);
+        scalingFactor = clamp((depthFade - start) / (end - start), 0.0, 1.0);
+    }
+
+    vec2 vCenter = vec2(pos2d) / pos2d.w;
+    gl_Position = vec4(
+        vCenter
+        + position.x * majorAxis * scalingFactor / viewport
+        + position.y * minorAxis * scalingFactor / viewport, 0.0, 1.0);
+}
+
+#else
 
 in vec2 position;
 in int index;
@@ -441,6 +677,7 @@ void main () {
         + position.x * majorAxis * scalingFactor / viewport
         + position.y * minorAxis * scalingFactor / viewport, 0.0, 1.0);
 }
+#endif // SHPASS_TF / SHPASS_PRE / 缺省（三选一）
 `;
 
 const fragmentShaderSource = /* glsl */ `#version 300 es
@@ -584,6 +821,23 @@ class RenderProgram extends ShaderProgram {
     private _shF16: boolean = SHFMT_F16_ENABLED;
     /** `?shfmt=f16` 时额外创建的 3 张 RGBA16F SH 纹理（与 packed 纹理并存，缺省为 null）。 */
     private _shTextures16: [WebGLTexture | null, WebGLTexture | null, WebGLTexture | null] = [null, null, null];
+
+    // ---- [SHPASS-PRE 阶段一] Transform Feedback（只缓存颜色）运行时状态；缺省不生效（`_shPassPre=false`）----
+    /** `?shpass=pre` 是否生效：编译期判据 + 运行期能力复查（不支持则置 false ⇒ 停用第一遍）。 */
+    private _shPassPre: boolean = SHPASS_PRE_ENABLED;
+    /** 第一遍 TF program（与主 pass 共用源码 + `#define SHPASS_TF`）。 */
+    private _tfProgram: WebGLProgram | null = null;
+    private _tfShaders: WebGLShader[] = [];
+    private _tf: WebGLTransformFeedback | null = null;
+    private _tfBuffer: WebGLBuffer | null = null;
+    /** TF buffer 当前容量对应的 splat 数（点数变化 ⇒ 重分配）。 */
+    private _tfSplatCount = -1;
+    /** 第一遍 program 的 uniform 位置（按名索引，缺省空对象）。 */
+    private _tfU: Record<string, WebGLUniformLocation | null> = {};
+    /** 第一遍 program 的 `index` 属性位置（-1 = 无）。 */
+    private _tfIndexAttr = -1;
+    /** 第二遍主 pass 的实例颜色属性位置（`a_color` 或 `a_colorPacked`；-1 = 未启用/不存在）。 */
+    private _colorAttr = -1;
     // ---- [LAB 2026-09-26] 排序/相机变化诊断计数器（只为测量口径诊断，不影响渲染行为）----
     /** 每帧向 sort worker 发送 viewProj 的次数（= 渲染帧数） */
     private _labSortPosts = 0;
@@ -857,6 +1111,94 @@ class RenderProgram extends ShaderProgram {
             indexAttribute = gl.getAttribLocation(this.program, "index");
             gl.enableVertexAttribArray(indexAttribute);
             gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffers[activeDepthBuffer]);
+
+            // ---- [SHPASS-PRE 阶段一] 第一遍 TF program / TF 对象 / buffer（仅 `?shpass=pre` 且运行期支持 TF）----
+            if (this._shPassPre) {
+                if (typeof gl.createTransformFeedback !== "function") {
+                    // 方案甲：不改造基类做真回退 ⇒ 明确报错 + 停用第一遍（不静默失败）
+                    console.error(
+                        "[shpass=pre] 本上下文不支持 Transform Feedback（需 WebGL2）⇒ 已停用第一遍；" +
+                            "请用不带该参数的页面测缺省路径",
+                    );
+                    this._shPassPre = false;
+                } else {
+                    const tfVs = gl.createShader(gl.VERTEX_SHADER) as WebGLShader;
+                    gl.shaderSource(tfVs, buildTransformFeedbackVertexSource());
+                    gl.compileShader(tfVs);
+                    if (!gl.getShaderParameter(tfVs, gl.COMPILE_STATUS)) {
+                        console.error("[shpass=pre] 第一遍顶点着色器编译失败 :: " + gl.getShaderInfoLog(tfVs));
+                        this._shPassPre = false;
+                    } else {
+                        const tfFs = gl.createShader(gl.FRAGMENT_SHADER) as WebGLShader;
+                        gl.shaderSource(tfFs, "#version 300 es\nprecision mediump float;\nvoid main() {}\n");
+                        gl.compileShader(tfFs);
+                        const prog = gl.createProgram() as WebGLProgram;
+                        gl.attachShader(prog, tfVs);
+                        gl.attachShader(prog, tfFs);
+                        // 必须在 linkProgram **之前**声明捕获的 varying（阶段一只有一个）
+                        gl.transformFeedbackVaryings(
+                            prog,
+                            [SHPASS_PRE_PACKF16 ? "tfColorPacked" : "tfColor"],
+                            gl.INTERLEAVED_ATTRIBS,
+                        );
+                        gl.linkProgram(prog);
+                        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+                            console.error("[shpass=pre] 第一遍 program 链接失败 :: " + gl.getProgramInfoLog(prog));
+                            this._shPassPre = false;
+                        } else {
+                            this._tfProgram = prog;
+                            this._tfShaders = [tfVs, tfFs];
+                            this._tf = gl.createTransformFeedback() as WebGLTransformFeedback;
+                            this._tfBuffer = gl.createBuffer() as WebGLBuffer;
+
+                            // 采样器单元与主 pass **完全一致**（0..7）⇒ 两遍复用同一批纹理绑定，无需在 pass 间重绑
+                            const samplerNames = [
+                                "u_texture",
+                                "u_transforms",
+                                "u_transformIndices",
+                                "u_colorTransforms",
+                                "u_colorTransformIndices",
+                                "u_sh_r",
+                                "u_sh_g",
+                                "u_sh_b",
+                            ];
+                            gl.useProgram(prog);
+                            for (let i = 0; i < samplerNames.length; i++) {
+                                const loc = gl.getUniformLocation(prog, samplerNames[i]);
+                                this._tfU[samplerNames[i]] = loc;
+                                gl.uniform1i(loc, i);
+                            }
+                            for (const name of [
+                                "view",
+                                "u_useSH",
+                                "u_maxSHDegree",
+                                "u_shFixedCoord",
+                                "u_bandIndex",
+                                "u_colorTransformEnabled",
+                            ]) {
+                                this._tfU[name] = gl.getUniformLocation(prog, name);
+                            }
+                            gl.uniform3iv(this._tfU.u_bandIndex ?? null, new Int32Array([-1, -1, -1]));
+                            gl.useProgram(this.program);
+
+                            this._tfIndexAttr = gl.getAttribLocation(prog, "index");
+                            if (this._tfIndexAttr >= 0) {
+                                gl.enableVertexAttribArray(this._tfIndexAttr);
+                            }
+
+                            // 第二遍主 pass 的"实例颜色"属性（只有 pre 变体存在此属性）
+                            this._colorAttr = gl.getAttribLocation(
+                                this.program,
+                                SHPASS_PRE_PACKF16 ? "a_colorPacked" : "a_color",
+                            );
+                            if (this._colorAttr >= 0) {
+                                gl.enableVertexAttribArray(this._colorAttr);
+                                gl.vertexAttribDivisor(this._colorAttr, 1);
+                            }
+                        }
+                    }
+                }
+            }
 
             createWorker();
         };
@@ -1169,12 +1511,111 @@ class RenderProgram extends ShaderProgram {
             gl.uniformMatrix4fv(u_projection, false, this._camera.data.projectionMatrix.buffer);
             gl.uniformMatrix4fv(u_view, false, this._camera.data.viewMatrix.buffer);
 
+            // ---- [SHPASS-PRE 阶段一] 第一遍：TF pass（每 splat 一个顶点；POINTS + RASTERIZER_DISCARD）----
+            //   输入：**已经排好序的** index 属性（逐顶点，divisor=0）⇒ 输出顺序 = 主 pass 实例顺序，天然对齐。
+            //   输出：每 splat 一个颜色（float32 vec4 = 16 B，或 packHalf2x16 ×2 = 8 B）。
+            if (this._shPassPre && this._tfProgram && this._tf && this._tfBuffer && this.depthIndex.length > 0) {
+                const splatCount = this.depthIndex.length;
+                const bytesPerSplat = SHPASS_PRE_PACKF16 ? 8 : 16;
+                gl.bindBuffer(gl.ARRAY_BUFFER, this._tfBuffer);
+                if (this._tfSplatCount !== splatCount) {
+                    gl.bufferData(gl.ARRAY_BUFFER, splatCount * bytesPerSplat, gl.DYNAMIC_COPY);
+                    this._tfSplatCount = splatCount;
+                }
+                // ⚠️ 关键：必须先把 ARRAY_BUFFER 解绑，再把它挂成 TF 写入目标。
+                //   同一个 buffer 同时挂在"TF 写入目标"与"非 TF 目标（ARRAY_BUFFER）"上时，
+                //   TF 期间的 `glDrawArrays` 会报：
+                //     GL_INVALID_OPERATION: A transform feedback buffer that would be written to is also
+                //     bound to a non-transform-feedback target, which would cause undefined behavior.
+                //   ⇒ 第一遍的写入被整体丢弃 ⇒ 第二遍读到全 0 ⇒ vColor.a=0 ⇒ 画面全空（本文档 §26 同类教训）。
+                gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+                gl.useProgram(this._tfProgram);
+                gl.uniformMatrix4fv(this._tfU.view ?? null, false, this._camera.data.viewMatrix.buffer);
+                gl.uniform1i(
+                    this._tfU.u_useSH ?? null,
+                    this.renderData.sphericalHarmonics && !this._noshRequested ? 1 : 0,
+                );
+                gl.uniform1i(this._tfU.u_maxSHDegree ?? null, this._maxSHDegree);
+                gl.uniform1i(this._tfU.u_shFixedCoord ?? null, this._shFixedCoordProbe ? 1 : 0);
+                gl.uniform1i(this._tfU.u_colorTransformEnabled ?? null, this._noctRequested ? 0 : 1);
+
+                gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, this._tf);
+                gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, this._tfBuffer);
+                gl.enable(gl.RASTERIZER_DISCARD);
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffers[activeDepthBuffer]);
+                if (this._tfIndexAttr >= 0) {
+                    gl.vertexAttribIPointer(this._tfIndexAttr, 1, gl.INT, 0, 0);
+                    gl.vertexAttribDivisor(this._tfIndexAttr, 0);
+                }
+
+                // ⚠️ TF draw 期间不仅要禁用、还要**把实例颜色属性指离 tfBuffer**：
+                //   实测（Edge/ANGLE-D3D11）单靠 `disableVertexAttribArray` 不够 —— 该实现会检查
+                //   **已存储的属性指针所引用的 buffer**，只要它等于 TF 写入目标就报
+                //   `GL_INVALID_OPERATION: … also bound to a non-transform-feedback target` 并**丢弃整次写入**
+                //   ⇒ 第二遍读到全 0 ⇒ alpha=0 ⇒ 画面全空。这里先临时指向 index buffer（非 TF 目标），
+                //   TF 结束后由下方第二遍块每帧重新指回 tfBuffer（见"第二遍：TF 输出绑为实例属性"）。
+                if (this._colorAttr >= 0) {
+                    gl.disableVertexAttribArray(this._colorAttr);
+                    gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffers[activeDepthBuffer]);
+                    gl.vertexAttribPointer(this._colorAttr, 4, gl.FLOAT, false, 16, 0);
+                }
+                gl.beginTransformFeedback(gl.POINTS);
+                gl.drawArrays(gl.POINTS, 0, splatCount);
+                gl.endTransformFeedback();
+                if (this._colorAttr >= 0) {
+                    gl.enableVertexAttribArray(this._colorAttr); // 恢复 enabled；指针由第二遍重新绑定
+                }
+
+                gl.disable(gl.RASTERIZER_DISCARD);
+                gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, null);
+                gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+
+                // [SHPASS-PRE 阶段一·自证] 首次执行后**回读** TF buffer 的前 8 字节：
+                //   预期是首个 splat 的颜色（例如 R/G/B≈0.5、A≈0.9）；若为全 0 则第一遍确实没写入。
+                //   ⚠️ 必须**在解除 TF 绑定之后**读：否则 `getBufferSubData` 会报
+                //     `buffer is bound to an indexed transform feedback binding point and some other binding point`
+                //     并**读回全 0** ⇒ 把"没写入"与"读不了"混为一谈（上一版就是这样误判的）。
+                {
+                    const w = window as unknown as { __SHPASS_PRE_PROBED__?: boolean };
+                    if (!w.__SHPASS_PRE_PROBED__) {
+                        w.__SHPASS_PRE_PROBED__ = true;
+                        const raw = new Uint32Array(2);
+                        gl.bindBuffer(gl.ARRAY_BUFFER, this._tfBuffer);
+                        gl.getBufferSubData(gl.ARRAY_BUFFER, 0, raw);
+                        const asF = new Float32Array(raw.buffer);
+                        console.log(
+                            "[shpass=pre] TF probe: disableAttr=1 " +
+                                `packf16=${SHPASS_PRE_PACKF16 ? 1 : 0} count=${splatCount} ` +
+                                `colorAttr=${this._colorAttr} tfIndexAttr=${this._tfIndexAttr} ` +
+                                `u32=[0x${raw[0].toString(16)},0x${raw[1].toString(16)}] ` +
+                                `f32=[${asF[0]},${asF[1]}]`,
+                        );
+                        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+                    }
+                }
+
+                gl.useProgram(this.program);
+            }
+
             gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
             gl.vertexAttribPointer(positionAttribute, 2, gl.FLOAT, false, 0, 0);
 
             gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffers[activeDepthBuffer]);
             gl.vertexAttribIPointer(indexAttribute, 1, gl.INT, 0, 0);
             gl.vertexAttribDivisor(indexAttribute, 1);
+
+            // ---- [SHPASS-PRE 阶段一] 第二遍：TF 输出绑为**实例属性**（divisor=1，interleaved，stride 16/8 B）----
+            if (this._shPassPre && this._colorAttr >= 0 && this._tfBuffer) {
+                gl.bindBuffer(gl.ARRAY_BUFFER, this._tfBuffer);
+                if (SHPASS_PRE_PACKF16) {
+                    gl.vertexAttribIPointer(this._colorAttr, 2, gl.UNSIGNED_INT, 8, 0);
+                } else {
+                    gl.vertexAttribPointer(this._colorAttr, 4, gl.FLOAT, false, 16, 0);
+                }
+                gl.vertexAttribDivisor(this._colorAttr, 1);
+            }
 
             const drawSubmitStart = performance.now();
             // [DIAG-EXPERIMENT-1] draw 段边界（默认关闭时恒为 0）
@@ -1233,6 +1674,25 @@ class RenderProgram extends ShaderProgram {
                     gl.deleteTexture(texture);
                 }
             }
+
+            // ---- [SHPASS-PRE 阶段一] 第一遍 TF 资源成对删除（buffer / TF 对象 / program / shader）----
+            if (this._tfBuffer) {
+                gl.deleteBuffer(this._tfBuffer);
+                this._tfBuffer = null;
+            }
+            if (this._tf) {
+                gl.deleteTransformFeedback(this._tf);
+                this._tf = null;
+            }
+            if (this._tfProgram) {
+                gl.deleteProgram(this._tfProgram);
+                this._tfProgram = null;
+            }
+            for (const shader of this._tfShaders) {
+                gl.deleteShader(shader);
+            }
+            this._tfShaders = [];
+            this._tfSplatCount = -1;
 
             // [SHFMT 2026-09-29] `?shfmt=f16` 额外创建的 3 张 RGBA16F SH 纹理也必须成对删除：
             //   否则"每轮新建上下文"的用法（bench-case 的 iframe）会在 GPU 侧逐轮累积句柄。
@@ -1361,11 +1821,19 @@ class RenderProgram extends ShaderProgram {
         //   ⚠️ 必须用模块级 `SHFMT_F16_ENABLED`（不能用 `this._shF16`）：本函数在**基类构造函数**里
         //   就被调用，那时派生类字段还没初始化（`this._shF16 === undefined`）⇒ 会编成缺省着色器。
         //   ⚠️ 另外：`#define` 必须插在 `#version 300 es` **之后**（`#version` 必须是第一条有效语句）。
-        if (!SHFMT_F16_ENABLED) return vertexShaderSource;
-        const define = SHFMT_F16_INCR
-            ? "#define SHFMT_F16 1\n#define SHFMT_F16_INCR 1\n"
-            : "#define SHFMT_F16 1\n";
-        return vertexShaderSource.replace("#version 300 es", "#version 300 es\n" + define);
+        const defines: string[] = [];
+        if (SHFMT_F16_ENABLED) {
+            defines.push("#define SHFMT_F16 1");
+            if (SHFMT_F16_INCR) defines.push("#define SHFMT_F16_INCR 1");
+        }
+        // [SHPASS-PRE 阶段一] 第二遍主 pass：颜色改由第一遍 TF 输出提供
+        //   （对应的 shader 分支已整段排除 SH 声明与辅助函数，避免"未使用 sampler"惩罚）
+        if (SHPASS_PRE_ENABLED) {
+            defines.push("#define SHPASS_PRE 1");
+            if (SHPASS_PRE_PACKF16) defines.push("#define SHPASS_PRE_PACKF16 1");
+        }
+        if (defines.length === 0) return vertexShaderSource;
+        return vertexShaderSource.replace("#version 300 es", "#version 300 es\n" + defines.join("\n") + "\n");
     }
 
     protected _getFragmentSource() {

@@ -42,7 +42,11 @@ abstract class ShaderProgram {
             console.error(log);
             let experimental = false;
             try {
-                experimental = (new URLSearchParams(location.search).get("shfmt") ?? "").startsWith("f16");
+                const shfmtParam = new URLSearchParams(location.search).get("shfmt") ?? "";
+                const shpassParam = new URLSearchParams(location.search).get("shpass") ?? "";
+                // [SHPASS-PRE] 诊断变体（f16 / shpass=pre）里编译失败必须**可见**（落进报告 err=），
+                //   缺省路径保持历史行为（只 console.error）。
+                experimental = shfmtParam.startsWith("f16") || shpassParam === "pre";
             } catch {
                 experimental = false;
             }
