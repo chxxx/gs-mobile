@@ -303,17 +303,12 @@ function buildShCacheFragmentSource(): string {
     //   必须把它们的声明整段去掉（否则会走"声明未使用/未绑定 sampler"的路径，污染 P_lr 归因）；
     //   两个辅助函数（`fillSHFromPacked`/`evalSHRGB`）也要去掉（它们引用那些 sampler），
     //   只保留 `SH_C0..SH_C3` 常量供 `lrRestRGB` 使用。
-    const shSamplerDecls = `#ifdef SHFMT_F16
-uniform highp sampler2D u_sh_r;
-uniform highp sampler2D u_sh_g;
-uniform highp sampler2D u_sh_b;
-#else
-uniform highp usampler2D u_sh_r;
-uniform highp usampler2D u_sh_g;
-uniform highp usampler2D u_sh_b;
-#endif
-`;
-    const uniformBlockForArm = LR_ENABLED ? uniformBlock.replace(shSamplerDecls, "") : uniformBlock;
+    // [阶段1 修复] 这段声明必须**整段**去掉（含 `#ifdef/#else/#endif`），否则预处理器会因缺少 `#endif`
+    //   报 `'if' : unexpected end of file found in conditional block`。用正则（容忍 CRLF）而不是精确字符串：
+    //   源码是 CRLF、模板串里是 `\n`，精确匹配会静默失败（实测就是这么炸的）。
+    const uniformBlockForArm = LR_ENABLED
+        ? uniformBlock.replace(/#ifdef SHFMT_F16[\s\S]*?#endif\r?\n/, "")
+        : uniformBlock;
     const shFunctionsForArm = (() => {
         if (!LR_ENABLED) return shFunctions;
         // 截到**第一个函数定义**之前 = 只留常量表，再接低秩 GLSL
