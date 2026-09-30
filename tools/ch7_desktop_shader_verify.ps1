@@ -27,7 +27,7 @@ $base = "http://127.0.0.1:5173/bench.html?mode=bench&res_mode=forced&res=1600x10
         "&proto=flux&rounds=1&benchmode=offscreen-paper-match&profile=garden&sync=batch&driver=msgchannel" +
         "&runs=5&warmup=20&tickevery=16&fences=3&report=/__ch7/report?name=shfmt2&rtok=ch7-2026-phase4&u="
 
-foreach ($case in @(@("base", ""), @("pre", "&shpass=pre"), @("pref16", "&shpass=pre&shpackf16=1"))) {
+foreach ($case in @(@("base", ""), @("produce", "&shpass=produce"), @("consume", "&shpass=consume"))) {
     $tag = "fix2-" + $case[0]
     $url = $base + $tag + $case[1]
     $err = Join-Path $root ("_tmp_ch7probe\fix2_" + $case[0] + ".err")

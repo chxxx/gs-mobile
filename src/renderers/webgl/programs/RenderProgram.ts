@@ -72,13 +72,36 @@ const SHFMT_F16_ENABLED: boolean = SHFMT_PARAM === "f16" || SHFMT_PARAM === "f16
  */
 const SHFMT_F16_INCR: boolean = SHFMT_PARAM === "f16_incr";
 
-// [SHPASS-PRE 阶段一] `?shpass=pre`：用 Transform Feedback 把"逐 splat 颜色"从"每顶点一次（每 splat 4 次冗余）"
-//   改为"每 splat 一次"；第二遍主 pass 的 quad 顶点只读实例属性。
-//   Transform Feedback 是 WebGL2 **核心**功能（非扩展）⇒ 编译期判据用 `WebGL2RenderingContext` 是否存在；
-//   运行期在 `_initialize` 用真实 gl 复查，不支持则 `console.error` + 停用第一遍（**方案甲**：不改造基类）。
-const SHPASS_PRE_REQUESTED: boolean = (() => {
+// [SHPASS 2026-09-30] `?shpass=` 诊断分支（**缺省不生效**，BASE/NOSH 与缺省路径完全不受影响）：
+//   pre     = TF_FULL：每帧第一遍 TF 生产 + 同帧主 pass 消费（主 pass 编译为 SHPASS_PRE 变体）
+//   produce = TF_PRODUCE_ONLY：每帧跑第一遍 TF，但主 pass **完全走缺省路径**、不读 TF 输出
+//   consume = TF_CONSUME_ONLY：**只在首帧生产一次**，随后主 pass 每帧读该输出（固定相机诊断）
+//   ⚠️ produce 比 BASE **多算一遍 SH** ⇒ 两者帧时间之差不是"纯 TF 固定开销"；
+//      consume 是**静态颜色**诊断 ⇒ 不代表动态相机下画质合格。
+const SHPASS_PARAM: string = (() => {
     try {
-        return new URLSearchParams(location.search).get("shpass") === "pre";
+        return new URLSearchParams(location.search).get("shpass") ?? "";
+    } catch {
+        return "";
+    }
+})();
+/** 主 pass 是否读 TF 输出（⇒ 编译 `SHPASS_PRE` 变体）：pre / consume。 */
+const SHPASS_MAIN_READS_TF: boolean = SHPASS_PARAM === "pre" || SHPASS_PARAM === "consume";
+/** 是否**每帧**执行第一遍 TF：pre / produce。 */
+const SHPASS_PRODUCE_EVERY_FRAME: boolean = SHPASS_PARAM === "pre" || SHPASS_PARAM === "produce";
+/** 是否**只生产一次**（首帧）：consume。 */
+const SHPASS_PRODUCE_ONCE: boolean = SHPASS_PARAM === "consume";
+/** 是否需要创建 TF program / TF 对象 / 输出缓冲（三臂任一）。 */
+const SHPASS_TF_REQUESTED: boolean = SHPASS_MAIN_READS_TF || SHPASS_PRODUCE_EVERY_FRAME;
+const SHPASS_WEBGL2_OK: boolean = typeof WebGL2RenderingContext !== "undefined";
+/** 编译期：主 pass 走 pre 变体（读实例属性颜色）。 */
+const SHPASS_PRE_ENABLED: boolean = SHPASS_MAIN_READS_TF && SHPASS_WEBGL2_OK;
+/** 运行期：TF 是否启用（三个 `shpass` 取值共用；不支持 TF 则 console.error 并停用）。 */
+const SHPASS_TF_ENABLED: boolean = SHPASS_TF_REQUESTED && SHPASS_WEBGL2_OK;
+/** `?shtfprobe=1`：一次性回读 TF 缓冲前 8 字节（**缺省关闭** ⇒ 正式计时窗口内没有任何同步回读）。 */
+const SHTFPROBE_REQUESTED: boolean = (() => {
+    try {
+        return new URLSearchParams(location.search).get("shtfprobe") === "1";
     } catch {
         return false;
     }
@@ -91,7 +114,6 @@ const SHPASS_PRE_PACKF16: boolean = (() => {
         return false;
     }
 })();
-const SHPASS_PRE_ENABLED: boolean = SHPASS_PRE_REQUESTED && typeof WebGL2RenderingContext !== "undefined";
 
 /**
  * [SHPASS-PRE 阶段一] 第一遍（TF）program 的顶点源码：与主 pass **共用同一份 `vertexShaderSource`**，
@@ -823,8 +845,10 @@ class RenderProgram extends ShaderProgram {
     private _shTextures16: [WebGLTexture | null, WebGLTexture | null, WebGLTexture | null] = [null, null, null];
 
     // ---- [SHPASS-PRE 阶段一] Transform Feedback（只缓存颜色）运行时状态；缺省不生效（`_shPassPre=false`）----
-    /** `?shpass=pre` 是否生效：编译期判据 + 运行期能力复查（不支持则置 false ⇒ 停用第一遍）。 */
-    private _shPassPre: boolean = SHPASS_PRE_ENABLED;
+    /** `?shpass=pre|produce|consume` 是否启用 TF：编译期判据 + 运行期能力复查（不支持则置 false）。 */
+    private _shPassPre: boolean = SHPASS_TF_ENABLED;
+    /** `consume` 臂专用：第一遍是否已经生产过（保证计时窗口内不再生产）。 */
+    private _tfProducedOnce = false;
     /** 第一遍 TF program（与主 pass 共用源码 + `#define SHPASS_TF`）。 */
     private _tfProgram: WebGLProgram | null = null;
     private _tfShaders: WebGLShader[] = [];
@@ -1514,7 +1538,16 @@ class RenderProgram extends ShaderProgram {
             // ---- [SHPASS-PRE 阶段一] 第一遍：TF pass（每 splat 一个顶点；POINTS + RASTERIZER_DISCARD）----
             //   输入：**已经排好序的** index 属性（逐顶点，divisor=0）⇒ 输出顺序 = 主 pass 实例顺序，天然对齐。
             //   输出：每 splat 一个颜色（float32 vec4 = 16 B，或 packHalf2x16 ×2 = 8 B）。
-            if (this._shPassPre && this._tfProgram && this._tf && this._tfBuffer && this.depthIndex.length > 0) {
+            // [SHPASS] 第一遍执行条件：pre/produce **每帧**；consume **只在首帧**（此后计时窗口内不再生产）
+            const runTfPass =
+                this._shPassPre &&
+                this._tfProgram !== null &&
+                this._tf !== null &&
+                this._tfBuffer !== null &&
+                this.depthIndex.length > 0 &&
+                (SHPASS_PRODUCE_EVERY_FRAME || (SHPASS_PRODUCE_ONCE && !this._tfProducedOnce));
+            if (runTfPass) {
+                this._tfProducedOnce = true;
                 const splatCount = this.depthIndex.length;
                 const bytesPerSplat = SHPASS_PRE_PACKF16 ? 8 : 16;
                 gl.bindBuffer(gl.ARRAY_BUFFER, this._tfBuffer);
@@ -1579,7 +1612,7 @@ class RenderProgram extends ShaderProgram {
                 //     并**读回全 0** ⇒ 把"没写入"与"读不了"混为一谈（上一版就是这样误判的）。
                 {
                     const w = window as unknown as { __SHPASS_PRE_PROBED__?: boolean };
-                    if (!w.__SHPASS_PRE_PROBED__) {
+                    if (SHTFPROBE_REQUESTED && !w.__SHPASS_PRE_PROBED__) {
                         w.__SHPASS_PRE_PROBED__ = true;
                         const raw = new Uint32Array(2);
                         gl.bindBuffer(gl.ARRAY_BUFFER, this._tfBuffer);
