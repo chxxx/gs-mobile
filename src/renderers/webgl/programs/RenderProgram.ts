@@ -234,7 +234,8 @@ float lrB(int j, int c, int k) {
 }
 vec3 lrRestRGB(uint idx, vec3 d) {
     // 每点 **2 个纹素**：纹素 0 = r 个 rank 系数、纹素 1 = DC 的 3 个 half。
-    //   寻址沿用"每点 2 纹素"的位技巧（`(idx & 0x3ff) << 1`），与 2048 宽 × ⌈2N/2048⌉ 高的布局一致。
+    //   寻址沿用"每点 2 纹素"的位技巧（(idx & 0x3ff) << 1），与 2048 宽 × ⌈2N/2048⌉ 高的布局一致。
+    //   注意：本段在模板串里，注释中**不能出现反引号**（会提前终止字符串，实测踩过两次）。
     ivec2 c0 = ivec2(int((idx & 0x3ffu) << 1u), int(idx >> 10u));
     uvec4 p = texelFetch(u_lrRank, c0, 0);
     uvec4 q = texelFetch(u_lrRank, c0 + ivec2(1, 0), 0);
@@ -266,8 +267,7 @@ vec3 lrRestRGB(uint idx, vec3 d) {
     Y[12] = SH_C3[4] * x * (4.0 * zz - xx - yy);
     Y[13] = SH_C3[5] * z * (xx - yy);
     Y[14] = SH_C3[6] * x * (xx - 3.0 * yy);
-    // DC 与 BASE 同精度（half，取自纹素 1）⇒ 这里返回的是**完整颜色（DC + rest）**，
-    //   调用方用 `=` 赋值（不是 `+=`）。
+    // DC 与 BASE 同精度（half，取自纹素 1）⇒ 这里返回完整颜色（DC + rest），调用方用赋值而非累加。
     vec3 out3 = SH_C0 * vec3(dcd.x, dcd.y, dce.x) + 0.5;
     for (int j = 0; j < LR_RANK_MAX; ++j) {
         float aj = a[j];
