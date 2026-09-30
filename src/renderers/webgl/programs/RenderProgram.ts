@@ -1218,13 +1218,19 @@ class RenderProgram extends ShaderProgram {
         const shCacheActive = this._shCache && this._shCacheProgram !== null;
         const tfActive = this._shPassPre && this._tfProgram !== null;
         let arm = "base";
-        if (SHCACHE_FRAG_REQUESTED) arm = shCacheActive ? (SHCACHE_FREEZE ? "frozen" : "frag") : "frag-failed";
+        if (SHCACHE_FRAG_REQUESTED) {
+            if (!shCacheActive) arm = "frag-failed";
+            // [阶段1 2026-09-30] 低秩臂单独标注（`lr` / `lr-frozen`）⇒ 报告里 `arm=` 能自证是低秩路径
+            else if (LR_ENABLED) arm = SHCACHE_FREEZE ? "lr-frozen" : "lr";
+            else arm = SHCACHE_FREEZE ? "frozen" : "frag";
+        }
         else if (SHPASS_PARAM === "consume") arm = tfActive ? "tf_consume" : "tf_consume-failed";
         else if (SHPASS_PARAM === "produce") arm = tfActive ? "tf_produce" : "tf_produce-failed";
         else if (SHPASS_PARAM === "pre") arm = tfActive ? "tf_full" : "tf_full-failed";
         if (this._noshRequested) arm += "+nosh";
         const switches = [
             `shcache=${SHCACHE_FRAG_REQUESTED ? SHCACHE_PARAM : "-"}`,
+            `lr=${LR_ENABLED ? 1 : 0}`,
             `shfreeze=${SHCACHE_FREEZE ? SHFREEZE_FRAMES : 0}`,
             `shpass=${SHPASS_PARAM || "-"}`,
             `nosh=${this._noshRequested ? 1 : 0}`,
