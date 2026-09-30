@@ -281,7 +281,10 @@ vec3 lrRestRGB(uint idx, vec3 d) {
         }
         out3 += aj * vec3(s0, s1, s2);
     }
-    return out3;
+    // 与 evalSHRGB 的结尾逐字同源：先加 0.5，再 clamp 到 [0,1]。
+    //   少了这个 clamp，少数极亮/极暗的 splat 会写出大于 1 或小于 0 的颜色
+    //   （闸门实测的 58 个像素、最大 34 级的长尾即此；均值误差不受影响）。
+    return clamp(out3, vec3(0.0), vec3(1.0));
 }
 `;
 
