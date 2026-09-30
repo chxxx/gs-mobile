@@ -119,7 +119,9 @@ const SHPASS_PRE_PACKF16: boolean = (() => {
 //   第一遍：**片元** pass（全屏三角形）为每个 splat 计算一次视角相关 SH 颜色，写入 RGBA16F 颜色纹理；
 //   第二遍：主 pass 仍按排序结果绘制，但颜色改为 `texelFetch(u_colorTex, 原始 splat 索引)`，
 //           不再取样 SH 纹理、不做 SH 求值（SH/colorTransform 声明整段排除）。
-//   `&shcachefreeze=1`：第一遍只跑一次（固定相机下隔离"主 pass 读取成本"的诊断臂，**不代表动态相机可用**）。
+//   `&shcachefreeze=1`：**跳过前 2 帧后**不再重算（固定相机下隔离"主 pass 读取成本"的诊断臂，
+//   **不代表动态相机可用**）。为什么要"跳过前 2 帧"：旧实现首帧即固化，若首帧纹理/数据尚未就绪
+//   （读到 cov=0）会把**空缓存**永久冻住 ⇒ 画面全空、存活探针 ok=0（§30 记录的那次失败）。
 //   缺省不生效；BASE / NOSH / TF 各臂 / 缺省路径逐字不变。
 const SHCACHE_PARAM: string = (() => {
     try {
@@ -1044,9 +1046,10 @@ class RenderProgram extends ShaderProgram {
 
     // ---- [SHCACHE 方案 B] `?shcache=frag`：颜色纹理 + 离屏 FBO + 第一遍（片元）program ----
     private _shCache: boolean = SHCACHE_ENABLED;
-    /** `&shcachefreeze=1`：第一遍只跑一次（固定相机下隔离主 pass 读取成本的诊断臂）。 */
+    /** `&shcachefreeze=1`：跳过前 2 帧后不再重算（固定相机下隔离主 pass 读取成本的诊断臂）。 */
     private _shCacheFrozen = SHCACHE_FREEZE;
-    private _shCacheProduced = false;
+    /** 第一遍**已执行**次数：冻结臂用它跳过前 2 帧（不冻结时只自增，无行为影响）。 */
+    private _shCacheProduceCount = 0;
     private _colorTex: WebGLTexture | null = null;
     private _colorFbo: WebGLFramebuffer | null = null;
     private _shCacheProgram: WebGLProgram | null = null;
@@ -1866,9 +1869,13 @@ class RenderProgram extends ShaderProgram {
                                 `EXT_color_buffer_half_float=${extH} renderer=${renderer}`,
                         );
                     }
-                    this._shCacheProduced = false; // 尺寸变化 ⇒ 下一帧重新生产
+                    this._shCacheProduceCount = 0; // 尺寸变化 ⇒ 重新生产
                 }
-                if (!(this._shCacheFrozen && this._shCacheProduced)) {
+                // [方案B 收口 2026-09-30] 冻结臂改为**跳过前 2 帧再固化**：旧实现首帧即固化，撞上"首帧
+                //   纹理/数据尚未就绪（cov=0）"就会把空缓存永久冻住（§30 的 ok=0 即此因）。计数只在冻结臂
+                //   生效，不冻结时恒为 true ⇒ FRAG_FULL 路径逐字不变。
+                const produceNow = !this._shCacheFrozen || this._shCacheProduceCount++ < 2;
+                if (produceNow) {
                     const savedFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
                     gl.bindFramebuffer(gl.FRAMEBUFFER, this._colorFbo);
                     gl.viewport(0, 0, this._shCacheWidth, this._shCacheHeight);
@@ -1914,7 +1921,6 @@ class RenderProgram extends ShaderProgram {
                     gl.bindFramebuffer(gl.FRAMEBUFFER, savedFbo);
                     gl.viewport(0, 0, canvas.width, canvas.height);
                     gl.useProgram(this.program);
-                    this._shCacheProduced = true;
                 }
                 // 主 pass 读取颜色：绑到**单元 8**（[SHCACHE 修复 3] 不能用 5/6/7 —— 那是第一遍
                 //   `usampler2D` 的 SH 单元，浮点颜色纹理留在那里会造成 sampler/格式不匹配）。
@@ -2132,7 +2138,7 @@ class RenderProgram extends ShaderProgram {
                 gl.deleteShader(shader);
             }
             this._shCacheShaders = [];
-            this._shCacheProduced = false;
+            this._shCacheProduceCount = 0;
 
             // [SHFMT 2026-09-29] `?shfmt=f16` 额外创建的 3 张 RGBA16F SH 纹理也必须成对删除：
             //   否则"每轮新建上下文"的用法（bench-case 的 iframe）会在 GPU 侧逐轮累积句柄。
