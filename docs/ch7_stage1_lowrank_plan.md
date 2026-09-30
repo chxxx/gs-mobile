@@ -100,3 +100,40 @@ float a[LR_RANK];   // LR_RANK = 7，由 TS 侧注入 #define（编译期常量 
 4. 颜色闸门（LR vs FRAG vs BASE）⇒ ≥45 dB 才继续；
 5. 真机 4 臂（+可选 `lrcb`）× `rounds=3` ⇒ 出 `P_lr` 与加载期三指标。
 
+## 9. 落地时的耦合点（2026-09-30 晚补，动手前必读）
+
+**① loader 与渲染器必须"原子"落地**（不能分两次提交）：
+- 若只改 loader（跳过 `C@B` + 不建 3 张全 SH 纹理），渲染器仍在读 SH 纹理 ⇒ **画面必坏**；
+- 若只改渲染器 ⇒ 拿不到每点 `a_j` ⇒ 无法重建。
+⇒ 一次提交内同时包含：worker 标志 → `decodeLowRankRange` 出 rank 载荷 → `mergeLowRankChunks` → `SphericalHarmonicsData` 携带 → `RenderProgram` 建纹理/UBO/着色器分支 → loader 才允许**不再建全 SH 纹理**。
+
+**② 并行 worker 协议要带标志**：`LowRankQPLYWorker` 的请求类型（`LowRankDecodeRequest`）要加 `wantLowRank: boolean`，
+否则 worker 会**无条件**多算一份 rank 载荷 ⇒ 默认路径的 CPU 时间被改变（违反"缺省逐字不变·性能"这一层）。
+（默认路径下 `wantLowRank=false` ⇒ worker 内的 `decodeLowRankRange` 走原分支，**逐字不动**。）
+
+**③ 基在主线程已可用**：`prepareLowRankQPLY(inputBuffer)` 在**主线程**已调用（`PLYLoader.ts:153`，用于分块），
+它返回的 `prepared.basis`（`Float32Array(rank × restCoefficientCount)`）、`prepared.rank`、`prepared.restCoefficientCount`
+可直接随 `SphericalHarmonicsData` 传递 ⇒ **不需要**把基塞进 worker 回包。
+
+**④ rank 纹理可直接用扁平数组上传**：`Uint32Array(4 × 2048 × ⌈N/2048⌉)`，每点偏移 `4·idx`
+⇒ 与 `texImage2D(…, 2048, ⌈N/2048⌉, …, RGBA_INTEGER, UNSIGNED_INT, packed)` 的行主序布局**完全一致**（行尾不足 N 的部分补 0）。
+
+**⑤ 生产遍要**去掉**SH sampler 声明**：`lr=1` 时不建 SH 纹理，若生产者仍声明 `u_sh_r/g/b`（未绑定）会触发
+"未使用/未绑定 sampler"路径 —— 用另一个切片 marker（`#ifdef SHCACHE_LR` 版表头）整段排除，
+与 §30 修复 3 同一手法；**主 pass 本来就不声明**（不变）。
+
+**⑥ `shdeg` 在 `lr=1` 下忽略**（低秩基是固定 45 列的完整 rest）⇒ 报告头 `sw_effective` 要回显 `lr=1` 与 `lrb=<字节>`，
+避免"看起来压了阶数其实没压"的误读。
+
+## 10. 阶段 0 的 Mali 补充（2026-09-30 晚，同一协议）
+
+| 臂 | 3 轮 fps | cpu_ms | gl_renderer |
+|---|---|---|---|
+| `base` | （见 `raw/mali_20260930_192605.txt`） | — | Mali-G925-Immortalis MC12 |
+| `frag` | **82.6 ± 1.2** | 11.93 | 同上 |
+
+`LR_FULL` 落地后再补第三臂；分析用 `S0_NAME=mali python tools\ch7_stage0_report.py`（**注意**：本次该工具在
+`S0_GL=Mali` 下滤空了 —— 过滤是按 `gl_renderer` 子串，实测 Mali 报告里该字段值形如 `Mali-G925-Immortalis MC12`，
+下次直接不传 `S0_GL` 或先用 `dir` 抽样确认字段值再过滤）。
+
+
