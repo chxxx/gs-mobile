@@ -98,6 +98,7 @@ import {
     segTimingRoundTags,
     sortLagRoundTags,
     throughputPercentileRoundTags,
+    frameDumpTags,
 } from "./bench-shared";
 import type { BenchState, CasePhase, CaseToParentMessage, RoundResult, SceneMeta } from "./bench-shared";
 // 仅类型导入：view 模式的实现（含渲染器代码）由 main() 动态 import，bench 模式下不会被加载
@@ -550,6 +551,9 @@ function buildResultText(st: BenchState): string {
         // 排序滞后核对（`?sortlag=1`，本文臂专用探针）：排序完成节奏 + 逐帧滞后 + 陈旧序 vs 新鲜序的
         // 画面差异（及其截图）。它是"动态视角下省掉的那些排序有没有让画面出错"的唯一直接证据。
         tags.push(...sortLagRoundTags(r));
+        // [CLRGATE 2026-09-30] 颜色正确性闸门（`?framedump=1`）：基准位姿整幅画面的无损 PNG，
+        // 只进单独字段，供离线 PSNR/SSIM 比对（BASE vs 变体）。
+        tags.push(...frameDumpTags(r));
         // 排序次数（效度自查）：静止协议下应 ≈1，动态下应 ≈frames —— 这是"两臂在窗口里是否做了等量工作"的直接证据
         if (r.sortResults !== undefined) tags.push(`sort_results=${r.sortResults}`);
         if (diag) {

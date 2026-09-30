@@ -271,8 +271,16 @@ const SHOT_BOX = { w: 480, h: 320 };
  *   - `raw`：直接给像素（用于"陈旧序/新鲜序"两张对照图）；
  *   - `diff8`：把两帧的通道差放大 8 倍当亮度（`min(255, 8·|Δ|)`，全黑 = 完全一致）→ 差异位置一眼可见。
  * 注意 readPixels 的行序自下而上（GL 约定），这里统一翻转成自下而上的正向图。
+ * `mime`/`quality` 默认 `image/jpeg`（历史行为逐字不变）；[CLRGATE 2026-09-30] 新增参数只为
+ * "颜色正确性闸门"需要**无损**编码（`image/png`）时复用同一段像素搬运代码。
  */
-function encodeCrop(src: RGBAFrame, box: { x: number; y: number; w: number; h: number }, b: RGBAFrame | null): string {
+function encodeCrop(
+    src: RGBAFrame,
+    box: { x: number; y: number; w: number; h: number },
+    b: RGBAFrame | null,
+    mime: string = "image/jpeg",
+    quality: number = 0.92,
+): string {
     const cw = Math.max(1, Math.min(box.w, src.w - box.x));
     const ch = Math.max(1, Math.min(box.h, src.h - box.y));
     const canvas = document.createElement("canvas");
@@ -305,7 +313,7 @@ function encodeCrop(src: RGBAFrame, box: { x: number; y: number; w: number; h: n
         }
     }
     g.putImageData(img, 0, 0);
-    return canvas.toDataURL("image/jpeg", 0.92);
+    return canvas.toDataURL(mime, quality);
 }
 
 /**
@@ -929,6 +937,22 @@ export class BenchCase {
         } catch {
             return null;
         }
+    }
+
+    /**
+     * [CLRGATE 2026-09-30] `?framedump=1`：把**当前渲染目标**（离屏协议下是 FBO）整幅读回并按**无损 PNG**
+     * 编码成 data URL，供离线逐像素比对（BASE vs 变体 → 平均/最大误差 + PSNR/SSIM）。
+     *
+     * 调用点固定在"覆盖率探针之后"——那一刻相机已被还原到**基准位姿**（这既是 `covered=` 口径的前提，
+     * 也是两臂画面逐像素可比的前提）。编码路径与 sortlag 截图完全共用（`captureRGBA` + `encodeCrop`），
+     * 只把 mime 换成 PNG：JPEG 的共同损失会把两臂 PSNR 压到 35–40 dB，会让"PSNR ≥ 45 dB"这条闸门**假阴性**。
+     * 注意：`res=1600x1063` 的 PNG base64 可达 2–4 MB，逼近回传端点 4 MB 上限 ⇒ 颜色闸门那一轮用
+     * `res=800x531`（SH 数学与分辨率无关，闸门结论不受影响）。
+     */
+    frameDumpPng(): string {
+        const f = this.captureRGBA();
+        if (!f) return "";
+        return encodeCrop(f, { x: 0, y: 0, w: f.w, h: f.h }, null, "image/png", 1);
     }
 
     /**
@@ -2041,6 +2065,11 @@ export async function measureOneRound(
         const probe = ctx.probeFrameCoverage();
         base.coveredPct = probe.coveredPct;
         base.keptPct = probe.keptPct;
+        // [CLRGATE 2026-09-30] 颜色正确性闸门（`?framedump=1`）：此时相机已在基准位姿 ⇒ 抓一帧无损 PNG
+        //   回传（解析侧切出 `framedump_png=` → PNG → tools/compare_images.py）。缺省不启用。
+        if (param("framedump", "") !== "") {
+            base.frameDumpPng = ctx.frameDumpPng();
+        }
         base.fps = perf.fps;
         base.cpuMs = perf.cpuMs;
         base.driver = perf.driver;

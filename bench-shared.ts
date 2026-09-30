@@ -251,14 +251,32 @@ export async function submitReport(reportUrl: string, text: string, token = ""):
             token === ""
                 ? reportUrl
                 : reportUrl + (reportUrl.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token);
+        // [CLRGATE 2026-09-30] `keepalive` 有**硬性体积上限**（Chromium 实测 64 KB）：抓帧诊断
+        //   （`?framedump=1` 的整幅 PNG，base64 后 0.3–1 MB）必然超限 ⇒ `fetch` 抛错、回传**静默失败**
+        //   （dev server 侧连一行日志都没有 —— 本次颜色闸门第一轮就是这么白跑的）。
+        //   小体积（历史路径，含 sortlag 截图 ~50 KB）仍走 `keepalive: true` ⇒ 行为逐字不变；
+        //   超限时退化为普通 POST：代价只是"提交瞬间关页面可能送不到"，换来大 payload 能落盘。
+        const bytes = new Blob([text]).size;
         const res = await fetch(url, {
             method: "POST",
             headers: { "Content-Type": "text/plain;charset=utf-8" },
             body: text,
-            keepalive: true,
+            keepalive: bytes <= 64 * 1024 - 1024,
         });
+        if (!res.ok) {
+            // 纯 ASCII：真机/桌面日志都能直接 grep（中文在控制台日志里会乱码）
+            console.warn(`[submitReport] HTTP ${res.status} body=${bytes}B url=${url}`);
+        }
         return res.ok;
-    } catch {
+    } catch (e) {
+        // [CLRGATE 2026-09-30] 服务端对**超限体**是 `req.destroy()`（不是先回 413）⇒ 客户端拿到的是
+        //   网络错误而非 HTTP 状态 ⇒ 上面的 `!res.ok` 分支根本不会执行 ⇒ 回传**静默失败**。
+        //   因此这里也必须留一行 ASCII 痕迹（含体积），否则"超大 body"会表现为"什么都没发生"。
+        console.warn(
+            `[submitReport] network/keepalive failure body=${new Blob([text]).size}B url=${reportUrl} err=${
+                e instanceof Error ? e.message : String(e)
+            }`,
+        );
         return false;
     }
 }
@@ -1173,6 +1191,19 @@ export function sortLagRoundTags(r: {
 }
 
 /**
+ * [CLRGATE 2026-09-30] `?framedump=1` 的抓帧字段：把**基准位姿**整幅画面（无损 PNG data URL）单独成一行
+ * `framedump_png=`，供离线逐像素比对（BASE vs 变体 → 平均/最大误差 + PSNR/SSIM）。
+ *
+ * 为什么必须无损（PNG 而非 JPEG）：判据用的是 `tools/compare_images.py` 里那档 "PSNR ≥ 45 dB = 视觉不可分辨"，
+ * JPEG 的共同损失会把两臂 PSNR 压到 35–40 dB ⇒ 拿它做闸门会**假阴性**。
+ * 字符串很长（`res=800x531` 时约 0.4–0.9 MB base64），因此只在显式开关下存在，且只进单独字段
+ * （不进"数值一栏"）；解析侧切成 PNG 后交给 `tools/compare_images.py`。
+ */
+export function frameDumpTags(r: { frameDumpPng?: string }): string[] {
+    return r.frameDumpPng ? [`framedump_png=${r.frameDumpPng}`] : [];
+}
+
+/**
  * 绕世界 Y 轴（竖直轴）过 `pivot` 旋转 `deg` 度的世界变换 B（列主序 4×4，与视图矩阵同布局）：
  * `B = T(pivot) · R_y(deg) · T(-pivot)`。**只转点、不改缩放**，所以它是刚体变换，`B⁻¹ = B(-deg)`。
  */
@@ -1898,6 +1929,10 @@ export interface RoundResult extends SegTimingFields {
     drawOk?: boolean;
     coveredPct?: number;
     keptPct?: number;
+    /** [CLRGATE 2026-09-30] `?framedump=1`：**基准位姿**整幅画面的**无损 PNG data URL**
+     *  （`data:image/png;base64,…`）。只用于离线逐像素比对（BASE vs 变体：平均/最大误差 + PSNR/SSIM），
+     *  不参与任何性能指标；缺省不存在（字符串很长，会明显撑大结果文本/回传体）。 */
+    frameDumpPng?: string;
     points?: number;
     bytes?: number;
     fetchMs?: number;
@@ -2330,6 +2365,8 @@ export const ROUND_RESULT_STR_KEYS = [
     "sortLagShotBR",
     "sortLagShotDR",
     "sortLagNote",
+    // [CLRGATE 2026-09-30] 颜色闸门抓帧（无损 PNG data URL，字符串很长；缺省不产生）
+    "frameDumpPng",
 ] as const satisfies readonly (keyof RoundResult)[];
 /** 布尔字段 */
 export const ROUND_RESULT_BOOL_KEYS = [
