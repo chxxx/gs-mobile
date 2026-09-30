@@ -1204,6 +1204,21 @@ export function frameDumpTags(r: { frameDumpPng?: string }): string[] {
 }
 
 /**
+ * [阶段0 2026-09-30] 臂标签（`arm=`）与生效开关（`sw=`）逐轮回显。
+ *
+ * 为什么必须有：本轮出现过"3 份 `u=` 标 base 实则跑 frag"的错标 —— `u=` 是**用户备注**，
+ * 无法自证；臂必须由**子页面里实际生效的配置**（`RenderProgram` 在 program 建好之后写入
+ * `window.__CH7_ARM__`，含 WebGL2/TF 可用性、program 是否真的建成功）自动生成，
+ * 这样"跑的是什么"与"报告写的什么"结构上不可能分叉。
+ */
+export function armRoundTags(r: { armLabel?: string; armSwitches?: string }): string[] {
+    const out: string[] = [];
+    if (r.armLabel) out.push(`arm=${r.armLabel}`);
+    if (r.armSwitches) out.push(`sw=${r.armSwitches}`);
+    return out;
+}
+
+/**
  * 绕世界 Y 轴（竖直轴）过 `pivot` 旋转 `deg` 度的世界变换 B（列主序 4×4，与视图矩阵同布局）：
  * `B = T(pivot) · R_y(deg) · T(-pivot)`。**只转点、不改缩放**，所以它是刚体变换，`B⁻¹ = B(-deg)`。
  */
@@ -1919,6 +1934,11 @@ export function defaultUserLabel(glRenderer: string): string {
  *  `jobId` / `retryCount` / `contextLost` / `disposeMs` / `iframeCreateMs` 是 iframe 改造新增的**诊断**字段，
  *  不参与 fps / first_frame_ms / fetch_ms / parse_ms 的任何计算。 */
 export interface RoundResult extends SegTimingFields {
+    /** [阶段0 2026-09-30] **由"实际生效的配置"自动生成的臂标签**（base / frag / frozen / tf_full / tf_produce /
+     *  tf_consume / frag-failed…）。`u=` 只是用户备注，**不得**再用于判定是哪一臂（本轮之前出现过 3 份错标）。 */
+    armLabel?: string;
+    /** 生效开关的回显（`key=value` 用 `|` 连接；缺省项也写出来，便于确认"当时确实是这么配的"）。 */
+    armSwitches?: string;
     scene: string;
     /** 场景所属数据集（mip360/tnt/db）：与 bench-flux 臂同名字段，供 tools/ch7_baseline_report.py 分组 */
     dataset?: string;
@@ -2367,6 +2387,9 @@ export const ROUND_RESULT_STR_KEYS = [
     "sortLagNote",
     // [CLRGATE 2026-09-30] 颜色闸门抓帧（无损 PNG data URL，字符串很长；缺省不产生）
     "frameDumpPng",
+    // [阶段0 2026-09-30] 臂标签与生效开关回显（自动生成，杜绝 u= 错标导致的数据污染）
+    "armLabel",
+    "armSwitches",
 ] as const satisfies readonly (keyof RoundResult)[];
 /** 布尔字段 */
 export const ROUND_RESULT_BOOL_KEYS = [

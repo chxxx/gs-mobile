@@ -2065,6 +2065,14 @@ export async function measureOneRound(
         const probe = ctx.probeFrameCoverage();
         base.coveredPct = probe.coveredPct;
         base.keptPct = probe.keptPct;
+        // [阶段0 2026-09-30] 臂标签：读子页面发布的**实际生效**配置（`window.__CH7_ARM__`）。
+        //   为什么不用 URL 推断：URL 是"请求"，可能因不支持/冲突/建 program 失败而未生效；
+        //   本轮出现过 3 份 `u=` 标 base 实则跑 frag 的错标 ⇒ 判臂只看 `arm=`。
+        const armInfo = (window as unknown as { __CH7_ARM__?: { arm?: string; switches?: string } }).__CH7_ARM__;
+        if (armInfo?.arm) {
+            base.armLabel = armInfo.arm;
+            base.armSwitches = armInfo.switches;
+        }
         // [CLRGATE 2026-09-30] 颜色正确性闸门（`?framedump=1`）：此时相机已在基准位姿 ⇒ 抓一帧无损 PNG
         //   回传（解析侧切出 `framedump_png=` → PNG → tools/compare_images.py）。缺省不启用。
         if (param("framedump", "") !== "") {

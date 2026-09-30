@@ -131,13 +131,30 @@ const SHCACHE_PARAM: string = (() => {
     }
 })();
 const SHCACHE_FRAG_REQUESTED: boolean = SHCACHE_PARAM === "frag";
-const SHCACHE_FREEZE: boolean = (() => {
+/**
+ * [阶段0 2026-09-30] 冻结臂的**生产帧数**：`?shfreeze=N`（N ≥ 1；缺省 0 = 不冻结）。
+ *   语义：只在前 N 帧执行片元生产遍，之后每帧复用同一张颜色纹理；主 pass 与 FRAG_FULL **完全相同**
+ *   （同样不声明任何 SH sampler）。
+ *   为什么允许 N > 1：实测 **N=1 会得到空缓存**（首帧时点/变换纹理尚未绑到采样单元 0–4 ⇒ `cov=0` ⇒
+ *   alpha=0 ⇒ 存活探针 ok=0，见 §30）⇒ 最短**可测**版本是 N=2；两者对"生产成本 P"的差别只有"多生产 1 帧"
+ *   （100 个计帧里 ≈0.2–0.8%，见阶段 0 报告的误差说明）。
+ *   历史别名 `?shcachefreeze=1` 映射为 N=2（保留已验证过的行为）。
+ */
+const SHFREEZE_FRAMES: number = (() => {
     try {
-        return new URLSearchParams(location.search).get("shcachefreeze") === "1";
+        const q = new URLSearchParams(location.search);
+        const raw = q.get("shfreeze");
+        if (raw !== null) {
+            const n = parseInt(raw, 10);
+            if (Number.isFinite(n) && n > 0) return Math.min(600, n);
+            return 0;
+        }
+        return q.get("shcachefreeze") === "1" ? 2 : 0;
     } catch {
-        return false;
+        return 0;
     }
 })();
+const SHCACHE_FREEZE: boolean = SHFREEZE_FRAMES > 0;
 const SHCACHE_ENABLED: boolean = SHCACHE_FRAG_REQUESTED && typeof WebGL2RenderingContext !== "undefined";
 
 /**
@@ -1048,8 +1065,45 @@ class RenderProgram extends ShaderProgram {
     private _shCache: boolean = SHCACHE_ENABLED;
     /** `&shcachefreeze=1`：跳过前 2 帧后不再重算（固定相机下隔离主 pass 读取成本的诊断臂）。 */
     private _shCacheFrozen = SHCACHE_FREEZE;
-    /** 第一遍**已执行**次数：冻结臂用它跳过前 2 帧（不冻结时只自增，无行为影响）。 */
+    /** 第一遍**已执行**次数：冻结臂用它跳过前 N 帧（不冻结时只自增，无行为影响）。 */
     private _shCacheProduceCount = 0;
+    /** [阶段0 2026-09-30] 生效臂标签只发布一次（见 `publishEffectiveArm`）。 */
+    private _armPublished = false;
+
+    /**
+     * [阶段0 2026-09-30] 把**实际生效**的臂标签与开关回显发布到 `window.__CH7_ARM__`，由 bench 侧写进报告。
+     *
+     * 为什么不由报告侧按 URL 推断：URL 只是"请求" —— 请求的开关可能因为**不受支持**（无 WebGL2 ⇒ TF 不可用）、
+     * **冲突硬失败**（`shcache` × `shfmt=f16`）、或 program 没建成功而**没有生效**。臂标签必须反映
+     * "真的跑了什么"。本轮出现过 3 份 `u=` 标 base 实则跑 frag 的错标 ⇒ 从此判臂只看 `arm=`。
+     */
+    private publishEffectiveArm(): void {
+        if (this._armPublished) return;
+        this._armPublished = true;
+        const shCacheActive = this._shCache && this._shCacheProgram !== null;
+        const tfActive = this._shPassPre && this._tfProgram !== null;
+        let arm = "base";
+        if (SHCACHE_FRAG_REQUESTED) arm = shCacheActive ? (SHCACHE_FREEZE ? "frozen" : "frag") : "frag-failed";
+        else if (SHPASS_PARAM === "consume") arm = tfActive ? "tf_consume" : "tf_consume-failed";
+        else if (SHPASS_PARAM === "produce") arm = tfActive ? "tf_produce" : "tf_produce-failed";
+        else if (SHPASS_PARAM === "pre") arm = tfActive ? "tf_full" : "tf_full-failed";
+        if (this._noshRequested) arm += "+nosh";
+        const switches = [
+            `shcache=${SHCACHE_FRAG_REQUESTED ? SHCACHE_PARAM : "-"}`,
+            `shfreeze=${SHCACHE_FREEZE ? SHFREEZE_FRAMES : 0}`,
+            `shpass=${SHPASS_PARAM || "-"}`,
+            `nosh=${this._noshRequested ? 1 : 0}`,
+            `noct=${this._noctRequested ? 1 : 0}`,
+            `shdeg=${this._maxSHDegree}`,
+            `shfmt=${this._shF16 ? (SHFMT_F16_INCR ? "f16_incr" : "f16") : "-"}`,
+            `shprobe=${this._shFixedCoordProbe ? "fixedcoord" : "-"}`,
+            `webgl2=${typeof WebGL2RenderingContext !== "undefined" ? 1 : 0}`,
+        ].join("|");
+        (window as unknown as { __CH7_ARM__?: { arm: string; switches: string } }).__CH7_ARM__ = {
+            arm,
+            switches,
+        };
+    }
     private _colorTex: WebGLTexture | null = null;
     private _colorFbo: WebGLFramebuffer | null = null;
     private _shCacheProgram: WebGLProgram | null = null;
@@ -1639,6 +1693,9 @@ class RenderProgram extends ShaderProgram {
                 return;
             }
 
+            // [阶段0 2026-09-30] 发布"实际生效"的臂标签（第一帧一次）⇒ 报告里的 `arm=` 不可能与实跑分叉
+            this.publishEffectiveArm();
+
             // [DIAG-EXPERIMENT-1] prep 段起点（默认关闭时恒为 0，不参与任何计算）
             const tPrep = diagFrameTimingEnabled ? performance.now() : 0;
 
@@ -1874,7 +1931,7 @@ class RenderProgram extends ShaderProgram {
                 // [方案B 收口 2026-09-30] 冻结臂改为**跳过前 2 帧再固化**：旧实现首帧即固化，撞上"首帧
                 //   纹理/数据尚未就绪（cov=0）"就会把空缓存永久冻住（§30 的 ok=0 即此因）。计数只在冻结臂
                 //   生效，不冻结时恒为 true ⇒ FRAG_FULL 路径逐字不变。
-                const produceNow = !this._shCacheFrozen || this._shCacheProduceCount++ < 2;
+                const produceNow = !this._shCacheFrozen || this._shCacheProduceCount++ < SHFREEZE_FRAMES;
                 if (produceNow) {
                     const savedFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
                     gl.bindFramebuffer(gl.FRAMEBUFFER, this._colorFbo);

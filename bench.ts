@@ -99,6 +99,7 @@ import {
     sortLagRoundTags,
     throughputPercentileRoundTags,
     frameDumpTags,
+    armRoundTags,
 } from "./bench-shared";
 import type { BenchState, CasePhase, CaseToParentMessage, RoundResult, SceneMeta } from "./bench-shared";
 // 仅类型导入：view 模式的实现（含渲染器代码）由 main() 动态 import，bench 模式下不会被加载
@@ -365,6 +366,10 @@ function buildResultText(st: BenchState): string {
     lines.push("[RESULT]");
     lines.push("engine=gsplat");
     lines.push(`u=${st.u}`);
+    // [阶段0 2026-09-30] 臂标签与生效开关：由**子页面实际生效的配置**生成（不是 URL 推断）。
+    // `u=` 只是用户备注；判臂一律看 `arm=`，核对细节看 `sw=`。
+    lines.push(`arm=${st.results.filter((r) => r.ok)[0]?.armLabel ?? "-"}`);
+    lines.push(`sw_effective=${st.results.filter((r) => r.ok)[0]?.armSwitches ?? "-"}`);
     lines.push(`chip=${env.chip}`);
     lines.push(`vendor=${env.vendor}`);
     lines.push(`mode=bench`);
@@ -554,6 +559,8 @@ function buildResultText(st: BenchState): string {
         // [CLRGATE 2026-09-30] 颜色正确性闸门（`?framedump=1`）：基准位姿整幅画面的无损 PNG，
         // 只进单独字段，供离线 PSNR/SSIM 比对（BASE vs 变体）。
         tags.push(...frameDumpTags(r));
+        // [阶段0 2026-09-30] 臂标签 / 生效开关（逐轮回显；判臂只看 `arm=`，不看 `u=`）
+        tags.push(...armRoundTags(r));
         // 排序次数（效度自查）：静止协议下应 ≈1，动态下应 ≈frames —— 这是"两臂在窗口里是否做了等量工作"的直接证据
         if (r.sortResults !== undefined) tags.push(`sort_results=${r.sortResults}`);
         if (diag) {
