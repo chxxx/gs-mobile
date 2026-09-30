@@ -816,6 +816,7 @@ Mismatch between texture format and sampler type (signed/unsigned/float/shadow).
 
 - `?splatPx=` 此前**只有注释、没有任何 URL 解析** ⇒ 上轮 A2（`splatPx=64`）是 **no-op** ⇒ **撤回**"尾部/巨型 quad ≈0%"及由它推出的"片元面积项 ≈4–5%（两探针合并）"；片元/填充项量级改以 `res` 扫描为依据（≈20 ms/Mpx @ 基座视角）。
 - 本轮新增/接线：`?resscale=K`（**测帧分辨率与像素焦距一起 ×K**，保持同一 FOV；结果头 `res=`/`fx=` 同步自证）· `?splatPx=` 真正接到 `_maxSplatSize` 字段初始化 · 结果头新增 `resscale=` / `splatpx=` 自证字段（缺省 `1` / `1024` ⇒ 与历史结果逐字无差别）。
+
 ### §30（2026-09-30）方案 B（`?shcache=frag`）首轮桌面失败归因：**四个真实缺陷 + 一个"判据本身的漏洞"**
 
 **症状**：`fix2-frag` 离屏 FPS 均值 **0.0**（`ok=0`）⇒ 先按"可能是平台问题"排查，结论是**不是**：全部是代码缺陷，且被逐个逼出（每个缺陷都让下一个暴露）。
