@@ -876,9 +876,13 @@ function mergeLowRankChunks(
 
     for (const result of results) {
         splatBytes.set(new Uint8Array(result.splat), result.start * SplatData.RowLength);
-        shRgb[0].set(new Uint32Array(result.shRgb[0]), 8 * result.start);
-        shRgb[1].set(new Uint32Array(result.shRgb[1]), 8 * result.start);
-        shRgb[2].set(new Uint32Array(result.shRgb[2]), 8 * result.start);
+        // [阶段1 修复] `lr=1` 时 `shRgb` 是**长度 0** 的占位数组 ⇒ 若仍以非 0 偏移 `set()`，
+        //   TypedArray 会抛 `RangeError: offset is out of bounds`（实测：+230ms 就失败）。
+        if (shRgb[0].length > 0) {
+            shRgb[0].set(new Uint32Array(result.shRgb[0]), 8 * result.start);
+            shRgb[1].set(new Uint32Array(result.shRgb[1]), 8 * result.start);
+            shRgb[2].set(new Uint32Array(result.shRgb[2]), 8 * result.start);
+        }
         if (lrRank && result.lrRank) {
             // 每点 4 uint ⇒ 扁平偏移 = 4·idx（与 2048 宽纹素的行主序布局一致）
             lrRank.set(new Uint32Array(result.lrRank), 4 * result.start);

@@ -155,6 +155,22 @@ const SHFREEZE_FRAMES: number = (() => {
     }
 })();
 const SHCACHE_FREEZE: boolean = SHFREEZE_FRAMES > 0;
+
+// [阶段1 2026-09-30] `?shcache=frag&lr=1`：**渲染期低秩**。
+//   生产遍不再从 6 个 SH 纹素取 48 个系数，而是 ① 1 次 texelFetch 取每点 r 个 rank 系数 `a_j`（RGBA32UI，
+//   每点 1 纹素 = 8 half），② 在着色器内用**共享基** B（`rank × 45`，coeff-major）求
+//   `color.rgb += Σ_j a_j · Σ_{k=1..15} Y_k(dir) · B[j, k-1, c]`。
+//   DC 不参与低秩（它在基础色字节里）⇒ 只加 rest ⇒ 每点 1 次取样（原来是 6 次）。
+//   缺省 0 ⇒ 既有分支（含加载期重建 + 6 次取样）逐字不变。
+const LR_ENABLED: boolean = (() => {
+    try {
+        return new URLSearchParams(location.search).get("lr") === "1";
+    } catch {
+        return false;
+    }
+})();
+/** rank 纹理宽度常量（与 loader 的 `LR_RANK_TEX_WIDTH` 同值；纹理按 2048 宽上传）。 */
+const LR_RANK_WIDTH = 2048;
 const SHCACHE_ENABLED: boolean = SHCACHE_FRAG_REQUESTED && typeof WebGL2RenderingContext !== "undefined";
 
 /**
@@ -185,6 +201,85 @@ void main() {
  *   - `idx >= u_splatCount` 的片元**不读取任何点数据**；
  *   - SH 常量 / `fillSHFromPacked` / `evalSHRGB` 与 BASE **同一份文本**（运行时从顶点模板切出）。
  */
+/**
+ * [阶段1 2026-09-30] 生产遍源码（含低秩臂的定义注入）。
+ *   `lr=1` 时才注入 `LR_*` 常量；缺省直接返回 `buildShCacheFragmentSource()` 的原文 ⇒ 逐字不变。
+ */
+function buildShCacheFragmentSourceForArm(): string {
+    const src = buildShCacheFragmentSource();
+    if (!LR_ENABLED) return src;
+    // LR_RANK_MAX = 7（该数据集 rank；loader 对不足的槽位补 0 ⇒ 定长循环不引入误差）
+    // LR_REST = 45（每行基的列数 = 15 个 rest 系数 × 3 通道）
+    // LR_UBO_VEC4 = ⌈7×45/4⌉ = 79 个 vec4 = 1,264 B
+    const defines = ["#define LR_RANK_MAX 7", "#define LR_REST 45", "#define LR_UBO_VEC4 79"].join("\n");
+    return src.replace("#version 300 es", "#version 300 es\n" + defines);
+}
+
+/**
+ * [阶段1 2026-09-30] 低秩臂注入的 GLSL：rank 纹理取样 + 共享基累加（`Y_k` 与 `evalSHRGB` 逐行同源）。
+ *   - `Y_k`（k=1..15）直接从 `evalSHRGB` 的同一段公式转录（`shs[3k+c]` 的系数序 = 低秩的
+ *     `[R1,G1,B1,R2,…]` coeff-major 序 ✓）；
+ *   - 循环边界 `LR_RANK_MAX` 是**编译期常量**（该数据集 rank=7；loader 对 rank<7 的槽位补 0
+ *     ⇒ 定长循环不会引入误差）；`LR_REST`=45、UBO 槽位 = ⌈7×45/4⌉ = 79 个 vec4 = 1,264 B。
+ *   - 基按 **channel-major** 存（`off(j,c,k-1) = j*45 + c*15 + (k-1)`，TS 侧重排）⇒ `Σ_k` 连续访问。
+ */
+const LR_SH_GLSL = /* glsl */ `
+// ---- [阶段1] 渲染期低秩：每点 1 次取样 + 共享基累加 ----
+uniform highp usampler2D u_lrRank;
+uniform int u_lrW;
+uniform LrBasisBlock { vec4 u_lrB[LR_UBO_VEC4]; };
+float lrB(int j, int c, int k) {
+    int i = j * LR_REST + c * 15 + (k - 1);
+    return u_lrB[i >> 2][i & 3];
+}
+vec3 lrRestRGB(uint idx, vec3 d) {
+    uvec4 p = texelFetch(u_lrRank, ivec2(int(idx) % u_lrW, int(idx) / u_lrW), 0);
+    vec2 h0 = unpackHalf2x16(p.x);
+    vec2 h1 = unpackHalf2x16(p.y);
+    vec2 h2 = unpackHalf2x16(p.z);
+    vec2 h3 = unpackHalf2x16(p.w);
+    float a[LR_RANK_MAX];
+    a[0] = h0.x; a[1] = h0.y; a[2] = h1.x; a[3] = h1.y;
+    a[4] = h2.x; a[5] = h2.y; a[6] = h3.x;
+    float x = d.x; float y = d.y; float z = d.z;
+    float xx = x * x; float yy = y * y; float zz = z * z;
+    float xy = x * y; float yz = y * z; float xz = x * z;
+    float Y[15];
+    Y[0] = -SH_C1 * y;
+    Y[1] = -SH_C1 * z;
+    Y[2] = SH_C1 * x;
+    Y[3] = SH_C2[0] * xy;
+    Y[4] = SH_C2[1] * yz;
+    Y[5] = SH_C2[2] * (2.0 * zz - xx - yy);
+    Y[6] = SH_C2[3] * xz;
+    Y[7] = SH_C2[4] * (xx - yy);
+    Y[8] = SH_C3[0] * y * (3.0 * xx - yy);
+    Y[9] = SH_C3[1] * xy * z;
+    Y[10] = SH_C3[2] * y * (4.0 * zz - xx - yy);
+    Y[11] = SH_C3[3] * z * (2.0 * zz - 3.0 * xx - 3.0 * yy);
+    Y[12] = SH_C3[4] * x * (4.0 * zz - xx - yy);
+    Y[13] = SH_C3[5] * z * (xx - yy);
+    Y[14] = SH_C3[6] * x * (xx - 3.0 * yy);
+    vec3 out3 = vec3(0.0);
+    for (int j = 0; j < LR_RANK_MAX; ++j) {
+        float aj = a[j];
+        if (aj == 0.0) { continue; }
+        float s0 = 0.0; float s1 = 0.0; float s2 = 0.0;
+        for (int k = 1; k <= 15; ++k) {
+            float yk = Y[k - 1];
+            s0 += yk * lrB(j, 0, k);
+            s1 += yk * lrB(j, 1, k);
+            s2 += yk * lrB(j, 2, k);
+        }
+        out3 += aj * vec3(s0, s1, s2);
+    }
+    return out3;
+}
+`;
+
+/** [阶段1] 生产遍在低秩臂下的 SH 段落（`color.rgb` 此时= DC 项 ⇒ 只加 rest）。 */
+const LR_SH_BLOCK = /* glsl */ `            color.rgb += lrRestRGB(uint(idx), dir);`;
+
 function buildShCacheFragmentSource(): string {
     const uniformBlock = sliceShaderSource(
         "#if (!defined(SHPASS_PRE) && !defined(SHCACHE_FRAG)) || defined(SHPASS_TF)\nuniform bool u_colorTransformEnabled;",
@@ -204,6 +299,28 @@ function buildShCacheFragmentSource(): string {
         "uniform highp usampler2D u_texture;",
         "uniform highp usampler2D u_colorTransformIndices;",
     );
+    // [阶段1 2026-09-30] 低秩臂的源码变体：`lr=1` 时那 3 张 SH 纹理**根本不存在** ⇒
+    //   必须把它们的声明整段去掉（否则会走"声明未使用/未绑定 sampler"的路径，污染 P_lr 归因）；
+    //   两个辅助函数（`fillSHFromPacked`/`evalSHRGB`）也要去掉（它们引用那些 sampler），
+    //   只保留 `SH_C0..SH_C3` 常量供 `lrRestRGB` 使用。
+    const shSamplerDecls = `#ifdef SHFMT_F16
+uniform highp sampler2D u_sh_r;
+uniform highp sampler2D u_sh_g;
+uniform highp sampler2D u_sh_b;
+#else
+uniform highp usampler2D u_sh_r;
+uniform highp usampler2D u_sh_g;
+uniform highp usampler2D u_sh_b;
+#endif
+`;
+    const uniformBlockForArm = LR_ENABLED ? uniformBlock.replace(shSamplerDecls, "") : uniformBlock;
+    const shFunctionsForArm = (() => {
+        if (!LR_ENABLED) return shFunctions;
+        // 截到**第一个函数定义**之前 = 只留常量表，再接低秩 GLSL
+        const cut = /\n(?:void|vec3|vec4|float|uint|uvec4|mat4)\s+[A-Za-z_]\w*\s*\(/.exec(shFunctions);
+        const constants = cut ? shFunctions.slice(0, cut.index) : shFunctions;
+        return constants + "\n" + LR_SH_GLSL;
+    })();
     return (
         /* glsl */ `#version 300 es
 precision highp float;
@@ -217,9 +334,9 @@ uniform int u_splatCount;
 uniform int u_colorTexWidth;
 
 ` +
-        uniformBlock +
+        uniformBlockForArm +
         "\n" +
-        shFunctions +
+        shFunctionsForArm +
         /* glsl */ `
 
 out vec4 fragColor;
@@ -282,7 +399,9 @@ void main() {
             vec3 cameraPosition = inverse(view)[3].xyz;
             vec3 dir = normalize(worldPosition - cameraPosition);
 
-            color.rgb = evalSHRGB(shIndex, degree, dir);
+            // [阶段1 2026-09-30] lr=1 时改为"基础色(=DC 项) + 低秩 rest"（每点 1 次取样，原来是 6 次）；
+            //   缺省分支仍输出同一行原文（逐字不变）。注意：模板串里不能出现反引号。
+${LR_ENABLED ? LR_SH_BLOCK : "            color.rgb = evalSHRGB(shIndex, degree, dir);"}
         }
     }
 
@@ -1069,6 +1188,13 @@ class RenderProgram extends ShaderProgram {
     private _shCacheProduceCount = 0;
     /** [阶段0 2026-09-30] 生效臂标签只发布一次（见 `publishEffectiveArm`）。 */
     private _armPublished = false;
+    // ---- [阶段1 2026-09-30] 低秩臂（`?lr=1`）资源：rank 纹理 + 共享基 UBO（仅 LR_ENABLED 时创建）----
+    private _lrRankTex: WebGLTexture | null = null;
+    private _lrRankW = 0;
+    private _lrRankH = 0;
+    private _lrBasisUbo: WebGLBuffer | null = null;
+    /** UBO 绑定槽（固定 0；主 pass 不用 UBO ⇒ 不冲突）。 */
+    private static readonly LR_BASIS_BINDING = 0;
 
     /**
      * [阶段0 2026-09-30] 把**实际生效**的臂标签与开关回显发布到 `window.__CH7_ARM__`，由 bench 侧写进报告。
@@ -1410,7 +1536,7 @@ class RenderProgram extends ShaderProgram {
                 gl.shaderSource(vs, shCacheFullscreenVertexSource);
                 gl.compileShader(vs);
                 const fs = gl.createShader(gl.FRAGMENT_SHADER) as WebGLShader;
-                gl.shaderSource(fs, buildShCacheFragmentSource());
+                gl.shaderSource(fs, buildShCacheFragmentSourceForArm());
                 gl.compileShader(fs);
                 if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
                     const log = "第一遍顶点着色器编译失败：" + gl.getShaderInfoLog(vs);
@@ -1463,6 +1589,30 @@ class RenderProgram extends ShaderProgram {
                     "u_colorTransformEnabled",
                 ]) {
                     this._shCacheU[name] = gl.getUniformLocation(prog, name);
+                }
+                // ---- [阶段1 2026-09-30] `lr=1`：低秩臂的资源（rank 纹理 + 共享基 UBO）----
+                if (LR_ENABLED) {
+                    // 组合冲突：与 `shfmt=f16`（SH 纹理类型不同、且 lr 下不建 SH 纹理）或 TF 各臂同时用会语义混乱
+                    if (SHFMT_F16_ENABLED || SHPASS_TF_REQUESTED) {
+                        throw new Error(
+                            "[lr=1] 与 shfmt=f16 / shpass=* 组合不受支持（低秩臂不建 SH 纹理）；请只用其一。",
+                        );
+                    }
+                    this._lrRankTex = gl.createTexture() as WebGLTexture;
+                    this._lrBasisUbo = gl.createBuffer() as WebGLBuffer;
+                    const blockIndex = gl.getUniformBlockIndex(prog, "LrBasisBlock");
+                    if (blockIndex === gl.INVALID_INDEX) {
+                        const log = "[lr=1] 生产遍里没有 LrBasisBlock uniform block（着色器未编成低秩臂）";
+                        console.error(log);
+                        throw new Error(log);
+                    }
+                    // UBO 槽位固定 0：主 pass 不用 UBO ⇒ 无冲突；prog = 第一遍（生产遍）program
+                    gl.uniformBlockBinding(prog, blockIndex, RenderProgram.LR_BASIS_BINDING);
+                    gl.useProgram(prog);
+                    const lrRankLoc = gl.getUniformLocation(prog, "u_lrRank");
+                    this._shCacheU["lrRank"] = lrRankLoc;
+                    this._shCacheU["u_lrW"] = gl.getUniformLocation(prog, "u_lrW");
+                    gl.uniform1i(lrRankLoc, 9); // 单元 9（8 已被颜色纹理占用；5/6/7 是 SH 单元，lr 下不用）
                 }
                 // 主 pass 的两个 uniform 位置（缓存，避免逐帧 getUniformLocation 影响计时）
                 this._shCacheU["colorTex"] = gl.getUniformLocation(this.program, "u_colorTex");
@@ -1604,6 +1754,15 @@ class RenderProgram extends ShaderProgram {
             }
 
             const sh = this.renderData.sphericalHarmonics;
+
+            // [阶段1 2026-09-30] `lr=1`：SH 纹理**根本不存在**（加载期不产出 48-half 打包）⇒
+            //   只置 `u_useSH` 与 `u_bandIndex`（生产遍的低秩分支要用），**不**碰那 3 张 SH 纹理。
+            //   `u_bandIndex=(-1,-1,-1)`：让生产遍里 `if (degree > 0u || u_bandIndex[0] < 0)` 恒为真。
+            if (LR_ENABLED) {
+                gl.uniform1i(u_useSH, 1);
+                gl.uniform3iv(u_bandIndex, new Int32Array([-1, -1, -1]));
+                return;
+            }
 
             gl.uniform1i(u_useSH, 1);
             gl.uniform3iv(u_bandIndex, sh.bandsIndices);
@@ -1972,6 +2131,62 @@ class RenderProgram extends ShaderProgram {
                     //   逐帧取用与主 pass 相同的数组 ⇒ 语义对齐。
                     if (shBands) {
                         gl.uniform3iv(this._shCacheU.u_bandIndex ?? null, shBands.bandsIndices);
+                    }
+                    // ---- [阶段1 2026-09-30] `lr=1`：上传/绑定 rank 纹理与共享基 UBO（生产遍用）----
+                    if (LR_ENABLED && this._lrRankTex && this._lrBasisUbo) {
+                        const lr = this.renderData.sphericalHarmonics?.lowRank;
+                        if (!lr) {
+                            throw new Error(
+                                "[lr=1] 低秩载荷缺失（sphericalHarmonics.lowRank）：`lr=1` 必须同时作用于加载阶段" +
+                                    "（加载器读的是页面 URL；请确认链接里带 lr=1）",
+                            );
+                        }
+                        if (lr.rank > 7) {
+                            throw new Error(`[lr=1] rank=${lr.rank} > LR_RANK_MAX=7：着色器按 7 编译，需提升常量后重编`);
+                        }
+                        if (this._lrRankW !== lr.width || this._lrRankH !== lr.height) {
+                            this._lrRankW = lr.width;
+                            this._lrRankH = lr.height;
+                            gl.bindTexture(gl.TEXTURE_2D, this._lrRankTex);
+                            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+                            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+                            // 每点 4×uint = 1 纹素 ⇒ loader 产出的扁平 2048 宽布局可直接上传（行尾补 0）
+                            gl.texImage2D(
+                                gl.TEXTURE_2D,
+                                0,
+                                gl.RGBA32UI,
+                                lr.width,
+                                lr.height,
+                                0,
+                                gl.RGBA_INTEGER,
+                                gl.UNSIGNED_INT,
+                                lr.packed,
+                            );
+                            // 共享基 → UBO：**channel-major 重排**（让 Σ_k 连续访问），⌈rank×45/4⌉ 个 vec4 = 1,264 B
+                            const vec4Count = Math.ceil((lr.rank * lr.restCount) / 4);
+                            const ubo = new Float32Array(vec4Count * 4);
+                            for (let j = 0; j < lr.rank; j++) {
+                                for (let c = 0; c < 3; c++) {
+                                    for (let k = 1; k <= 15; k++) {
+                                        const src = j * lr.restCount + (k - 1) * 3 + c;
+                                        const dst = j * lr.restCount + c * 15 + (k - 1);
+                                        ubo[dst] = lr.basis[src] ?? 0;
+                                    }
+                                }
+                            }
+                            gl.bindBuffer(gl.UNIFORM_BUFFER, this._lrBasisUbo);
+                            gl.bufferData(gl.UNIFORM_BUFFER, ubo, gl.STATIC_DRAW);
+                            gl.bindBuffer(gl.UNIFORM_BUFFER, null);
+                        }
+                        gl.bindBufferBase(gl.UNIFORM_BUFFER, RenderProgram.LR_BASIS_BINDING, this._lrBasisUbo);
+                        gl.activeTexture(gl.TEXTURE9);
+                        gl.bindTexture(gl.TEXTURE_2D, this._lrRankTex);
+                        gl.activeTexture(gl.TEXTURE0);
+                        gl.useProgram(this._shCacheProgram);
+                        gl.uniform1i(this._shCacheU["u_lrW"] ?? null, lr.width);
+                        gl.useProgram(this.program);
                     }
                     gl.drawArrays(gl.TRIANGLES, 0, 3);
                     if (blendWas) gl.enable(gl.BLEND);
