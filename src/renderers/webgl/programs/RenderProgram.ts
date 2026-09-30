@@ -233,11 +233,17 @@ float lrB(int j, int c, int k) {
     return u_lrB[i >> 2][i & 3];
 }
 vec3 lrRestRGB(uint idx, vec3 d) {
-    uvec4 p = texelFetch(u_lrRank, ivec2(int(idx) % u_lrW, int(idx) / u_lrW), 0);
+    // 每点 **2 个纹素**：纹素 0 = r 个 rank 系数、纹素 1 = DC 的 3 个 half。
+    //   寻址沿用"每点 2 纹素"的位技巧（`(idx & 0x3ff) << 1`），与 2048 宽 × ⌈2N/2048⌉ 高的布局一致。
+    ivec2 c0 = ivec2(int((idx & 0x3ffu) << 1u), int(idx >> 10u));
+    uvec4 p = texelFetch(u_lrRank, c0, 0);
+    uvec4 q = texelFetch(u_lrRank, c0 + ivec2(1, 0), 0);
     vec2 h0 = unpackHalf2x16(p.x);
     vec2 h1 = unpackHalf2x16(p.y);
     vec2 h2 = unpackHalf2x16(p.z);
     vec2 h3 = unpackHalf2x16(p.w);
+    vec2 dcd = unpackHalf2x16(q.x);
+    vec2 dce = unpackHalf2x16(q.y);
     float a[LR_RANK_MAX];
     a[0] = h0.x; a[1] = h0.y; a[2] = h1.x; a[3] = h1.y;
     a[4] = h2.x; a[5] = h2.y; a[6] = h3.x;
@@ -260,7 +266,9 @@ vec3 lrRestRGB(uint idx, vec3 d) {
     Y[12] = SH_C3[4] * x * (4.0 * zz - xx - yy);
     Y[13] = SH_C3[5] * z * (xx - yy);
     Y[14] = SH_C3[6] * x * (xx - 3.0 * yy);
-    vec3 out3 = vec3(0.0);
+    // DC 与 BASE 同精度（half，取自纹素 1）⇒ 这里返回的是**完整颜色（DC + rest）**，
+    //   调用方用 `=` 赋值（不是 `+=`）。
+    vec3 out3 = SH_C0 * vec3(dcd.x, dcd.y, dce.x) + 0.5;
     for (int j = 0; j < LR_RANK_MAX; ++j) {
         float aj = a[j];
         if (aj == 0.0) { continue; }
@@ -277,8 +285,8 @@ vec3 lrRestRGB(uint idx, vec3 d) {
 }
 `;
 
-/** [阶段1] 生产遍在低秩臂下的 SH 段落（`color.rgb` 此时= DC 项 ⇒ 只加 rest）。 */
-const LR_SH_BLOCK = /* glsl */ `            color.rgb += lrRestRGB(uint(idx), dir);`;
+/** [阶段1] 生产遍在低秩臂下的 SH 段落：低秩返回值已是**完整颜色（DC + rest）** ⇒ 用 `=` 覆盖基础色。 */
+const LR_SH_BLOCK = /* glsl */ `            color.rgb = lrRestRGB(uint(idx), dir);`;
 
 function buildShCacheFragmentSource(): string {
     const uniformBlock = sliceShaderSource(

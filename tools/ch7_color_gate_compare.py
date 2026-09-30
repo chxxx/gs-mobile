@@ -105,6 +105,33 @@ def main() -> None:
         print("SSIM      = %.6f" % float(ssim(A / 255.0, B / 255.0, channel_axis=2, data_range=1.0)))
     except ImportError:
         print("SSIM      = (skipped: pip install scikit-image 可启用)")
+    # [阶段1 2026-09-30] 低秩臂：若报告里存在 u=*lr*，同样与 BASE / FRAG 对拍（同一套指标）
+    lr_key = next((k for k in reps if k.endswith("lr")), None)
+    if lr_key:
+        nl, L, covL = reps[lr_key]
+        Image.fromarray(L.astype(np.uint8)).save(os.path.join(OUT, "cg_lr.png"))
+        for ref_key, ref_name in ((base_key, "BASE"), (frag_key, "FRAG")):
+            nref, R, covR = reps[ref_key]
+            if R.shape != L.shape:
+                print("\n== LR vs %s: 尺寸不一致 %s vs %s ==" % (ref_name, R.shape, L.shape))
+                continue
+            d = np.abs(R - L)
+            dmax = d.max(axis=2)
+            tot = dmax.size
+            print("")
+            print("== LR(%s) vs %s(%s) ==" % (nl, ref_name, nref))
+            print("  covered: LR %s%% / %s %s%%" % (covL, ref_name, covR))
+            print("  平均误差(RGB) = %.5f 级   最大误差(单通道) = %d 级" % (float(np.mean(d)), int(d.max())))
+            for thr in (0, 1, 2, 4, 8, 16):
+                n = int(np.count_nonzero(dmax > thr))
+                print("  不一致像素(最大通道差 >%2d 级) = %8d / %d = %.4f%%" % (thr, n, tot, 100.0 * n / tot))
+            print("  PSNR[RGB] = %.2f dB" % psnr(R, L))
+            try:
+                from skimage.metrics import structural_similarity as ssim  # type: ignore
+
+                print("  SSIM      = %.6f" % float(ssim(R / 255.0, L / 255.0, channel_axis=2, data_range=1.0)))
+            except ImportError:
+                print("  SSIM      = (skipped)")
     print("")
     print("判据：PSNR >= 45 dB ⇒ 视觉不可分辨（与 tools/compare_images.py 同口径）")
     print("PNG 已存：%s / %s" % (os.path.join(OUT, "cg_base.png"), os.path.join(OUT, "cg_frag.png")))

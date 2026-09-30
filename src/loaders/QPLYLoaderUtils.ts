@@ -713,9 +713,10 @@ function decodeLowRankRange(
     const splatFloat = new Float32Array(splatBuffer);
     const splatUint8 = new Uint8ClampedArray(splatBuffer);
 
-    // [阶段1 2026-09-30] 低秩快速路径：只出 `lrRank`（每点 4×uint = 8 half），
-    //   **不**分配 3 × 8·count 的 48-half 打包缓冲（610k 点时那是 3×19.5 MB）⇒ 也不做 `C@B`。
-    const lrRank: Uint32Array | null = wantLowRank ? new Uint32Array(4 * count) : null;
+    // [阶段1] 低秩快速路径：每点 **2 个纹素**（8×uint）——第 0 个放 r 个 rank 系数、第 1 个放 DC 的 3 个 half
+    //   （DC 必须与 BASE 同精度：此前用 8 位基础色当 DC，闸门实测均值 0.53 级的系统性偏差即此）。
+    //   仍然**不**分配 3 × 8·count 的 48-half 打包缓冲，也**不做** `C@B`。
+    const lrRank: Uint32Array | null = wantLowRank ? new Uint32Array(8 * count) : null;
 
     const shRgb: [Uint32Array, Uint32Array, Uint32Array] = wantLowRank
         ? [new Uint32Array(0), new Uint32Array(0), new Uint32Array(0)]
@@ -799,11 +800,13 @@ function decodeLowRankRange(
         }
 
         if (lrRank) {
-            // [阶段1] 每点 4×uint = 8 half（前 rank 个有效）⇒ 渲染期 1 次 texelFetch 拿到全部 a_j。
-            lrRank[4 * local + 0] = packHalf2x16(rankCoeffs[0], rank > 1 ? rankCoeffs[1] : 0);
-            lrRank[4 * local + 1] = packHalf2x16(rank > 2 ? rankCoeffs[2] : 0, rank > 3 ? rankCoeffs[3] : 0);
-            lrRank[4 * local + 2] = packHalf2x16(rank > 4 ? rankCoeffs[4] : 0, rank > 5 ? rankCoeffs[5] : 0);
-            lrRank[4 * local + 3] = packHalf2x16(rank > 6 ? rankCoeffs[6] : 0, 0);
+            // [阶段1] 纹素 0：r 个 rank 系数（half）；纹素 1：DC 的 3 个 half（与 BASE 的 DC 同精度）。
+            lrRank[8 * local + 0] = packHalf2x16(rankCoeffs[0], rank > 1 ? rankCoeffs[1] : 0);
+            lrRank[8 * local + 1] = packHalf2x16(rank > 2 ? rankCoeffs[2] : 0, rank > 3 ? rankCoeffs[3] : 0);
+            lrRank[8 * local + 2] = packHalf2x16(rank > 4 ? rankCoeffs[4] : 0, rank > 5 ? rankCoeffs[5] : 0);
+            lrRank[8 * local + 3] = packHalf2x16(rank > 6 ? rankCoeffs[6] : 0, 0);
+            lrRank[8 * local + 4] = packHalf2x16(fdc0, fdc1);
+            lrRank[8 * local + 5] = packHalf2x16(fdc2, 0);
             // 跳过 coeffR/G/B 与 48-half 打包 —— 这两步正是表 7-5 里 130/282 ms 的主要部分。
             continue;
         }
@@ -869,9 +872,11 @@ function mergeLowRankChunks(
         ? [new Uint32Array(0), new Uint32Array(0), new Uint32Array(0)]
         : [new Uint32Array(shInfo.size), new Uint32Array(shInfo.size), new Uint32Array(shInfo.size)];
 
-    const rankHeight = Math.ceil(vertexCount / LR_RANK_TEX_WIDTH);
+    // [阶段1] 每点 **2 个纹素**（8×uint）：纹素 0 = r 个 rank 系数、纹素 1 = DC 的 3 个 half。
+    //   高度 = ⌈2N/2048⌉、扁平偏移 = 8·idx ⇒ 与着色器 `((idx & 0x3ff) << 1)` 的寻址一致。
+    const rankHeight = Math.ceil((2 * vertexCount) / LR_RANK_TEX_WIDTH);
     const lrRank: Uint32Array | null = wantLowRank
-        ? new Uint32Array(4 * LR_RANK_TEX_WIDTH * rankHeight)
+        ? new Uint32Array(8 * LR_RANK_TEX_WIDTH * rankHeight)
         : null;
 
     for (const result of results) {
@@ -884,8 +889,8 @@ function mergeLowRankChunks(
             shRgb[2].set(new Uint32Array(result.shRgb[2]), 8 * result.start);
         }
         if (lrRank && result.lrRank) {
-            // 每点 4 uint ⇒ 扁平偏移 = 4·idx（与 2048 宽纹素的行主序布局一致）
-            lrRank.set(new Uint32Array(result.lrRank), 4 * result.start);
+            // 每点 8 uint（2 纹素）⇒ 扁平偏移 = 8·idx
+            lrRank.set(new Uint32Array(result.lrRank), 8 * result.start);
         }
     }
 
@@ -936,7 +941,7 @@ function ParseLowRankQPLYBuffer(inputBuffer: ArrayBuffer, wantLowRank: boolean =
                       basis: prepared.basis,
                       packed: lrRank,
                       width: LR_RANK_TEX_WIDTH,
-                      height: Math.ceil(vertexCount / LR_RANK_TEX_WIDTH),
+                      height: Math.ceil((2 * vertexCount) / LR_RANK_TEX_WIDTH),
                   }
                 : undefined,
         ),

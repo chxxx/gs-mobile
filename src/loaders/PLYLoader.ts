@@ -299,7 +299,7 @@ class PLYLoader {
                       basis: prepared.basis,
                       packed: merged.lrRank,
                       width: merged.shInfo.width,
-                      height: Math.ceil(vertexCount / merged.shInfo.width),
+                      height: Math.ceil((2 * vertexCount) / merged.shInfo.width),
                   }
                 : undefined,
         );
