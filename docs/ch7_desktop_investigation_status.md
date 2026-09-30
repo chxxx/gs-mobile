@@ -875,4 +875,54 @@ Mismatch between texture format and sampler type (signed/unsigned/float/shadow).
 
 **待办**：① 颜色正确性闸门（逐像素 BASE vs FRAG_FULL：平均/最大误差 + PSNR/SSIM，桌面做，见 §30 末）；② 代表性动态协议（`spin=0.2` 或 `swing`）；③ `shcachefreeze` 臂首帧固化为空缓存的缺陷未修（诊断臂，不影响 FRAG_FULL）；④ 优化方向已明确：压那 4.1 ms 的生产成本（隔帧 / 分块生产 + 冻结复用，或只对"需要 SH 的点"生产），因为它在低可见性下是**固定成本**。
 
+### §32（2026-09-30 夜）颜色正确性闸门：**通过**（PSNR **60.02 dB** / SSIM **0.999863**），以及代表性动态协议补测（FRAG **1.34×**）
+
+#### 32.1 新增工具：`?framedump=1`（基准位姿整幅、**无损 PNG**）
+
+- 实现：`bench-measure.ts` 的 `frameDumpPng()`（复用 `captureRGBA()` + `encodeCrop(..., "image/png")`），调用点固定在
+  **覆盖率探针之后**——那一刻相机已被还原到基准位姿（既是 `covered=` 口径的前提，也是两臂画面逐像素可比的前提）；
+  经 `frameDumpTags()` 以单独字段 `framedump_png=data:image/png;base64,…` 进逐轮结果行；字段已登记进
+  `ROUND_RESULT_STR_KEYS`（仓库有**编译期闸门** `assertResultKeysRegistered`，漏登记会被 `tsc` 点名）。
+- 为什么必须**无损**：判据沿用 `tools/compare_images.py` 的 "PSNR ≥ 45 dB = 视觉不可分辨"。JPEG 的共同损失会把两臂
+  PSNR 压到 35–40 dB ⇒ 拿它做闸门会**假阴性**。
+- 复现：`powershell -NoProfile -ExecutionPolicy Bypass -File tools\ch7_color_gate.ps1`（两臂各一次，`res=320x213`）
+  → `python tools\ch7_color_gate_compare.py`。
+
+#### 32.2 结果（桌面 Edge/D3D11，同机位，全幅 320×213，两臂 `covered` 均 100%）
+
+| 指标 | 值 |
+|---|---|
+| 平均误差（RGB） | **0.058 级** |
+| 最大误差（单通道） | **5 级**（R 5 / G 3 / B 3） |
+| 不一致像素占比（最大通道差 >0 / >1 / >2 / >4 / **>8 / >16**） | 14.72% / 0.716% / 0.062% / 0.0015% / **0 / 0** |
+| **PSNR[RGB]** | **60.02 dB**（R 59.08 / G 59.71 / B 61.67） |
+| **SSIM** | **0.999863** |
+
+⇒ **颜色与 BASE 视觉不可分辨**，闸门关闭。（误差**分布特征**同样支持"只是精度差"：均值 0.058 级、68160 个像素里只有
+1 个像素差 >4 级、**没有任何**像素差 >8 级；若是逻辑错误——索引/阶数/截断写错——必然出现结构化的大面积差异。）
+预期来源：颜色缓存是 **RGBA16F**，相对 BASE 的 `float32` varying 有半精度量化 ⇒ 量级完全吻合。
+
+#### 32.3 过程中修掉的两个**回传链路**缺陷（都会导致"什么都没发生"式的静默失败）
+
+1. **`keepalive` 有 64 KB 硬上限**（Chromium）：`submitReport()` 原本恒用 `keepalive: true` ⇒ 抓帧这种 0.3–1.6 MB 的 body
+   必被拒、且 `fetch` 直接抛错。**修法**：按 body 体积决定（≤63 KB 仍走 keepalive，历史行为逐字不变；超限退化为普通 POST）。
+2. **超限体是 `req.destroy()` 而不是先回 413**（中间件 `maxBody` 4 MB）：客户端只拿到**网络错误** ⇒ `!res.ok` 分支根本不执行
+   ⇒ 连日志都没有。**修法**：`submitReport` 的 `catch` 也打一行 **ASCII** 痕迹（`[submitReport] network/keepalive failure body=…B url=…`），
+   方便桌机/真机日志直接 grep（中文在控制台日志里会乱码，必须用 ASCII）。
+3. 附带纪律：这类画面**无损 PNG 压缩率极低（实测 ≈3.8 B/px）** ⇒ `res=800x531` 单臂 body 就有 1.6 MB，**frag 那份超 4 MB 被拒**
+   （第一轮白跑即此因）。闸门用 `res=320x213`（0.068 MP ⇒ body 0.26 MB）；canvas 尺寸**等于**标称 `res`（`dpr=1&res_mode=forced`）。
+
+#### 32.4 代表性动态协议补测（`spin=0.2`，相机始终在场景内）
+
+| 臂 | u | 5-run fps | 均值±std | cpu_ms | sweep 自证 |
+|---|---|---|---|---|---|
+| BASE | `fr-c1-spinbase` | 45.0/47.4/48.5/52.1/54.4 | **49.5 ± 3.4** | 20.22 | `sweep_yaw=0→7.8°`、`sweep_cov=99.8→98.6%`、`sweep_drawn_const=1` |
+| FRAG_FULL | `fr-c1-spinfrag` | 62.9/63.1/66.7/67.2/70.9 | **66.2 ± 3.0** | 15.11 | 同上（同一轨迹） |
+
+⇒ **代表性动态视角下 FRAG 仍快 1.34×**（49.5 → 66.2）。结合 §31 的 `spin=1`（相机转出场景、路径平均 FRAG 反而慢 1.27×），
+两条合起来给出**准确的适用条件**：方案 B 的收益来自"把 SH 求值从 O(可见×4 顶点) 换成 O(全部点) 的常数成本"，
+因此**只要场景可见比例与静态相当就赢**（静止 1.43×、小幅运动 1.34×），**当视角大量移出场景时会被固定成本拖住**——
+这是论文里必须写的限制条件，也是下一步"隔帧/分块生产 + 冻结复用"的动机。
+
+
 
