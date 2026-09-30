@@ -115,6 +115,175 @@ const SHPASS_PRE_PACKF16: boolean = (() => {
     }
 })();
 
+// [SHCACHE 2026-09-30] 方案 B 最小原型 `?shcache=frag`：
+//   第一遍：**片元** pass（全屏三角形）为每个 splat 计算一次视角相关 SH 颜色，写入 RGBA16F 颜色纹理；
+//   第二遍：主 pass 仍按排序结果绘制，但颜色改为 `texelFetch(u_colorTex, 原始 splat 索引)`，
+//           不再取样 SH 纹理、不做 SH 求值（SH/colorTransform 声明整段排除）。
+//   `&shcachefreeze=1`：第一遍只跑一次（固定相机下隔离"主 pass 读取成本"的诊断臂，**不代表动态相机可用**）。
+//   缺省不生效；BASE / NOSH / TF 各臂 / 缺省路径逐字不变。
+const SHCACHE_PARAM: string = (() => {
+    try {
+        return new URLSearchParams(location.search).get("shcache") ?? "";
+    } catch {
+        return "";
+    }
+})();
+const SHCACHE_FRAG_REQUESTED: boolean = SHCACHE_PARAM === "frag";
+const SHCACHE_FREEZE: boolean = (() => {
+    try {
+        return new URLSearchParams(location.search).get("shcachefreeze") === "1";
+    } catch {
+        return false;
+    }
+})();
+const SHCACHE_ENABLED: boolean = SHCACHE_FRAG_REQUESTED && typeof WebGL2RenderingContext !== "undefined";
+
+/**
+ * 从顶点着色器模板里**原样切出**一段：保证方案 B 与 BASE 的 SH 逻辑**逐字相同**（不靠"看起来一样"判断正确）。
+ */
+function sliceShaderSource(startMarker: string, endMarker: string): string {
+    const i = vertexShaderSource.indexOf(startMarker);
+    const j = vertexShaderSource.indexOf(endMarker);
+    if (i < 0 || j < 0 || j <= i) {
+        throw new Error(`[shcache=frag] 无法切出着色器片段（marker 未命中）：${startMarker.slice(0, 48)}`);
+    }
+    return vertexShaderSource.slice(i, j + endMarker.length);
+}
+
+/** [方案 B] 第一遍的顶点着色器：全屏大三角形（3 顶点、无属性、由 gl_VertexID 生成）。 */
+const shCacheFullscreenVertexSource = /* glsl */ `#version 300 es
+precision highp float;
+
+void main() {
+    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+`;
+
+/**
+ * [方案 B] 第一遍的片元着色器：把"逐 splat 颜色"写到 RGBA16F 颜色纹理。
+ *   - 片元 ↔ splat 原始索引（整数规则明确）：`ivec2(gl_FragCoord.xy)` ⇒ `idx = p.y * u_colorTexWidth + p.x`；
+ *   - `idx >= u_splatCount` 的片元**不读取任何点数据**；
+ *   - SH 常量 / `fillSHFromPacked` / `evalSHRGB` 与 BASE **同一份文本**（运行时从顶点模板切出）。
+ */
+function buildShCacheFragmentSource(): string {
+    const uniformBlock = sliceShaderSource(
+        "#if (!defined(SHPASS_PRE) && !defined(SHCACHE_FRAG)) || defined(SHPASS_TF)\nuniform bool u_colorTransformEnabled;",
+        "#endif // !SHPASS_PRE || SHPASS_TF（SH / colorTransform 相关声明到此为止）",
+    );
+    const shFunctions = sliceShaderSource(
+        "#if (!defined(SHPASS_PRE) && !defined(SHCACHE_FRAG)) || defined(SHPASS_TF)\nconst float SH_C0",
+        "#endif // !SHPASS_PRE || SHPASS_TF（SH 常量 + 两个辅助函数）",
+    );
+    // [SHCACHE 方案 B 修复 2026-09-30] 采样器声明**整段切出**，不再手写：
+    //   顶点模板里 `u_colorTransforms` / `u_colorTransformIndices` 是**无条件声明**（第 292-296 行，
+    //   在 `#if (!SHPASS_PRE && !SHCACHE_FRAG) || SHPASS_TF` 块**之外**）。此前这里手写了 3 个采样器、
+    //   漏了这两个 ⇒ 桌面 D3D11 第一遍片元着色器直接编译失败：
+    //   `ERROR: 0:288: 'u_colorTransformIndices' : undeclared identifier`，离屏 FPS 均值 = 0.0。
+    //   这 5 行现在与 BASE **逐字同源** ⇒ 结构上不可能再漏声明。
+    const samplerDecls = sliceShaderSource(
+        "uniform highp usampler2D u_texture;",
+        "uniform highp usampler2D u_colorTransformIndices;",
+    );
+    return (
+        /* glsl */ `#version 300 es
+precision highp float;
+precision highp int;
+
+` +
+        samplerDecls +
+        /* glsl */ `
+uniform mat4 view;
+uniform int u_splatCount;
+uniform int u_colorTexWidth;
+
+` +
+        uniformBlock +
+        "\n" +
+        shFunctions +
+        /* glsl */ `
+
+out vec4 fragColor;
+
+void main() {
+    ivec2 p = ivec2(gl_FragCoord.xy); // 像素中心 (x+0.5,y+0.5) 截断 ⇒ 整数格 (x,y)
+    int idx = p.y * u_colorTexWidth + p.x;
+    if (idx >= u_splatCount) { // 超出 N 的片元：不读点数据，写 0
+        fragColor = vec4(0.0);
+        return;
+    }
+
+    // ---- 以下与 BASE 顶点着色器逐行同源（cen/cov → dir → evalSHRGB → colorTransform）----
+    uint uidx = uint(idx);
+    uvec4 cen = texelFetch(u_texture, ivec2((uidx & 0x3ffu) << 1, uidx >> 10), 0);
+    uint transformIndex = texelFetch(u_transformIndices, ivec2(uidx & 0x3ffu, uidx >> 10), 0).x;
+    uvec4 cov = texelFetch(u_texture, ivec2(((uidx & 0x3ffu) << 1) | 1u, uidx >> 10), 0);
+
+    vec4 color = vec4(
+        (cov.w) & 0xffu,
+        (cov.w >> 8) & 0xffu,
+        (cov.w >> 16) & 0xffu,
+        (cov.w >> 24) & 0xffu
+    ) / 255.0;
+
+    if (u_useSH) {
+        int shIndex = idx;
+        uint degree = 3u;
+
+        if (u_bandIndex[0] >= 0) {
+            if (idx <= u_bandIndex[0]) {
+                degree = 0u;
+            }
+            else if (idx <= u_bandIndex[1]) {
+                degree = 1u;
+                shIndex = idx - (u_bandIndex[0] + 1);
+            }
+            else if (idx <= u_bandIndex[2]) {
+                degree = 2u;
+                shIndex = idx - (u_bandIndex[0] + 1);
+            }
+            else {
+                degree = 3u;
+                shIndex = idx - (u_bandIndex[0] + 1);
+            }
+        }
+
+        if (u_maxSHDegree >= 0 && degree > uint(u_maxSHDegree)) {
+            degree = uint(u_maxSHDegree);
+        }
+
+        if (degree > 0u || u_bandIndex[0] < 0) {
+            mat4 transform = mat4(
+                texelFetch(u_transforms, ivec2(0, transformIndex), 0),
+                texelFetch(u_transforms, ivec2(1, transformIndex), 0),
+                texelFetch(u_transforms, ivec2(2, transformIndex), 0),
+                texelFetch(u_transforms, ivec2(3, transformIndex), 0)
+            );
+            vec3 worldPosition = (transform * vec4(uintBitsToFloat(cen.xyz), 1.0)).xyz;
+            vec3 cameraPosition = inverse(view)[3].xyz;
+            vec3 dir = normalize(worldPosition - cameraPosition);
+
+            color.rgb = evalSHRGB(shIndex, degree, dir);
+        }
+    }
+
+    if (u_colorTransformEnabled) {
+        uint colorTransformIndex = texelFetch(u_colorTransformIndices, ivec2(uidx & 0x3ffu, uidx >> 10), 0).x;
+        mat4 colorTransform = mat4(
+            texelFetch(u_colorTransforms, ivec2(0, colorTransformIndex), 0),
+            texelFetch(u_colorTransforms, ivec2(1, colorTransformIndex), 0),
+            texelFetch(u_colorTransforms, ivec2(2, colorTransformIndex), 0),
+            texelFetch(u_colorTransforms, ivec2(3, colorTransformIndex), 0)
+        );
+        color = colorTransform * color;
+    }
+
+    fragColor = color;
+}
+`
+    );
+}
+
 /**
  * [SHPASS-PRE 阶段一] 第一遍（TF）program 的顶点源码：与主 pass **共用同一份 `vertexShaderSource`**，
  * 只注入 `SHPASS_TF` 选中那个极小的 `main()` ⇒ `evalSHRGB` / `fillSHFromPacked` 不重复实现，
@@ -141,7 +310,8 @@ uniform highp usampler2D u_colorTransformIndices;
 // [SHPASS-PRE 阶段一] 第二遍主 pass（SHPASS_PRE 且**非**第一遍 TF）既不采样 SH、也不做 colorTransform
 //   ⇒ 这一整段声明必须**整段排除**：否则会重演 §25 的「未使用 sampler 惩罚」
 //   （顶点着色器里多几个未使用的 sampler 就能让缺省路径掉 3×）。
-#if !defined(SHPASS_PRE) || defined(SHPASS_TF)
+// [SHCACHE] 方案 B 的主 pass 同样不采样 SH、也不做 colorTransform（颜色来自颜色纹理）⇒ 一并整段排除
+#if (!defined(SHPASS_PRE) && !defined(SHCACHE_FRAG)) || defined(SHPASS_TF)
 uniform bool u_colorTransformEnabled;
 uniform bool u_useSH;
 // [SHDEG 2026-09-29] 诊断门控：允许把 SH 的**阶数**统一压到 N（-1 = 不干预、历史行为）。
@@ -172,6 +342,11 @@ uniform ivec3 u_bandIndex;
 uniform mat4 projection, view;
 uniform vec2 focal;
 uniform vec2 viewport;
+// [SHCACHE 方案 B] 第一遍写出的"逐 splat 颜色"纹理（仅该臂声明；缺省与其他臂不受影响）
+#ifdef SHCACHE_FRAG
+uniform highp sampler2D u_colorTex;
+uniform int u_colorTexWidth;
+#endif
 
 uniform bool useDepthFade;
 uniform float depthFade;
@@ -184,7 +359,7 @@ uniform float u_footprintScale;
 
 // [SHPASS-PRE 阶段一] SH 常量与两个 SH 辅助函数：**缺省编译**与**第一遍 TF program** 需要；
 //   第二遍主 pass（SHPASS_PRE）已完全不需要 SH ⇒ 一并排除（函数体会引用上面那些 sampler）。
-#if !defined(SHPASS_PRE) || defined(SHPASS_TF)
+#if (!defined(SHPASS_PRE) && !defined(SHCACHE_FRAG)) || defined(SHPASS_TF)
 const float SH_C0 = 0.28209479177387814;
 const float SH_C1 = 0.4886025119029199;
 
@@ -468,10 +643,12 @@ void main () {
 //   实例属性由 TF buffer 以 interleaved 方式绑定（stride 16 B 或 8 B，divisor = 1）。
 in vec2 position; // 角点（逐顶点，无 divisor）
 in int index;     // 逐实例（divisor = 1）——cen/cov/selected 仍需按 splat 索引取
+#ifndef SHCACHE_FRAG
 #ifdef SHPASS_PRE_PACKF16
 in uvec2 a_colorPacked; // 实例属性：8 B/splat（2 × packHalf2x16）
 #else
 in vec4 a_color; // 实例属性：16 B/splat（float32，基准版本）
+#endif
 #endif
 
 out vec4 vColor;
@@ -531,8 +708,10 @@ void main () {
     vec2 majorAxis = min(sqrt(2.0 * lambda1) * u_footprintScale, u_maxSplatSize) * diagonalVector;
     vec2 minorAxis = min(sqrt(2.0 * lambda2) * u_footprintScale, u_maxSplatSize) * vec2(diagonalVector.y, -diagonalVector.x);
 
-    // 颜色来自第一遍（已含 SH 求值与 colorTransform，与原 L421 的终值一致）
-#ifdef SHPASS_PRE_PACKF16
+    // 颜色来源：[SHCACHE 方案 B] 按**原始 splat 索引** texelFetch 颜色纹理 / TF 实例属性 / 缺省
+#ifdef SHCACHE_FRAG
+    vColor = texelFetch(u_colorTex, ivec2(index % u_colorTexWidth, index / u_colorTexWidth), 0);
+#elif defined(SHPASS_PRE_PACKF16)
     vColor = vec4(unpackHalf2x16(a_colorPacked.x), unpackHalf2x16(a_colorPacked.y));
 #else
     vColor = a_color;
@@ -862,6 +1041,19 @@ class RenderProgram extends ShaderProgram {
     private _tfIndexAttr = -1;
     /** 第二遍主 pass 的实例颜色属性位置（`a_color` 或 `a_colorPacked`；-1 = 未启用/不存在）。 */
     private _colorAttr = -1;
+
+    // ---- [SHCACHE 方案 B] `?shcache=frag`：颜色纹理 + 离屏 FBO + 第一遍（片元）program ----
+    private _shCache: boolean = SHCACHE_ENABLED;
+    /** `&shcachefreeze=1`：第一遍只跑一次（固定相机下隔离主 pass 读取成本的诊断臂）。 */
+    private _shCacheFrozen = SHCACHE_FREEZE;
+    private _shCacheProduced = false;
+    private _colorTex: WebGLTexture | null = null;
+    private _colorFbo: WebGLFramebuffer | null = null;
+    private _shCacheProgram: WebGLProgram | null = null;
+    private _shCacheShaders: WebGLShader[] = [];
+    private _shCacheWidth = 0;
+    private _shCacheHeight = 0;
+    private _shCacheU: Record<string, WebGLUniformLocation | null> = {};
     // ---- [LAB 2026-09-26] 排序/相机变化诊断计数器（只为测量口径诊断，不影响渲染行为）----
     /** 每帧向 sort worker 发送 viewProj 的次数（= 渲染帧数） */
     private _labSortPosts = 0;
@@ -1135,6 +1327,91 @@ class RenderProgram extends ShaderProgram {
             indexAttribute = gl.getAttribLocation(this.program, "index");
             gl.enableVertexAttribArray(indexAttribute);
             gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffers[activeDepthBuffer]);
+
+            // ---- [SHCACHE 方案 B] 第一遍（片元）program + 颜色纹理/FBO 对象（`?shcache=frag`）----
+            //   纹理与 FBO 的**分配**在 `_render` 里按点数/尺寸变化触发（此处只创建对象与位置缓存）。
+            if (this._shCache) {
+                // [SHCACHE 方案 B 修复 2026-09-30] 组合冲突一律**硬失败**（静默画错比报错更危险）。
+                //   `?shcache=frag` 依赖一个前提：第一遍与主 pass 对**同一批纹理**的声明类型一致、且只有一套第一遍。
+                if (SHFMT_F16_ENABLED) {
+                    const log =
+                        "[shcache=frag] 与 shfmt=f16 组合不受支持：第一遍片元 program 走 packed-half 路径" +
+                        "（usampler2D + unpackHalf2x16），而主 pass 会按 sampler2D(RGBA16F) 采样同一批 SH 纹理" +
+                        " ⇒ 两遍类型不一致，颜色会**静默出错**。请两者只用其一。";
+                    console.error(log);
+                    throw new Error(log);
+                }
+                if (SHPASS_TF_REQUESTED) {
+                    const log =
+                        "[shcache=frag] 与 shpass=pre|produce|consume 组合不受支持：会出现两套第一遍" +
+                        "（TF 生产 + 片元生产）同时运行 ⇒ 计时被叠加、归因失效，且二者产物不同。" +
+                        "请两者只用其一。";
+                    console.error(log);
+                    throw new Error(log);
+                }
+                const vs = gl.createShader(gl.VERTEX_SHADER) as WebGLShader;
+                gl.shaderSource(vs, shCacheFullscreenVertexSource);
+                gl.compileShader(vs);
+                const fs = gl.createShader(gl.FRAGMENT_SHADER) as WebGLShader;
+                gl.shaderSource(fs, buildShCacheFragmentSource());
+                gl.compileShader(fs);
+                if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+                    const log = "第一遍顶点着色器编译失败：" + gl.getShaderInfoLog(vs);
+                    console.error("[shcache=frag] " + log);
+                    throw new Error("[shcache=frag] " + log);
+                }
+                if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+                    const log = "第一遍片元着色器编译失败：" + gl.getShaderInfoLog(fs);
+                    console.error("[shcache=frag] " + log);
+                    throw new Error("[shcache=frag] " + log);
+                }
+                const prog = gl.createProgram() as WebGLProgram;
+                gl.attachShader(prog, vs);
+                gl.attachShader(prog, fs);
+                gl.linkProgram(prog);
+                if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+                    const log = "第一遍 program 链接失败：" + gl.getProgramInfoLog(prog);
+                    console.error("[shcache=frag] " + log);
+                    throw new Error("[shcache=frag] " + log);
+                }
+                this._shCacheProgram = prog;
+                this._shCacheShaders = [vs, fs];
+                this._colorTex = gl.createTexture() as WebGLTexture;
+                this._colorFbo = gl.createFramebuffer() as WebGLFramebuffer;
+                gl.useProgram(prog);
+                // 采样器单元与主 pass 完全一致（0..7）⇒ pass 之间无需重绑纹理
+                const units: Array<[string, number]> = [
+                    ["u_texture", 0],
+                    ["u_transforms", 1],
+                    ["u_transformIndices", 2],
+                    ["u_colorTransforms", 3],
+                    ["u_colorTransformIndices", 4],
+                    ["u_sh_r", 5],
+                    ["u_sh_g", 6],
+                    ["u_sh_b", 7],
+                ];
+                for (const [name, unit] of units) {
+                    const loc = gl.getUniformLocation(prog, name);
+                    this._shCacheU[name] = loc;
+                    gl.uniform1i(loc, unit);
+                }
+                for (const name of [
+                    "view",
+                    "u_splatCount",
+                    "u_colorTexWidth",
+                    "u_useSH",
+                    "u_maxSHDegree",
+                    "u_shFixedCoord",
+                    "u_bandIndex",
+                    "u_colorTransformEnabled",
+                ]) {
+                    this._shCacheU[name] = gl.getUniformLocation(prog, name);
+                }
+                // 主 pass 的两个 uniform 位置（缓存，避免逐帧 getUniformLocation 影响计时）
+                this._shCacheU["colorTex"] = gl.getUniformLocation(this.program, "u_colorTex");
+                this._shCacheU["colorTexWidth"] = gl.getUniformLocation(this.program, "u_colorTexWidth");
+                gl.useProgram(this.program);
+            }
 
             // ---- [SHPASS-PRE 阶段一] 第一遍 TF program / TF 对象 / buffer（仅 `?shpass=pre` 且运行期支持 TF）----
             if (this._shPassPre) {
@@ -1538,6 +1815,117 @@ class RenderProgram extends ShaderProgram {
             // ---- [SHPASS-PRE 阶段一] 第一遍：TF pass（每 splat 一个顶点；POINTS + RASTERIZER_DISCARD）----
             //   输入：**已经排好序的** index 属性（逐顶点，divisor=0）⇒ 输出顺序 = 主 pass 实例顺序，天然对齐。
             //   输出：每 splat 一个颜色（float32 vec4 = 16 B，或 packHalf2x16 ×2 = 8 B）。
+            // ---- [SHCACHE 方案 B] 第一遍：片元 pass 把"逐 splat 颜色"写入 RGBA16F 颜色纹理 ----
+            if (this._shCache && this._shCacheProgram && this._colorTex && this._colorFbo) {
+                const count = this.renderData.vertexCount;
+                const w = 2048;
+                const h = Math.max(1, Math.ceil(count / w));
+                if (w !== this._shCacheWidth || h !== this._shCacheHeight) {
+                    // [SHCACHE 方案 B 修复 2 2026-09-30] **必须在分配/挂载 RGBA16F 之前启用扩展**：
+                    //   WebGL2 里 RGBA16F 是"可采样、但默认**不可渲染**"的尺寸格式；若 `EXT_color_buffer_float`
+                    //   尚未启用就把该纹理挂成颜色附件，`checkFramebufferStatus` 必得
+                    //   `FRAMEBUFFER_INCOMPLETE_ATTACHMENT(0x8CD6)`。桌面 D3D11 首次实测即如此：status=0x8cd6，
+                    //   而失败分支里**事后**查询扩展却=1 —— 因为扩展是在那里才被启用的，成了自相矛盾的自证。
+                    //   半精度亦可由 `EXT_color_buffer_half_float` 提供；两者皆无 ⇒ 明确失败，**不**静默降精度。
+                    const extFloat = gl.getExtension("EXT_color_buffer_float") !== null;
+                    const extHalf = gl.getExtension("EXT_color_buffer_half_float") !== null;
+                    if (!extFloat && !extHalf) {
+                        const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+                        const renderer = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : "(unknown)";
+                        throw new Error(
+                            "[shcache=frag] 本上下文不支持 RGBA16F 颜色附件（EXT_color_buffer_float 与 " +
+                                "EXT_color_buffer_half_float 均不可用）⇒ 停止该臂（不退回 RGBA8，避免颜色语义被改写）" +
+                                ` renderer=${renderer}`,
+                        );
+                    }
+                    // 只在点数/尺寸变化时分配（不逐帧重建）
+                    this._shCacheWidth = w;
+                    this._shCacheHeight = h;
+                    gl.bindTexture(gl.TEXTURE_2D, this._colorTex);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+                    const savedFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+                    gl.bindFramebuffer(gl.FRAMEBUFFER, this._colorFbo);
+                    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._colorTex, 0);
+                    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+                    gl.bindFramebuffer(gl.FRAMEBUFFER, savedFbo);
+                    if (status !== gl.FRAMEBUFFER_COMPLETE) {
+                        // 按约定：**不**退回会改变颜色语义的 RGBA8；报出真实状态与设备信息后停止该臂。
+                        //   注：此处 extF/extH 表示"**已成功启用**"（启用发生在挂载之前）⇒ 若仍不完整，
+                        //   那就是设备/驱动侧的 16F 附件限制，而非"扩展没启用"。
+                        const extF = extFloat ? 1 : 0;
+                        const extH = extHalf ? 1 : 0;
+                        const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+                        const renderer = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : "(unknown)";
+                        throw new Error(
+                            `[shcache=frag] RGBA16F 颜色附件 FBO 不完整 :: status=0x${status.toString(16)} ` +
+                                `fbo=${w}x${h} count=${count} EXT_color_buffer_float=${extF} ` +
+                                `EXT_color_buffer_half_float=${extH} renderer=${renderer}`,
+                        );
+                    }
+                    this._shCacheProduced = false; // 尺寸变化 ⇒ 下一帧重新生产
+                }
+                if (!(this._shCacheFrozen && this._shCacheProduced)) {
+                    const savedFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+                    gl.bindFramebuffer(gl.FRAMEBUFFER, this._colorFbo);
+                    gl.viewport(0, 0, this._shCacheWidth, this._shCacheHeight);
+                    const blendWas = gl.isEnabled(gl.BLEND);
+                    gl.disable(gl.BLEND);
+                    gl.useProgram(this._shCacheProgram);
+                    // [SHCACHE 方案 B 修复 3 2026-09-30] 第一遍必须**自己**把 SH 纹理绑到单元 5/6/7：
+                    //   本 pass 的 `u_sh_r/g/b` 是 `usampler2D`（读 packed RGBA32UI），而 `uploadSphericalHarmonics()`
+                    //   只在**数据变化**时绑定一次；此前主 pass 又把 RGBA16F 颜色纹理留在单元 5 ⇒ 从第 2 帧起，
+                    //   第一遍每帧采样都会触发 "Mismatch between texture format and sampler type" +
+                    //   `GL_INVALID_OPERATION`（桌面实测 124 次 ≈ 预热 20 + 计时 100 帧 ⇒ **每一帧的第一遍 draw 全废**，
+                    //   颜色缓存里是残留数据，而 `covered` 只反映几何/alpha ⇒ **看不出这个错**）。
+                    //   每帧 3 次幂等 `bindTexture`，开销可忽略。
+                    const shBands = this.renderData.sphericalHarmonics;
+                    const shActive = !!shBands && !this._noshRequested;
+                    if (shActive) {
+                        for (let c = 0; c < 3; c++) {
+                            gl.activeTexture(gl.TEXTURE5 + c);
+                            gl.bindTexture(gl.TEXTURE_2D, this._shTextures[c]);
+                        }
+                        gl.activeTexture(gl.TEXTURE0);
+                    }
+                    gl.uniformMatrix4fv(this._shCacheU.view ?? null, false, this._camera.data.viewMatrix.buffer);
+                    gl.uniform1i(this._shCacheU.u_splatCount ?? null, count);
+                    gl.uniform1i(this._shCacheU.u_colorTexWidth ?? null, this._shCacheWidth);
+                    gl.uniform1i(
+                        this._shCacheU.u_useSH ?? null,
+                        this.renderData.sphericalHarmonics && !this._noshRequested ? 1 : 0,
+                    );
+                    gl.uniform1i(this._shCacheU.u_maxSHDegree ?? null, this._maxSHDegree);
+                    gl.uniform1i(this._shCacheU.u_shFixedCoord ?? null, this._shFixedCoordProbe ? 1 : 0);
+                    gl.uniform1i(this._shCacheU.u_colorTransformEnabled ?? null, this._noctRequested ? 0 : 1);
+                    // [SHCACHE 方案 B 修复 2026-09-30] `u_bandIndex` 必须与主 pass **同一来源**
+                    //   （主 pass 在 `uploadSphericalHarmonics()` 里用 `sh.bandsIndices`）。
+                    //   此前这里漏设 ⇒ 默认 (0,0,0) 使 band 分支误判为"有分层"（`u_bandIndex[0] >= 0` 为真）
+                    //   ⇒ `shIndex` 全部偏移、degree 被压到 1 ⇒ 颜色必错，而且**不报任何错**（比编译失败更危险）。
+                    //   逐帧取用与主 pass 相同的数组 ⇒ 语义对齐。
+                    if (shBands) {
+                        gl.uniform3iv(this._shCacheU.u_bandIndex ?? null, shBands.bandsIndices);
+                    }
+                    gl.drawArrays(gl.TRIANGLES, 0, 3);
+                    if (blendWas) gl.enable(gl.BLEND);
+                    gl.bindFramebuffer(gl.FRAMEBUFFER, savedFbo);
+                    gl.viewport(0, 0, canvas.width, canvas.height);
+                    gl.useProgram(this.program);
+                    this._shCacheProduced = true;
+                }
+                // 主 pass 读取颜色：绑到**单元 8**（[SHCACHE 修复 3] 不能用 5/6/7 —— 那是第一遍
+                //   `usampler2D` 的 SH 单元，浮点颜色纹理留在那里会造成 sampler/格式不匹配）。
+                //   主 pass 的顶点侧采样器共 16 个单元可用 ⇒ 8 安全。
+                gl.activeTexture(gl.TEXTURE8);
+                gl.bindTexture(gl.TEXTURE_2D, this._colorTex);
+                gl.activeTexture(gl.TEXTURE0);
+                gl.uniform1i(this._shCacheU.colorTex ?? null, 8);
+                gl.uniform1i(this._shCacheU.colorTexWidth ?? null, this._shCacheWidth);
+            }
+
             // [SHPASS] 第一遍执行条件：pre/produce **每帧**；consume **只在首帧**（此后计时窗口内不再生产）
             const runTfPass =
                 this._shPassPre &&
@@ -1727,6 +2115,25 @@ class RenderProgram extends ShaderProgram {
             this._tfShaders = [];
             this._tfSplatCount = -1;
 
+            // ---- [SHCACHE 方案 B] 颜色纹理 / FBO / 第一遍 program 及其 shader 成对删除 ----
+            if (this._colorFbo) {
+                gl.deleteFramebuffer(this._colorFbo);
+                this._colorFbo = null;
+            }
+            if (this._colorTex) {
+                gl.deleteTexture(this._colorTex);
+                this._colorTex = null;
+            }
+            if (this._shCacheProgram) {
+                gl.deleteProgram(this._shCacheProgram);
+                this._shCacheProgram = null;
+            }
+            for (const shader of this._shCacheShaders) {
+                gl.deleteShader(shader);
+            }
+            this._shCacheShaders = [];
+            this._shCacheProduced = false;
+
             // [SHFMT 2026-09-29] `?shfmt=f16` 额外创建的 3 张 RGBA16F SH 纹理也必须成对删除：
             //   否则"每轮新建上下文"的用法（bench-case 的 iframe）会在 GPU 侧逐轮累积句柄。
             for (const texture of this._shTextures16) {
@@ -1864,6 +2271,11 @@ class RenderProgram extends ShaderProgram {
         if (SHPASS_PRE_ENABLED) {
             defines.push("#define SHPASS_PRE 1");
             if (SHPASS_PRE_PACKF16) defines.push("#define SHPASS_PRE_PACKF16 1");
+        }
+        // [SHCACHE 方案 B] 复用 SHPASS_PRE 分支的"逐顶点几何/协方差"主体，颜色来源由 SHCACHE_FRAG 分支
+        //   切换为 u_colorTex（按原始 splat 索引 texelFetch）⇒ 主 pass 不再取样 SH 纹理、不做 SH 求值。
+        if (SHCACHE_ENABLED) {
+            defines.push("#define SHPASS_PRE 1", "#define SHCACHE_FRAG 1");
         }
         if (defines.length === 0) return vertexShaderSource;
         return vertexShaderSource.replace("#version 300 es", "#version 300 es\n" + defines.join("\n") + "\n");

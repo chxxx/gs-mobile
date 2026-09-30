@@ -816,3 +816,34 @@ Mismatch between texture format and sampler type (signed/unsigned/float/shadow).
 
 - `?splatPx=` 此前**只有注释、没有任何 URL 解析** ⇒ 上轮 A2（`splatPx=64`）是 **no-op** ⇒ **撤回**"尾部/巨型 quad ≈0%"及由它推出的"片元面积项 ≈4–5%（两探针合并）"；片元/填充项量级改以 `res` 扫描为依据（≈20 ms/Mpx @ 基座视角）。
 - 本轮新增/接线：`?resscale=K`（**测帧分辨率与像素焦距一起 ×K**，保持同一 FOV；结果头 `res=`/`fx=` 同步自证）· `?splatPx=` 真正接到 `_maxSplatSize` 字段初始化 · 结果头新增 `resscale=` / `splatpx=` 自证字段（缺省 `1` / `1024` ⇒ 与历史结果逐字无差别）。
+### §30（2026-09-30）方案 B（`?shcache=frag`）首轮桌面失败归因：**四个真实缺陷 + 一个"判据本身的漏洞"**
+
+**症状**：`fix2-frag` 离屏 FPS 均值 **0.0**（`ok=0`）⇒ 先按"可能是平台问题"排查，结论是**不是**：全部是代码缺陷，且被逐个逼出（每个缺陷都让下一个暴露）。
+
+| # | 缺陷 | 症状（自证） | 根因 | 修法 |
+|---|---|---|---|---|
+| A | 第一遍片元着色器**漏声明 2 个采样器** | D3D11 编译日志：`ERROR: 0:288/290-293: 'u_colorTransforms'/'u_colorTransformIndices' : undeclared identifier`、`texelFetch : no matching overloaded function found` | 顶点模板里这**两行是无条件声明**（在 `#if (!SHPASS_PRE && !SHCACHE_FRAG) || SHPASS_TF` 块**之外**），而第一遍表头是**手写**的 3 个采样器 ⇒ 少写就漏 | 把该连续 5 行（`u_texture`/`u_transforms`/`u_transformIndices`/`u_colorTransforms`/`u_colorTransformIndices`）**整段从模板切出**（`sliceShaderSource`），手写表头只留 `view`/`u_splatCount`/`u_colorTexWidth` ⇒ 结构上不可能再漏 |
+| B | **RGBA16F 颜色附件 FBO 不完整** | `status=0x8cd6 (FRAMEBUFFER_INCOMPLETE_ATTACHMENT)`，**而同一行** `EXT_color_buffer_float=1`（自相矛盾） | WebGL2 里 RGBA16F **默认不可渲染**；`getExtension("EXT_color_buffer_float")` 被写在**失败分支**里 ⇒ 挂附件时扩展尚未启用 ⇒ 必然不完整；事后查询当然为 1 | 在**分配/挂载之前**启用（`EXT_color_buffer_float` 或 `EXT_color_buffer_half_float`）；两者皆无 ⇒ 明确抛错，不静默降精度 |
+| C | 第一遍**漏设 `u_bandIndex`**（静默） | 无任何报错 | 默认 `(0,0,0)` 使 band 分支误判为"有分层"（`u_bandIndex[0] >= 0` 为真）⇒ `shIndex` 整体偏移、`degree` 被压到 1 | 逐帧用与主 pass **同一来源**（`renderData.sphericalHarmonics.bandsIndices`）设置 |
+| D | **采样器单元冲突**（每帧 `GL_INVALID_OPERATION`） | `Mismatch between texture format and sampler type` **124 次**（≈ 预热 20 + 计时 100 ⇒ **每一帧的第一遍 draw 全废**） | 主 pass 把 RGBA16F 颜色纹理绑在**单元 5**，而第一遍的 `u_sh_r`（`usampler2D`，读 packed RGBA32UI）也在单元 5；`uploadSphericalHarmonics()` 只在**数据变化**时绑一次 ⇒ 第 2 帧起单元 5 上躺的是浮点纹理 | 主 pass 颜色纹理改绑**单元 8**（顶点侧单元数 ≥16）；第一遍每帧**自己**把 SH 纹理绑回 5/6/7 |
+
+**判据本身的漏洞（本轮最重要的方法论收获）**：缺陷 D 期间，`[result]` 仍报 `ok=1`、`covered=99.8346%`、`ff_covered=99.80597%`，**与 BASE 逐位相同**。原因：`covered` 来自 `readCoveragePct()`，判据是 `alpha > 0`，而**颜色（RGB）与 alpha 都来自主 pass 的几何/属性路径**，颜色缓存写坏（第一遍全废）**不影响** `covered`，甚至冻结成空缓存时也只影响 alpha 而不影响"几何是否覆盖"的统计口径。
+⇒ 纪律：**`covered` 一致只能表述为"几何/alpha 一致"，不得当作颜色正确性证据**；方案 B 的颜色正确性必须用逐像素比对（见下）。
+
+**修复后桌面自证**（Edge/D3D11 · RTX 4060 Laptop · 离屏 1600×1063 · 5×20 帧 · 三臂同会话，`tools/ch7_desktop_shader_verify.ps1 -SleepSec 40`）：
+
+| 臂 | 结果 | fps | covered / ff_covered | mismatch / GL 错误 / `[shcache=frag]` 错误 |
+|---|---|---|---|---|
+| BASE | `ok=1` | 471.1 | 99.8346 / 99.80597 | 0 / 0 / 0 |
+| **FRAG_FULL**（`shcache=frag`） | **`ok=1`** | **368.2** | **99.8346 / 99.80597（与 BASE 逐位相同）** | **0 / 0 / 0** |
+| FRAG_FROZEN（`shcache=frag&shcachefreeze=1`） | `ok=0`（存活探针"首帧为空"） | — | — | 0 / 0 / 0 |
+
+- 桌面 fps **不作为结论**（桌面 GPU 余量大：两轮同臂读数 620 / 368 差 1.7×，全在噪声里；且文档 §27 已确立"该问题只在移动端可测"）。
+- **FRAG_FROZEN 仍不可用**（已定位、未修）：`shcachefreeze` 在**首帧**就固化缓存，而首帧可能尚无有效绑定（`u_texture` 未绑 ⇒ `cov=0` ⇒ alpha=0）⇒ 这份**空缓存被永久冻结** ⇒ 画面全空、存活探针失败。修法：**延迟到"数据与 SH 都就绪"后再固化**。该臂只是"隔离主 pass 读取成本"的诊断臂，不影响 FRAG_FULL 结论。
+- 组合冲突一律硬失败（避免静默画错）：`shcache=frag` × `shfmt=f16`（两遍对同一批 SH 纹理声明类型不一致）、`shcache=frag` × `shpass=*`（会出现两套第一遍）⇒ 直接抛错并给出原因。
+
+**仍未完成的正确性闸门（下一步第一件事）**：逐像素比对 BASE vs FRAG_FULL（平均/最大误差、PSNR/SSIM）。现成资产：`tools/compare_images.py`（已有 PSNR + 可选 SSIM）· `bench-measure.ts` 的 `captureRGBA()`/`RgbaFrame`/`encodeCrop()+toDataURL()`（已在 sortlag 实验里跑通）。两条可行路径：
+1. **抓帧回传**：加一个 `?framedump=1`（在 run 末渲染一帧、`captureRGBA()`、按固定裁剪框编码 JPEG/PNG 回传）⇒ 用 `compare_images.py` 出 PSNR/SSIM；
+2. **在屏截图**：bench 本身有在屏模式 ⇒ 无头浏览器 `--screenshot` 两臂各截一张 ⇒ 同一脚本出 PSNR/SSIM。
+另外必须专测的四点（与动态相机/精度相关）：① 排序后颜色与**原始 splat 索引**的对应（本实现按 `idx = y·W + x`，主 pass 用 `ivec2(index % W, index / W)` ⇒ 已核对互逆）；② SH 求值的 >1 / 负值截断是否与 BASE 一致；③ 颜色缓存是 **RGBA16F** ⇒ 相对 BASE 的 `float32` varying 有半精度量化（能否接受由 PSNR 判定）；④ 混合顺序/`u_colorTransformEnabled` 语义（已与 L858 对齐）。
+

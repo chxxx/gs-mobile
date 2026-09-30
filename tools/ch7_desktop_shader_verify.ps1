@@ -4,6 +4,9 @@
 #     [shfmt=f16] = 我新加的显式失败自证（必须为 0）
 #     [result] ok=… fps=… = 该轮结果（f16 应变成 ok=1 且有 fps）
 #   用法：powershell -NoProfile -ExecutionPolicy Bypass -File _tmp_ch7probe\desktop_f16_fix_verify.ps1
+#   [2026-09-30] 增加可选参数：`-Tags "frag,fragfrz"` 只跑部分臂、`-SleepSec N` 调整每臂等待
+#     （桌面单臂约 5 s 就完成，75 s 是为真机/冷启动留的余量；只做本机冒烟时可收紧到 40 s）。
+param([string]$Tags = "base,frag,fragfrz", [int]$SleepSec = 75)
 $ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
 $exe = @(
@@ -27,7 +30,12 @@ $base = "http://127.0.0.1:5173/bench.html?mode=bench&res_mode=forced&res=1600x10
         "&proto=flux&rounds=1&benchmode=offscreen-paper-match&profile=garden&sync=batch&driver=msgchannel" +
         "&runs=5&warmup=20&tickevery=16&fences=3&report=/__ch7/report?name=shfmt2&rtok=ch7-2026-phase4&u="
 
-foreach ($case in @(@("base", ""), @("produce", "&shpass=produce"), @("consume", "&shpass=consume"))) {
+$wantTags = @($Tags.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+foreach ($case in @(@("base", ""), @("frag", "&shcache=frag"), @("fragfrz", "&shcache=frag&shcachefreeze=1"))) {
+    if ($wantTags.Count -gt 0 -and ($wantTags -notcontains $case[0])) {
+        Write-Output ("skip=" + $case[0])
+        continue
+    }
     $tag = "fix2-" + $case[0]
     $url = $base + $tag + $case[1]
     $err = Join-Path $root ("_tmp_ch7probe\fix2_" + $case[0] + ".err")
@@ -41,7 +49,7 @@ foreach ($case in @(@("base", ""), @("produce", "&shpass=produce"), @("consume",
                '--window-size=1600,1063 --window-position=0,0 --user-data-dir="' + $profile + '" "' + $url + '"'
     Write-Output ("run=" + $tag)
     $p = Start-Process -FilePath $exe -ArgumentList $argLine -PassThru -RedirectStandardError $err -RedirectStandardOutput $out
-    Start-Sleep -Seconds 75
+    Start-Sleep -Seconds $SleepSec
     if (-not $p.HasExited) { $p.Kill() }
     $c = @(Get-Content $err -ErrorAction SilentlyContinue)
     Write-Output ("--- " + $tag + " ---")
