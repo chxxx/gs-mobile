@@ -22,6 +22,9 @@ RAW = os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "thesis_project", "data", "ch7_measurements", "raw")
 )
 PREFIX = os.environ.get("S0_NAME", "stage0")
+# [阶段0] **环境过滤**：同一前缀下可能同时存在桌面与真机的报告（桌面只用于验证 harness，不进真机表）。
+#   用 `S0_GL=<子串>` 过滤 `gl_renderer=`（例如 `Adreno` / `D3D11`）；缺省不过滤。
+GL_FILTER = os.environ.get("S0_GL", "").strip()
 
 
 def read_reports():
@@ -48,8 +51,14 @@ def read_reports():
                 "cpu": grab(r"cpu_ms=([0-9.]+)"),
                 "cov": grab(r"covered=([0-9.]+)"),
                 "sw": grab(r"^sw_effective=([^\r\n]+)", str, "-"),
+                "gl": grab(r"gl_renderer=([^\r\n]+)", str, "-"),
+                "rounds": grab(r"^rounds=([0-9]+)", str, "-"),
             }
         )
+    if GL_FILTER:
+        before = len(rows)
+        rows = [r for r in rows if GL_FILTER.lower() in (r["gl"] or "").lower()]
+        print("GL filter =", GL_FILTER, "(保留 %d / %d)" % (len(rows), before))
     return rows
 
 
