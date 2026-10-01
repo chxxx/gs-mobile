@@ -4,6 +4,7 @@
 
     "target": "ES2019",                                  /* Set the JavaScript language version for emitted JavaScript and include compatible library declarations. */
     "module": "ESNext",                                  /* Specify what module code is generated. */
+    "moduleResolution": "bundler",                       /* [ch7 2026-10-01] vitest 是带 exports map 的 ESM 包；缺此项时 `tsc --noEmit` 会把 3 个 *.test.ts 报成 TS2792 Cannot find module 'vitest'（vitest 本身已安装且 `npm test` 全绿）。bundler 与 module=ESNext 相容，且与 vite 的实际解析一致。 */
     "lib": ["ESNext", "WebWorker", "DOM"],               /* Specify a set of bundled library declaration files that describe the target runtime environment. */
     "declaration": true,                                 /* Generate .d.ts files from TypeScript and JavaScript files in your project. */
     "outDir": "./dist",                                  /* Specify an output folder for all emitted files. */
