@@ -217,6 +217,58 @@ const NOCTX_REQUESTED: boolean = (() => {
 const NOTX_ENABLED: boolean = NOTX_REQUESTED && typeof WebGL2RenderingContext !== "undefined";
 const NOCTX_ENABLED: boolean = NOCTX_REQUESTED && typeof WebGL2RenderingContext !== "undefined";
 
+// =====================================================================================
+// [阶段3 2026-10-02] `?prep=1`（+ `&slot=1`，+ `&mrt=0` 回退）：
+//   把"方案 B 的颜色生产遍"推广为**完整的单 splat 预处理 pass**（类似 CUDA 3DGS 的 preprocess）：
+//   投影、2D 协方差/半轴、视锥+近平面剔除、三阶 SH 颜色**每个 splat 只算一次**，写进 MRT 目标；
+//   主 pass 的每个顶点**只做 2 次 texelFetch**（T0=几何、T1=颜色/alpha），不再自己算 EWA。
+//
+//   T0（RGBA32UI，每 splat 1 纹素）：x=floatBitsToUint(center.x)  y=floatBitsToUint(center.y)
+//                                   z=packHalf2x16(axis1)          w=packHalf2x16(axis2)
+//       ⚠ 中心用 **float32**（half 在 1600 宽下误差 ~0.8 像素）；半轴用 half（见 §需求：若闸门不过先改 float32 定位）
+//   T1（RGBA16F）：rgb=颜色（只截断下限 0，不做上限截断——上限由片元混合/输出阶段决定）a=不透明度
+//       被剔除的 splat ⇒ **T1.a = 0**（哨兵；主 pass 见此输出退化顶点）
+//
+//   `?prep=1`           ：T0/T1 的下标 = **splat 原始索引**（与方案 B 的颜色纹理同构）；主 pass 仍用 `index` 实例属性
+//   `?prep=1&slot=1`    ：O3 —— 预处理按**排序槽位**写（`slot = 片元线性编号`，`idx = sortedIdx[slot]`）；
+//                         主 pass 不再用实例属性，直接 `texelFetch(T0/T1, coord(gl_InstanceID))`
+//   `?prep=1&mrt=0`     ：混合格式 MRT 在个别设备不完整/明显变慢时的**回退臂**：两次单目标 pass
+//
+//   缺省（不传）⇒ 不注入任何 define、不建任何新资源 ⇒ 既有全部路径（含 shcache=frag）逐字不变。
+// =====================================================================================
+const PREP_PARAM: string = (() => {
+    try {
+        return new URLSearchParams(location.search).get("prep") ?? "";
+    } catch {
+        return "";
+    }
+})();
+/** 请求 `?prep=1`。 */
+const PREP_REQUESTED: boolean = PREP_PARAM === "1";
+const PREP_SLOT_REQUESTED: boolean = (() => {
+    try {
+        return new URLSearchParams(location.search).get("slot") === "1";
+    } catch {
+        return false;
+    }
+})();
+/** MRT 开关：缺省开启；`&mrt=0` ⇒ 两个单目标 pass（回退臂）。 */
+const PREP_MRT: boolean = (() => {
+    try {
+        return new URLSearchParams(location.search).get("mrt") !== "0";
+    } catch {
+        return true;
+    }
+})();
+/**
+ * 编译期判据：`prep` 复用方案 B 的生产遍资源与 SH 文本 ⇒ **必须以 `?shcache=frag` 为前提**。
+ * 满足前提才建资源/注入 define；不满足时自证失败（`arm=…+prep-requires-shcache`）。
+ */
+const PREP_ENABLED: boolean =
+    PREP_REQUESTED && SHCACHE_FRAG_REQUESTED && typeof WebGL2RenderingContext !== "undefined";
+const PREP_SLOT: boolean = PREP_ENABLED && PREP_SLOT_REQUESTED;
+
+
 
 /**
  * 从顶点着色器模板里**原样切出**一段：保证方案 B 与 BASE 的 SH 逻辑**逐字相同**（不靠"看起来一样"判断正确）。
@@ -269,6 +321,152 @@ function buildShCacheFragmentSourceForArm(): string {
     const defines = armDefines.concat(["#define LR_RANK_MAX 7", "#define LR_REST 45", "#define LR_UBO_VEC4 79"]).join("\n");
     return src.replace("#version 300 es", "#version 300 es\n" + defines);
 }
+
+/**
+ * [阶段3 2026-10-02] `?prep=1` 的**预处理 pass** 片元着色器：由方案 B 的生产遍源码**变换**得到。
+ *   为什么用变换而不是重写：需求要求"三阶 SH 颜色与现有生产遍**逐字相同**"；重写会引入分叉风险，
+ *   而方案 B 的生产遍已经按 `idx` 取 cen/cov、做三阶 SH、并处理 lr / notx / nocolortx / band / shprobe。
+ *   本函数只改三处：① 输出声明；② 槽位模式下 `idx` 的来源；③ 结尾把"写颜色"换成"投影 + 2D 协方差 + 剔除 + MRT 写出"。
+ *
+ *   单位约定：T0.x/y = **NDC** 中心（`vec2(pos2d)/pos2d.w`，与主 pass 的 `vCenter` 同量）；
+ *   T0.z/w = 半轴（**像素**量，与主 pass 的 `majorAxis/minorAxis` 同量）⇒ 主 pass 只需再 `/viewport`。
+ */
+function buildPrepFragmentSource(outMode: "mrt" | "t0" | "t1" = "mrt"): string {
+    const base = buildShCacheFragmentSource();
+    const withArmDefines = (src: string, extra: string[] = []): string => {
+        const defs: string[] = [];
+        if (NOTX_ENABLED) defs.push("#define NO_SPLAT_TRANSFORM 1");
+        if (NOCTX_ENABLED) defs.push("#define NO_COLOR_TRANSFORM 1");
+        if (LR_ENABLED) defs.push("#define LR_RANK_MAX 7", "#define LR_REST 45", "#define LR_UBO_VEC4 79");
+        defs.push(...extra);
+        return defs.length === 0 ? src : src.replace("#version 300 es", "#version 300 es\n" + defs.join("\n"));
+    };
+
+    // ① 输出声明：MRT 两条附件 + 需要的额外 uniform（projection/focal/viewport/尺寸/槽位表）
+    let outDecl = `uniform mat4 projection;
+uniform vec2 focal;
+uniform vec2 viewport;
+uniform int u_prepWidth;
+uniform int u_prepHeight;
+uniform float u_footprintScale;
+uniform float u_maxSplatSize;
+#ifdef PREP_SLOT
+uniform int u_prepSlotCount;
+uniform highp usampler2D u_sortedIdx;
+#endif
+// ⚠ 多个片元输出**必须显式写 location**（否则 D3D11/ANGLE 报
+//   "'outT0' : when EXT_blend_func_extended extension is not enabled, must explicitly specify all locations
+//    when using multiple fragment outputs"，实测踩到）
+// mrt=0 回退臂：**只声明一个输出**（未选中的那条改用同名**全局变量**接收写入 ⇒ 被驱动裁掉）。
+//   为什么不能"一个 FBO 挂一个附件 + 着色器仍有两个输出"：ANGLE 直接报
+//   glDrawArrays: Fragment shader output type does not match the bound framebuffer attachment type（实测）。
+//   （本段在模板串里：注释中**不能出现反引号** —— 这是第三次踩，已写进文件头规则）
+layout(location = 0) out uvec4 outT0;
+layout(location = 1) out vec4 outT1;`;
+    if (outMode === "t0") {
+        outDecl = outDecl.replace("layout(location = 0) out uvec4 outT0;\nlayout(location = 1) out vec4 outT1;", "layout(location = 0) out uvec4 outT0;\nvec4 outT1;");
+    } else if (outMode === "t1") {
+        outDecl = outDecl.replace("layout(location = 0) out uvec4 outT0;\nlayout(location = 1) out vec4 outT1;", "uvec4 outT0;\nlayout(location = 0) out vec4 outT1;");
+    }
+    let src = base.replace("out vec4 fragColor;", outDecl);
+
+    // ② 索引来源：槽位模式从排序表读；非槽位模式 = splat 原始索引（与方案 B 同构）
+    //    ⚠ 两种模式都必须把"越界早退"改成写哨兵：原实现写的是 `fragColor`，而本 pass 的输出已换成 MRT ✗
+    const sentinel = `        outT0 = uvec4(0u, 0u, 0u, 0u);
+        outT1 = vec4(0.0);
+        return;
+    }`;
+    const slotRead = `    int slot = p.y * u_prepWidth + p.x;
+#ifdef PREP_SLOT
+    if (slot >= u_prepSlotCount) { // 超出可见槽位 ⇒ 哨兵
+${sentinel}
+    int idx = int(texelFetch(u_sortedIdx, ivec2(slot & 0x7ff, slot >> 11), 0).x);
+#else
+    int idx = slot;
+#endif`;
+    src = src.replace("    int idx = p.y * u_colorTexWidth + p.x;", slotRead);
+    src = src.replace(
+        `    if (idx >= u_splatCount) { // 超出 N 的片元：不读点数据，写 0
+        fragColor = vec4(0.0);
+        return;
+    }`,
+        `    if (idx >= u_splatCount) { // 超出 N ⇒ 哨兵
+${sentinel}`,
+    );
+
+    // ③ 结尾：投影 → 2D 协方差 → 半轴 → 剔除 → MRT 写出（几何公式与主 pass 逐字同源）
+    //    注：`&mrt=0`（回退臂）**不需要改着色器** —— WebGL2/GL 允许"输出多于附件"，
+    //    未挂附件的那个 out 直接被丢弃 ⇒ 同一份源码跑两次单目标 pass 即可。
+    const geomTail = `
+#ifndef NO_SPLAT_TRANSFORM
+    uint prepTxIdx = texelFetch(u_transformIndices, ivec2(uint(idx) & 0x3ffu, uint(idx) >> 10), 0).x;
+    mat4 prepTransform = mat4(
+        texelFetch(u_transforms, ivec2(0, prepTxIdx), 0),
+        texelFetch(u_transforms, ivec2(1, prepTxIdx), 0),
+        texelFetch(u_transforms, ivec2(2, prepTxIdx), 0),
+        texelFetch(u_transforms, ivec2(3, prepTxIdx), 0)
+    );
+#else
+    mat4 prepTransform = u_splatTransform;
+#endif
+    mat4 prepViewT = view * prepTransform;
+    vec4 prepCam = prepViewT * vec4(uintBitsToFloat(cen.xyz), 1);
+    vec4 prepPos2d = projection * prepCam;
+
+    float prepClip = 1.2 * prepPos2d.w;
+    if (prepPos2d.z < -prepPos2d.w || prepPos2d.z > prepPos2d.w ||
+        prepPos2d.x < -prepClip || prepPos2d.x > prepClip ||
+        prepPos2d.y < -prepClip || prepPos2d.y > prepClip) {
+        outT0 = uvec4(0u, 0u, 0u, 0u);
+        outT1 = vec4(0.0); // 哨兵：视锥外
+        return;
+    }
+
+    vec2 pu1 = unpackHalf2x16(cov.x), pu2 = unpackHalf2x16(cov.y), pu3 = unpackHalf2x16(cov.z);
+    mat3 prepVrk = mat3(pu1.x, pu1.y, pu2.x, pu1.y, pu2.y, pu3.x, pu2.x, pu3.x, pu3.y);
+
+    mat3 prepJ = mat3(
+        focal.x / prepCam.z, 0., -(focal.x * prepCam.x) / (prepCam.z * prepCam.z),
+        0., -focal.y / prepCam.z, (focal.y * prepCam.y) / (prepCam.z * prepCam.z),
+        0., 0., 0.
+    );
+    mat3 prepT = transpose(mat3(prepViewT)) * prepJ;
+    mat3 prepCov2d = transpose(prepT) * prepVrk * prepT;
+    prepCov2d[0][0] += 0.3;
+    prepCov2d[1][1] += 0.3;
+
+    float prepMid = (prepCov2d[0][0] + prepCov2d[1][1]) / 2.0;
+    float prepRadius = length(vec2((prepCov2d[0][0] - prepCov2d[1][1]) / 2.0, prepCov2d[0][1]));
+    float prepL1 = prepMid + prepRadius;
+    float prepL2 = prepMid - prepRadius;
+    if (prepL2 < 0.0) { // 与主 pass 同一语义：直接不画
+        outT0 = uvec4(0u, 0u, 0u, 0u);
+        outT1 = vec4(0.0);
+        return;
+    }
+    vec2 prepDiag = normalize(vec2(prepCov2d[0][1], prepL1 - prepCov2d[0][0]));
+    vec2 prepAxis1 = min(sqrt(2.0 * prepL1) * u_footprintScale, u_maxSplatSize) * prepDiag;
+    vec2 prepAxis2 = min(sqrt(2.0 * prepL2) * u_footprintScale, u_maxSplatSize) * vec2(prepDiag.y, -prepDiag.x);
+
+    vec2 prepCenter = vec2(prepPos2d) / prepPos2d.w; // NDC（与主 pass 的 vCenter 同量）
+    outT0 = uvec4(
+        floatBitsToUint(prepCenter.x),
+        floatBitsToUint(prepCenter.y),
+        packHalf2x16(prepAxis1),
+        packHalf2x16(prepAxis2)
+    );
+    outT1 = vec4(max(color.rgb, vec3(0.0)), color.a); // 颜色只截断下限 0
+}
+`;
+    src = src.replace(
+        `    fragColor = color;
+}`,
+        geomTail,
+    );
+
+    return withArmDefines(src, PREP_SLOT ? ["#define PREP_SLOT 1"] : []);
+}
+
 
 /**
  * [阶段1 2026-09-30] 低秩臂注入的 GLSL：rank 纹理取样 + 共享基累加（`Y_k` 与 `evalSHRGB` 逐行同源）。
@@ -802,7 +1000,52 @@ vec3 evalSHRGB(int shIndex, uint degree, vec3 dir) {
 //   注意：本遍**不做**视锥与 lambda2 < 0 的提前 return —— 那两处只决定「画不画」，
 //   提前判定完整保留在第二遍主 pass（语义「整体一起画/一起丢」不变）。
 // =====================================================================================
-#ifdef SHPASS_TF
+#ifdef PREP_MAIN
+// [阶段3 2026-10-02] ?prep=1 的主 pass：**每顶点只做 2 次 texelFetch**（T0 几何 / T1 颜色+alpha），
+//   不再自己投影/算 EWA/SH —— 那些在预处理 pass 里每个 splat 只算了一次。
+//   PREP_SLOT（O3）：slot = gl_InstanceID，无需 index 实例属性；
+//   否则 slot = index（splat 原始索引，与方案 B 的颜色纹理同构）。
+//   ⚠ 本段在模板串里：注释中**不能出现反引号**（会提前终止字符串，实测踩过）
+in vec2 position; // 角点（逐顶点，无 divisor）
+#ifndef PREP_SLOT
+in int index;     // 逐实例（divisor = 1）：splat 原始索引
+#endif
+uniform highp usampler2D u_prepT0;
+uniform highp sampler2D u_prepT1;
+uniform int u_prepWidth;
+
+out vec4 vColor;
+out vec2 vPosition;
+out float vSize;
+out float vSelected;
+
+void main () {
+#ifdef PREP_SLOT
+    int slot = gl_InstanceID;
+#else
+    int slot = index;
+#endif
+    ivec2 pc = ivec2(slot % u_prepWidth, slot / u_prepWidth);
+    uvec4 t0 = texelFetch(u_prepT0, pc, 0);
+    vec4 t1 = texelFetch(u_prepT1, pc, 0);
+    if (t1.a == 0.0) { // 预处理写出的"剔除哨兵" ⇒ 输出退化顶点（与主 pass 的 return 语义一致）
+        gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+        vColor = vec4(0.0);
+        vPosition = position;
+        vSize = 0.0;
+        vSelected = 0.0;
+        return;
+    }
+    vec2 center = vec2(uintBitsToFloat(t0.x), uintBitsToFloat(t0.y)); // NDC
+    vec2 axis1 = unpackHalf2x16(t0.z);                                // 像素量
+    vec2 axis2 = unpackHalf2x16(t0.w);
+    gl_Position = vec4(center + position.x * axis1 / viewport + position.y * axis2 / viewport, 0.0, 1.0);
+    vColor = t1;
+    vPosition = position;
+    vSize = length(axis1);
+    vSelected = 1.0;
+}
+#elif defined(SHPASS_TF)
 in int index; // 逐顶点属性：本例一个顶点 = 一个 splat（属性缓冲与主 pass 的 instance 属性同源）
 #ifdef SHPASS_PRE_PACKF16
 flat out uvec2 tfColorPacked; // 8 B/splat（2 × packHalf2x16）
@@ -1382,6 +1625,18 @@ class RenderProgram extends ShaderProgram {
         // [阶段2 O1 notx/nocolortx] 后缀只写**实际生效**的：notx 还需运行期单对象自证通过。
         if (NOTX_ENABLED) arm += this._notxRuntimeOk ? "+notx" : "+notx-rejected";
         if (NOCTX_ENABLED) arm += "+nocolortx";
+        // [阶段3 2026-10-02] prep / slot / mrt=0：只写**实际生效**的
+        //   · 缺 `shcache=frag` 前提 ⇒ `+prep-requires-shcache`（该轮数据作废）
+        //   · 资源/程序没建成功 ⇒ `+prep-failed`
+        if (PREP_REQUESTED) {
+            if (!SHCACHE_FRAG_REQUESTED) arm += "+prep-requires-shcache";
+            else if (!this._prepReady) arm += "+prep-failed";
+            else {
+                arm += "+prep";
+                if (PREP_SLOT) arm += "+slot";
+                if (!PREP_MRT) arm += "+mrt0";
+            }
+        }
         const switches = [
             `shcache=${SHCACHE_FRAG_REQUESTED ? SHCACHE_PARAM : "-"}`,
             `lr=${LR_ENABLED ? 1 : 0}`,
@@ -1391,6 +1646,9 @@ class RenderProgram extends ShaderProgram {
             `noct=${this._noctRequested ? 1 : 0}`,
             `notx=${NOTX_ENABLED ? (this._notxRuntimeOk ? (NOTX_BAKE_REQUESTED ? "bake->uniform" : 1) : "rejected") : 0}`,
             `nocolortx=${NOCTX_ENABLED ? 1 : 0}`,
+            `prep=${PREP_REQUESTED ? (PREP_ENABLED ? (this._prepReady ? 1 : "failed") : "requires-shcache") : 0}`,
+            `slot=${PREP_SLOT ? 1 : 0}`,
+            `mrt=${PREP_ENABLED && this._prepReady ? (PREP_MRT ? 1 : 0) : "-"}`,
             `shdeg=${this._maxSHDegree}`,
             `shfmt=${this._shF16 ? (SHFMT_F16_INCR ? "f16_incr" : "f16") : "-"}`,
             `shprobe=${this._shFixedCoordProbe ? "fixedcoord" : "-"}`,
@@ -1405,6 +1663,30 @@ class RenderProgram extends ShaderProgram {
     private _notxRuntimeOk = false;
     private _notxChecked = false;
     private _colorTex: WebGLTexture | null = null;
+    // ---- [阶段3 2026-10-02] `?prep=1` / `&slot=1`（单 splat 预处理 pass + MRT + 槽位写入）----
+    /** 预处理 pass 是否真的建好了（arm 标签用它自证）。 */
+    private _prepReady = false;
+    private _prepProgram: WebGLProgram | null = null;
+    private _prepShaders: WebGLShader[] = [];
+    private _prepU: Record<string, WebGLUniformLocation | null> = {};
+    /** `&mrt=0` 回退臂的第二个程序（只写 T1）+ 它的 uniform 位置。 */
+    private _prepProgramB: WebGLProgram | null = null;
+    private _prepShadersB: WebGLShader[] = [];
+    private _prepUB: Record<string, WebGLUniformLocation | null> = {};
+    /** T0 = RGBA32UI（中心 float32 + 两个 half 半轴）；T1 = RGBA16F（rgb + alpha；a=0 = 剔除哨兵）。 */
+    private _prepT0: WebGLTexture | null = null;
+    private _prepT1: WebGLTexture | null = null;
+    /** MRT FBO（两附件）；`mrt=0` 回退臂用两个单附件 FBO。 */
+    private _prepFbo: WebGLFramebuffer | null = null;
+    private _prepFboT0: WebGLFramebuffer | null = null;
+    private _prepFboT1: WebGLFramebuffer | null = null;
+    /** O3：排序结果（splat 下标）上传成的 R32UI 纹理；预处理按槽位读它。 */
+    private _sortedIdxTex: WebGLTexture | null = null;
+    private _sortedIdxLen = -1;
+    private _prepW = 0;
+    private _prepH = 0;
+    /** 实际生效的 MRT 开关（若混合格式 MRT 在本设备不完整 ⇒ 自动退回两次单目标 pass）。 */
+    private _prepUseMrT: boolean = PREP_MRT;
     private _colorFbo: WebGLFramebuffer | null = null;
     private _shCacheProgram: WebGLProgram | null = null;
     private _shCacheShaders: WebGLShader[] = [];
@@ -1449,6 +1731,10 @@ class RenderProgram extends ShaderProgram {
         let u_projection: WebGLUniformLocation;
         let u_viewport: WebGLUniformLocation;
         let u_focal: WebGLUniformLocation;
+// [阶段3 2026-10-02] prep 主 pass 的三个 uniform（缺省路径下着色器里不存在 ⇒ 位置为 null ⇒ 写入 no-op）
+let u_prepT0: WebGLUniformLocation | null = null;
+let u_prepT1: WebGLUniformLocation | null = null;
+let u_prepWidth: WebGLUniformLocation | null = null;
         let u_view: WebGLUniformLocation;
         let u_texture: WebGLUniformLocation;
         let u_transforms: WebGLUniformLocation;
@@ -1616,6 +1902,10 @@ function setSplatTransformUniforms(
 
             u_focal = gl.getUniformLocation(this.program, "focal") as WebGLUniformLocation;
             gl.uniform2fv(u_focal, new Float32Array([this._camera.data.fx, this._camera.data.fy]));
+            // [阶段3 2026-10-02] prep 主 pass 的 uniform 位置（缺省路径下为 null ⇒ no-op）
+            u_prepT0 = gl.getUniformLocation(this.program, "u_prepT0") as WebGLUniformLocation | null;
+            u_prepT1 = gl.getUniformLocation(this.program, "u_prepT1") as WebGLUniformLocation | null;
+            u_prepWidth = gl.getUniformLocation(this.program, "u_prepWidth") as WebGLUniformLocation | null;
 
             u_view = gl.getUniformLocation(this.program, "view") as WebGLUniformLocation;
             gl.uniformMatrix4fv(u_view, false, this._camera.data.viewMatrix.buffer);
@@ -1717,7 +2007,10 @@ function setSplatTransformUniforms(
             }
             activeDepthBuffer = 0;
             indexAttribute = gl.getAttribLocation(this.program, "index");
-            gl.enableVertexAttribArray(indexAttribute);
+            // [阶段3 2026-10-02] `prep&slot=1` 下主 pass 不声明 `index` ⇒ 位置 = -1 ⇒ 不能 enable（会 GL_INVALID_VALUE）
+            if (indexAttribute >= 0) {
+                gl.enableVertexAttribArray(indexAttribute);
+            }
             gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffers[activeDepthBuffer]);
 
             // ---- [SHCACHE 方案 B] 第一遍（片元）program + 颜色纹理/FBO 对象（`?shcache=frag`）----
@@ -1802,6 +2095,105 @@ function setSplatTransformUniforms(
                 ]) {
                     this._shCacheU[name] = gl.getUniformLocation(prog, name);
                 }
+                // ---- [阶段3 2026-10-02] `?prep=1`：预处理 pass 的程序 + MRT 目标 + 槽位表 ----
+                if (PREP_ENABLED) {
+                    // 程序 1：MRT 版（两输出）或 `mrt=0` 的 T0 单输出版
+                    const mkPrep = (outMode: "mrt" | "t0" | "t1"): { prog: WebGLProgram; shaders: WebGLShader[] } => {
+                        const vs = gl.createShader(gl.VERTEX_SHADER) as WebGLShader;
+                        gl.shaderSource(vs, shCacheFullscreenVertexSource);
+                        gl.compileShader(vs);
+                        const fs = gl.createShader(gl.FRAGMENT_SHADER) as WebGLShader;
+                        gl.shaderSource(fs, buildPrepFragmentSource(outMode));
+                        gl.compileShader(fs);
+                        if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+                            const log = `预处理 FS 编译失败（${outMode}）：` + gl.getShaderInfoLog(fs);
+                            console.error("[prep=1] " + log);
+                            throw new Error("[prep=1] " + log);
+                        }
+                        const prog = gl.createProgram() as WebGLProgram;
+                        gl.attachShader(prog, vs);
+                        gl.attachShader(prog, fs);
+                        gl.linkProgram(prog);
+                        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+                            const log = `预处理 program 链接失败（${outMode}）：` + gl.getProgramInfoLog(prog);
+                            console.error("[prep=1] " + log);
+                            throw new Error("[prep=1] " + log);
+                        }
+                        return { prog, shaders: [vs, fs] };
+                    };
+                    const regPrepU = (prog: WebGLProgram, U: Record<string, WebGLUniformLocation | null>) => {
+                        gl.useProgram(prog);
+                        const punits: Array<[string, number]> = [
+                            ["u_texture", 0],
+                            ["u_transforms", 1],
+                            ["u_transformIndices", 2],
+                            ["u_colorTransforms", 3],
+                            ["u_colorTransformIndices", 4],
+                            ["u_sh_r", 5],
+                            ["u_sh_g", 6],
+                            ["u_sh_b", 7],
+                            ["u_sortedIdx", 12],
+                            ["u_lrRank", 9],
+                        ];
+                        for (const [name, unit] of punits) {
+                            gl.uniform1i(gl.getUniformLocation(prog, name), unit);
+                        }
+                        for (const name of [
+                            "view",
+                            "projection",
+                            "focal",
+                            "viewport",
+                            "u_splatCount",
+                            "u_colorTexWidth",
+                            "u_prepWidth",
+                            "u_prepHeight",
+                            "u_footprintScale",
+                            "u_maxSplatSize",
+                            "u_useSH",
+                            "u_maxSHDegree",
+                            "u_shFixedCoord",
+                            "u_bandIndex",
+                            "u_colorTransformEnabled",
+                            "u_splatTransform",
+                            "u_splatSelected",
+                            "u_lrW",
+                            "u_prepSlotCount",
+                        ]) {
+                            U[name] = gl.getUniformLocation(prog, name);
+                        }
+                        if (LR_ENABLED) {
+                            const bi = gl.getUniformBlockIndex(prog, "LrBasisBlock");
+                            if (bi !== gl.INVALID_INDEX) {
+                                gl.uniformBlockBinding(prog, bi, RenderProgram.LR_BASIS_BINDING);
+                            }
+                        }
+                    };
+                    const p1 = mkPrep(PREP_MRT ? "mrt" : "t0");
+                    this._prepProgram = p1.prog;
+                    this._prepShaders = p1.shaders;
+                    regPrepU(p1.prog, this._prepU);
+                    if (!PREP_MRT) {
+                        const p2 = mkPrep("t1");
+                        this._prepProgramB = p2.prog;
+                        this._prepShadersB = p2.shaders;
+                        regPrepU(p2.prog, this._prepUB);
+                    }
+                    this._prepT0 = gl.createTexture() as WebGLTexture;
+                    this._prepT1 = gl.createTexture() as WebGLTexture;
+                    this._prepFbo = gl.createFramebuffer() as WebGLFramebuffer;
+                    this._prepFboT0 = gl.createFramebuffer() as WebGLFramebuffer;
+                    this._prepFboT1 = gl.createFramebuffer() as WebGLFramebuffer;
+                    if (PREP_SLOT) this._sortedIdxTex = gl.createTexture() as WebGLTexture;
+                    this._prepReady = true;
+                    gl.useProgram(this.program);
+                    console.log(
+                        `[prep=1] 预处理 pass 就绪（slot=${PREP_SLOT ? 1 : 0} mrt=${PREP_MRT ? 1 : 0} lr=${LR_ENABLED ? 1 : 0}）`,
+                    );
+                }
+
+
+
+
                 // ---- [阶段1 2026-09-30] `lr=1`：低秩臂的资源（rank 纹理 + 共享基 UBO）----
                 if (LR_ENABLED) {
                     // 组合冲突：与 `shfmt=f16`（SH 纹理类型不同、且 lr 下不建 SH 纹理）或 TF 各臂同时用会语义混乱
@@ -2321,7 +2713,201 @@ function setSplatTransformUniforms(
                 //   纹理/数据尚未就绪（cov=0）"就会把空缓存永久冻住（§30 的 ok=0 即此因）。计数只在冻结臂
                 //   生效，不冻结时恒为 true ⇒ FRAG_FULL 路径逐字不变。
                 const produceNow = !this._shCacheFrozen || this._shCacheProduceCount++ < SHFREEZE_FRAMES;
-                if (produceNow) {
+                // ====================== [阶段3 2026-10-02] 预处理 pass（?prep=1）======================
+                if (PREP_ENABLED && this._prepReady && produceNow) {
+                    const pCount = this.renderData.vertexCount;
+                    const pw = 2048;
+                    const ph = Math.max(1, Math.ceil(pCount / pw));
+                    if (pw !== this._prepW || ph !== this._prepH) {
+                        const extFloat = gl.getExtension("EXT_color_buffer_float") !== null;
+                        const extHalf = gl.getExtension("EXT_color_buffer_half_float") !== null;
+                        if (!extFloat && !extHalf) {
+                            throw new Error(
+                                "[prep=1] 本上下文不支持 16F 颜色附件（EXT_color_buffer_float / half_float 均不可用）",
+                            );
+                        }
+                        // T0：RGBA32UI（整数附件，WebGL2 原生可渲染）：中心 float32 + 两个 half 半轴
+                        gl.bindTexture(gl.TEXTURE_2D, this._prepT0);
+                        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+                        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+                        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32UI, pw, ph, 0, gl.RGBA_INTEGER, gl.UNSIGNED_INT, null);
+                        // T1：RGBA16F（rgb=颜色，a=不透明度；a=0 = 剔除哨兵）
+                        gl.bindTexture(gl.TEXTURE_2D, this._prepT1);
+                        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+                        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+                        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, pw, ph, 0, gl.RGBA, gl.HALF_FLOAT, null);
+                        const prevFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+                        gl.bindFramebuffer(gl.FRAMEBUFFER, this._prepFbo);
+                        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._prepT0, 0);
+                        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, this._prepT1, 0);
+                        const st = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+                        if (st !== gl.FRAMEBUFFER_COMPLETE) {
+                            // 混合格式 MRT 在本设备不完整 ⇒ **显式失败**并指向回退臂（不做静默降级：
+                            //   半死的回退路径比明确报错更危险，且回退臂本身也要重建程序）
+                            const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+                            const msg =
+                                `[prep=1] MRT FBO 不完整 status=0x${st.toString(16)}（T0=RGBA32UI + T1=RGBA16F）` +
+                                ` ⇒ 请改用 ?prep=1&mrt=0（两个单目标 pass）` +
+                                ` renderer=${dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : "?"}`;
+                            console.error(msg);
+                            throw new Error(msg);
+                        }
+                        this._prepUseMrT = PREP_MRT;
+                        gl.bindFramebuffer(gl.FRAMEBUFFER, this._prepFboT0);
+                        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._prepT0, 0);
+                        gl.bindFramebuffer(gl.FRAMEBUFFER, this._prepFboT1);
+                        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._prepT1, 0);
+                        gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo);
+                        this._prepW = pw;
+                        this._prepH = ph;
+                    }
+                    // O3：排序结果（splat 下标）上传成 R32UI 纹理（2048 宽）
+                    if (PREP_SLOT && this._sortedIdxTex) {
+                        const si = this.depthIndex;
+                        const sw = 2048;
+                        const sh2 = Math.max(1, Math.ceil(si.length / sw));
+                        const padded = new Uint32Array(sw * sh2);
+                        padded.set(si);
+                        gl.bindTexture(gl.TEXTURE_2D, this._sortedIdxTex);
+                        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+                        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+                        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32UI, sw, sh2, 0, gl.RED_INTEGER, gl.UNSIGNED_INT, padded);
+                        this._sortedIdxLen = si.length;
+                        // ⚠ 必须把它**真绑到单元 12**：`regPrepU` 只设了 uniform 的单元号，
+                        //   漏了这一步 ⇒ 采样器读到未绑定的纹理 ⇒ idx 恒 0 ⇒ 所有槽位都是同一个 splat
+                        //   ⇒ 画面全空（实测 slot=1 第一版就是这么炸的）。
+                        gl.activeTexture(gl.TEXTURE12);
+                        gl.bindTexture(gl.TEXTURE_2D, this._sortedIdxTex);
+                        gl.activeTexture(gl.TEXTURE0);
+                    }
+                    const prevFbo2 = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+                    const blendWas2 = gl.isEnabled(gl.BLEND);
+                    gl.disable(gl.BLEND);
+                    gl.useProgram(this._prepProgram);
+                    // 本 pass 必须自己把 SH 纹理绑到 5/6/7（与方案 B 生产遍同一理由）
+                    const shBands2 = this.renderData.sphericalHarmonics;
+                    if (shBands2 && !this._noshRequested) {
+                        for (let c = 0; c < 3; c++) {
+                            gl.activeTexture(gl.TEXTURE5 + c);
+                            gl.bindTexture(gl.TEXTURE_2D, this._shTextures[c]);
+                        }
+                        gl.activeTexture(gl.TEXTURE0);
+                    }
+                    if (LR_ENABLED && this._lrRankTex && this._lrBasisUbo) {
+                        const lr = this.renderData.sphericalHarmonics?.lowRank;
+                        if (!lr) {
+                            throw new Error(
+                                "[prep=1&lr=1] 低秩载荷缺失 ⇒ `lr=1` 必须同时作用于加载阶段（加载器读页面 URL）",
+                            );
+                        }
+                        if (lr.rank > 7) {
+                            throw new Error(`[prep=1&lr=1] rank=${lr.rank} > LR_RANK_MAX=7：需提升常量后重编`);
+                        }
+                        if (this._lrRankW !== lr.width || this._lrRankH !== lr.height) {
+                            this._lrRankW = lr.width;
+                            this._lrRankH = lr.height;
+                            gl.bindTexture(gl.TEXTURE_2D, this._lrRankTex);
+                            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+                            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+                            gl.texImage2D(
+                                gl.TEXTURE_2D,
+                                0,
+                                gl.RGBA32UI,
+                                lr.width,
+                                lr.height,
+                                0,
+                                gl.RGBA_INTEGER,
+                                gl.UNSIGNED_INT,
+                                lr.packed,
+                            );
+                            const vec4Count = Math.ceil((lr.rank * lr.restCount) / 4);
+                            const ubo = new Float32Array(vec4Count * 4);
+                            for (let j = 0; j < lr.rank; j++) {
+                                for (let c = 0; c < 3; c++) {
+                                    for (let k = 1; k <= 15; k++) {
+                                        const src = j * lr.restCount + (k - 1) * 3 + c;
+                                        const dst = j * lr.restCount + c * 15 + (k - 1);
+                                        ubo[dst] = lr.basis[src] ?? 0;
+                                    }
+                                }
+                            }
+                            gl.bindBuffer(gl.UNIFORM_BUFFER, this._lrBasisUbo);
+                            gl.bufferData(gl.UNIFORM_BUFFER, ubo, gl.STATIC_DRAW);
+                            gl.bindBuffer(gl.UNIFORM_BUFFER, null);
+                        }
+                        gl.bindBufferBase(gl.UNIFORM_BUFFER, RenderProgram.LR_BASIS_BINDING, this._lrBasisUbo);
+                        gl.activeTexture(gl.TEXTURE9);
+                        gl.bindTexture(gl.TEXTURE_2D, this._lrRankTex);
+                        gl.activeTexture(gl.TEXTURE0);
+                        gl.uniform1i(this._prepU["u_lrW"] ?? null, lr.width);
+                    }
+                    // 统一的 uniform 设置（同一套名字要写给 1 或 2 个程序 ⇒ 抽成闭包，避免两份拷贝发散）
+                    //   ⚠ 闭包内 TS 不会保留对 this._camera/this.renderData 的收窄 ⇒ 先把用到的值取到局部
+                    const camData = this._camera.data;
+                    const txData = this.renderData.transforms;
+                    const setPrepU = (U: Record<string, WebGLUniformLocation | null>) => {
+                        gl.uniformMatrix4fv(U.view ?? null, false, camData.viewMatrix.buffer);
+                        gl.uniformMatrix4fv(U.projection ?? null, false, camData.projectionMatrix.buffer);
+                        gl.uniform2fv(U.focal ?? null, new Float32Array([camData.fx, camData.fy]));
+                        gl.uniform2fv(U.viewport ?? null, new Float32Array([canvas.width, canvas.height]));
+                        gl.uniform1i(U.u_prepWidth ?? null, pw);
+                        gl.uniform1i(U.u_prepHeight ?? null, ph);
+                        gl.uniform1i(U.u_colorTexWidth ?? null, pw); // 非槽位模式的 idx 计算仍用它
+                        gl.uniform1f(U.u_footprintScale ?? null, this._footprintScale);
+                        gl.uniform1f(U.u_maxSplatSize ?? null, this.maxSplatSize);
+                        gl.uniform1i(U.u_splatCount ?? null, pCount);
+                        gl.uniform1i(U.u_useSH ?? null, shBands2 && !this._noshRequested ? 1 : 0);
+                        gl.uniform1i(U.u_maxSHDegree ?? null, this._maxSHDegree);
+                        gl.uniform1i(U.u_shFixedCoord ?? null, this._shFixedCoordProbe ? 1 : 0);
+                        gl.uniform1i(U.u_colorTransformEnabled ?? null, this._noctRequested ? 0 : 1);
+                        if (shBands2) {
+                            gl.uniform3iv(U.u_bandIndex ?? null, shBands2.bandsIndices);
+                        }
+                        if (NOTX_ENABLED && this._notxRuntimeOk) {
+                            setSplatTransformUniforms(
+                                gl,
+                                U.u_splatTransform ?? null,
+                                U.u_splatSelected ?? null,
+                                txData,
+                            );
+                        }
+                        if (PREP_SLOT) {
+                            gl.uniform1i(U.u_prepSlotCount ?? null, this.depthIndex.length);
+                        }
+                    };
+                    setPrepU(this._prepU);
+                    gl.viewport(0, 0, pw, ph);
+                    if (this._prepUseMrT) {
+                        gl.bindFramebuffer(gl.FRAMEBUFFER, this._prepFbo);
+                        gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+                        gl.drawArrays(gl.TRIANGLES, 0, 3);
+                    } else {
+                        // `mrt=0`：两个**单输出**程序各画一次（见 buildPrepFragmentSource 的 outMode）
+                        gl.bindFramebuffer(gl.FRAMEBUFFER, this._prepFboT0);
+                        gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+                        gl.drawArrays(gl.TRIANGLES, 0, 3);
+                        if (this._prepProgramB) {
+                            gl.useProgram(this._prepProgramB);
+                            setPrepU(this._prepUB);
+                            gl.bindFramebuffer(gl.FRAMEBUFFER, this._prepFboT1);
+                            gl.drawArrays(gl.TRIANGLES, 0, 3);
+                        }
+                    }
+                    if (blendWas2) gl.enable(gl.BLEND);
+                    gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo2);
+                    gl.viewport(0, 0, canvas.width, canvas.height);
+                    gl.useProgram(this.program);
+                }
+                // ======================================================================================
+                if (!PREP_ENABLED && produceNow) {
                     const savedFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
                     gl.bindFramebuffer(gl.FRAMEBUFFER, this._colorFbo);
                     gl.viewport(0, 0, this._shCacheWidth, this._shCacheHeight);
@@ -2445,6 +3031,17 @@ function setSplatTransformUniforms(
                 gl.activeTexture(gl.TEXTURE0);
                 gl.uniform1i(this._shCacheU.colorTex ?? null, 8);
                 gl.uniform1i(this._shCacheU.colorTexWidth ?? null, this._shCacheWidth);
+                // [阶段3 2026-10-02] `?prep=1`：主 pass 读 T0（几何）/T1（颜色+alpha），绑到单元 10/11
+                if (PREP_ENABLED && this._prepReady) {
+                    gl.activeTexture(gl.TEXTURE10);
+                    gl.bindTexture(gl.TEXTURE_2D, this._prepT0);
+                    gl.activeTexture(gl.TEXTURE11);
+                    gl.bindTexture(gl.TEXTURE_2D, this._prepT1);
+                    gl.activeTexture(gl.TEXTURE0);
+                    gl.uniform1i(u_prepT0 ?? null, 10);
+                    gl.uniform1i(u_prepT1 ?? null, 11);
+                    gl.uniform1i(u_prepWidth ?? null, this._prepW);
+                }
             }
 
             // [SHPASS] 第一遍执行条件：pre/produce **每帧**；consume **只在首帧**（此后计时窗口内不再生产）
@@ -2554,8 +3151,11 @@ function setSplatTransformUniforms(
             gl.vertexAttribPointer(positionAttribute, 2, gl.FLOAT, false, 0, 0);
 
             gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffers[activeDepthBuffer]);
-            gl.vertexAttribIPointer(indexAttribute, 1, gl.INT, 0, 0);
-            gl.vertexAttribDivisor(indexAttribute, 1);
+            // [阶段3 2026-10-02] `prep&slot=1`：主 pass 用 gl_InstanceID 取槽位 ⇒ `index` 属性不存在（位置 -1）
+            if (indexAttribute >= 0) {
+                gl.vertexAttribIPointer(indexAttribute, 1, gl.INT, 0, 0);
+                gl.vertexAttribDivisor(indexAttribute, 1);
+            }
 
             // ---- [SHPASS-PRE 阶段一] 第二遍：TF 输出绑为**实例属性**（divisor=1，interleaved，stride 16/8 B）----
             if (this._shPassPre && this._colorAttr >= 0 && this._tfBuffer) {
@@ -2806,6 +3406,12 @@ function setSplatTransformUniforms(
         //   切换为 u_colorTex（按原始 splat 索引 texelFetch）⇒ 主 pass 不再取样 SH 纹理、不做 SH 求值。
         if (SHCACHE_ENABLED) {
             defines.push("#define SHPASS_PRE 1", "#define SHCACHE_FRAG 1");
+        }
+        // [阶段3 2026-10-02] `?prep=1`：主 pass 走 PREP_MAIN 分支（模板里它排在 SHPASS_TF 之前 ⇒ 优先命中）。
+        //   `&slot=1` 再加 PREP_SLOT ⇒ 主 pass 用 gl_InstanceID、不声明 index 实例属性。
+        if (PREP_ENABLED) {
+            defines.push("#define PREP_MAIN 1");
+            if (PREP_SLOT) defines.push("#define PREP_SLOT 1");
         }
         // [阶段2 O1 2026-10-01] notx/nocolortx：同样"只在请求时才编译进"，缺省不注入 ⇒ 缺省源码逐字不变。
         if (NOTX_ENABLED) defines.push("#define NO_SPLAT_TRANSFORM 1");
