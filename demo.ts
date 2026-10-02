@@ -385,7 +385,9 @@ function hideProgress() {
     progressContainer.hidden = true;
 }
 
-const SPLAT_COUNT_RES_THRESHOLD = 500000; // flux-gs / MEGS-2 style split
+// [2026-10-02] 原值 500000（flux-gs / MEGS-2 风格的分点数策略）**默认不再使用**：
+//   用户明确要求"不要因为点数多就降渲染质量"。现在只有显式 `?nthresh=<count>` 才启用该策略。
+//   （常量保留在此仅作记录，避免有人再去别处找不到这个 500k 的出处。）
 
 /** Decide the render pixelRatio (= canvas CSS-size multiplier). */
 function resolutionPolicyPixelRatio(vertexCount: number): { pixelRatio: number; reason: string } {
@@ -402,8 +404,10 @@ function resolutionPolicyPixelRatio(vertexCount: number): { pixelRatio: number; 
     // 2) Splat-count resolution policy, mirroring flux-gs / MEGS-2:
     //      splats > threshold  -> render at 1x CSS resolution (canvas = CSS px)
     //      splats <= threshold -> render at physical (devicePixelRatio) resolution
-    //    Threshold overridable: ?nthresh=<count>
-    let threshold = SPLAT_COUNT_RES_THRESHOLD;
+    //    [2026-10-02 用户要求] **默认关闭**：不再因为"点数多"自动降分辨率（那会让画面明显变糊）。
+    //    现在只有显式给 `?nthresh=<count>` 时才启用这条策略（做 flux 对齐测量时再用）。
+    //    想强制某个分辨率：`?dpr=<n>`（上一段的手动覆盖，优先级更高）。
+    let threshold = Infinity;
     try {
         const t = parseFloat(new URLSearchParams(location.search).get("nthresh") || "");
         if (Number.isFinite(t) && t > 0) threshold = t;
@@ -412,11 +416,11 @@ function resolutionPolicyPixelRatio(vertexCount: number): { pixelRatio: number; 
     }
 
     if (vertexCount > threshold) {
-        return { pixelRatio: 1, reason: `splat-count policy: ${vertexCount} > ${threshold} -> 1x CSS` };
+        return { pixelRatio: 1, reason: `splat-count policy (?nthresh=${threshold}): ${vertexCount} > ${threshold} -> 1x CSS` };
     }
     return {
         pixelRatio: window.devicePixelRatio || 1,
-        reason: `splat-count policy: ${vertexCount} <= ${threshold} -> physical DPR`,
+        reason: threshold === Infinity ? "default: physical DPR (splat-count policy OFF)" : `splat-count policy: ${vertexCount} <= ${threshold} -> physical DPR`,
     };
 }
 

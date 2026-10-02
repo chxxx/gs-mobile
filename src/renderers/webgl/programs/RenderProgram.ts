@@ -268,6 +268,33 @@ const PREP_ENABLED: boolean =
     PREP_REQUESTED && SHCACHE_FRAG_REQUESTED && typeof WebGL2RenderingContext !== "undefined";
 const PREP_SLOT: boolean = PREP_ENABLED && PREP_SLOT_REQUESTED;
 
+/**
+ * [阶段3 DIAG 2026-10-02] `?armdbg=1`：一次性打印**本程序活跃属性**的名称/位置/enabled/绑定缓冲/divisor，
+ *   外加 `gl.getError()`（会清标志，故只在诊断时开）。用于定位"只出现在某条臂上的 draw 失败"，
+ *   例如 demo 页 `shcache=frag` 报的 `INVALID_OPERATION: drawArrays: no buffer is bound to enabled attribute`。
+ *   缺省关闭 ⇒ 正常路径零影响。
+ */
+const ARM_DBG: boolean = (() => {
+    try {
+        return new URLSearchParams(location.search).get("armdbg") === "1";
+    } catch {
+        return false;
+    }
+})();
+
+/**
+ * [阶段3 DIAG 2026-10-02] `?prepdbg=1`：槽位臂的**一次性自证探针**（前 3 帧，含 readPixels 回读 +
+ *   各采样单元纹理身份 + `gl.getError()`）。它本身有读数开销 ⇒ **必须缺省关闭**，只在定位问题时开；
+ *   正式测量（O2/O3）一律不带该参数。
+ */
+const PREP_DBG: boolean = (() => {
+    try {
+        return new URLSearchParams(location.search).get("prepdbg") === "1";
+    } catch {
+        return false;
+    }
+})();
+
 
 
 /**
@@ -352,7 +379,10 @@ uniform float u_footprintScale;
 uniform float u_maxSplatSize;
 #ifdef PREP_SLOT
 uniform int u_prepSlotCount;
-uniform highp usampler2D u_sortedIdx;
+// [阶段3 修复 2026-10-02] 排序表用 **R32F + sampler2D**（不是 R32UI/usampler2D）：
+//   splat 下标 ≤ 610000 < 2^24 ⇒ float32 精确表示（零精度损失）；好处是躲开"整数采样器 texelFetch
+//   在个别驱动/绑定状态下恒返回常量"的坑（实测 usampler2D 版本所有槽位都取到同一个 splat ⇒ 画面全空）。
+uniform highp sampler2D u_sortedIdx;
 #endif
 // ⚠ 多个片元输出**必须显式写 location**（否则 D3D11/ANGLE 报
 //   "'outT0' : when EXT_blend_func_extended extension is not enabled, must explicitly specify all locations
@@ -380,7 +410,7 @@ layout(location = 1) out vec4 outT1;`;
 #ifdef PREP_SLOT
     if (slot >= u_prepSlotCount) { // 超出可见槽位 ⇒ 哨兵
 ${sentinel}
-    int idx = int(texelFetch(u_sortedIdx, ivec2(slot & 0x7ff, slot >> 11), 0).x);
+    int idx = int(texelFetch(u_sortedIdx, ivec2(slot & 0x7ff, slot >> 11), 0).x + 0.5);
 #else
     int idx = slot;
 #endif`;
@@ -1043,7 +1073,15 @@ void main () {
     vColor = t1;
     vPosition = position;
     vSize = length(axis1);
-    vSelected = 1.0;
+    // ⚠ vSelected 必须与主 pass 的语义一致，**不能恒置 1**：
+    //   主 FS 里 vSelected >= 0.5 会切到"选中描边"分支（outlineThreshold = -4 + outlineThickness/vSize，
+    //   默认 outlineThickness = 10）⇒ 恒置 1 会让**每个 splat 都被画上描边环**（移动端实测"看起来不对"）。
+    //   主 pass 的 selected 来自 splat 数据 (cen.w >> 24) & 0xff（notx 下为 u_splatSelected uniform），
+    //   正常数据集恒 0；本 pass 的 T0/T1 没有空余位携带该标志位 ⇒ 恒 0 =
+    //   "预处理臂不支持 selected 描边高亮"，与常规渲染逐像素一致。
+    //   ⚠⚠ 本段在模板串（backtick 串）里：注释中**绝不能出现 backtick 字符**，否则模板串提前终止、
+    //      esbuild 报 'Expected ";" but found "vSelected"'，**全部页面一起打不开**（2026-10-02 第 4 次踩到）。
+    vSelected = 0.0;
 }
 #elif defined(SHPASS_TF)
 in int index; // 逐顶点属性：本例一个顶点 = 一个 splat（属性缓冲与主 pass 的 instance 属性同源）
@@ -1687,6 +1725,10 @@ class RenderProgram extends ShaderProgram {
     private _prepH = 0;
     /** 实际生效的 MRT 开关（若混合格式 MRT 在本设备不完整 ⇒ 自动退回两次单目标 pass）。 */
     private _prepUseMrT: boolean = PREP_MRT;
+    /** [阶段3 O3-DEBUG 2026-10-02] 槽位臂自证探针的已打印帧数（只在前 3 帧、只在 slot=1 时） */
+    private _prepDbgFrames = 0;
+    /** [阶段3 DIAG 2026-10-02] `?armdbg=1` 的已打印帧数（只前 2 帧） */
+    private _armDbgFrames = 0;
     private _colorFbo: WebGLFramebuffer | null = null;
     private _shCacheProgram: WebGLProgram | null = null;
     private _shCacheShaders: WebGLShader[] = [];
@@ -2158,6 +2200,12 @@ function setSplatTransformUniforms(
                             "u_splatSelected",
                             "u_lrW",
                             "u_prepSlotCount",
+                            // [阶段3 O3 修复 2026-10-02] `u_sortedIdx` **必须也在记录表里**：
+                            //   漏了它 ⇒ `U.u_sortedIdx` 恒 undefined ⇒ 每帧重设单元号时永远走 ?? null ⇒
+                            //   采样器停在未绑定单元 ⇒ texelFetch 恒 0 ⇒ 所有槽位都取 idx=0 ⇒ 全画同一个
+                            //   splat ⇒ **画面全空但零报错**（探针实测：[prep-dbg] U.sortedIdx=NULL +
+                            //   T0.cx[0..3] 四值相同）。
+                            "u_sortedIdx",
                         ]) {
                             U[name] = gl.getUniformLocation(prog, name);
                         }
@@ -2682,12 +2730,22 @@ function setSplatTransformUniforms(
                     // 只在点数/尺寸变化时分配（不逐帧重建）
                     this._shCacheWidth = w;
                     this._shCacheHeight = h;
+                    // [修复 2026-10-02] **必须先 activeTexture(8) 再 bind**：
+                    //   原来直接 `bindTexture` 会把 RGBA16F 颜色纹理绑到"当前活动单元"（通常是 0）⇒
+                    //   **覆盖 unit 0 上的 splat 纹理（RGBA32UI）** ⇒ 此后任何 `usampler2D u_texture` 取样
+                    //   都会触发 `GL_INVALID_OPERATION: glDrawArrays: Mismatch between texture format and
+                    //   sampler type` ⇒ **整个 draw 被 GL 丢弃**。实测两个症状同源：
+                    //     · 交互 demo 页 `?shcache=frag` 黑屏；
+                    //     · 预处理 pass（O2/O3）读到的 splat 数据恒 0 ⇒ 所有槽位都是哨兵。
+                    //   （两者都只在"颜色纹理刚分配/重建"的那些帧出现，所以此前时好时坏、极难定位。）
+                    gl.activeTexture(gl.TEXTURE8);
                     gl.bindTexture(gl.TEXTURE_2D, this._colorTex);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
                     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+                    gl.activeTexture(gl.TEXTURE0); // [修复 2026-10-02] 复原单元约定（见上面的 activeTexture(8) 说明）
                     const savedFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
                     gl.bindFramebuffer(gl.FRAMEBUFFER, this._colorFbo);
                     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._colorTex, 0);
@@ -2770,26 +2828,35 @@ function setSplatTransformUniforms(
                         const si = this.depthIndex;
                         const sw = 2048;
                         const sh2 = Math.max(1, Math.ceil(si.length / sw));
-                        const padded = new Uint32Array(sw * sh2);
-                        padded.set(si);
+                        const padded = new Float32Array(sw * sh2);
+                        padded.set(si); // Uint32Array → Float32Array（逐元素转换；下标 < 2^24 ⇒ 精确）
+                        // [阶段3 修复 2026-10-02] **先 activeTexture(12) 再 bind**：
+                        //   原来这里直接 bind，会把它绑到"当前活动单元"（实测是 0 与 4）⇒
+                        //   unit 0 上的 splat 纹理（RGBA32UI）被 R32F 排序表覆盖 ⇒ 预处理 FS 的
+                        //   `u_texture`(usampler2D) 读到 float 纹理 ⇒ `Mismatch between texture format and
+                        //   sampler type` ⇒ **预处理 draw 被 GL 丢弃**（T0 全 0、O3 画面全空）。
+                        //   单元身份自证（[prep-bind#3]）就是这么抓到的：u0=sortIdx ✗。
+                        gl.activeTexture(gl.TEXTURE12);
                         gl.bindTexture(gl.TEXTURE_2D, this._sortedIdxTex);
                         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
                         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
                         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
                         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-                        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32UI, sw, sh2, 0, gl.RED_INTEGER, gl.UNSIGNED_INT, padded);
+                        // [阶段3 修复 2026-10-02] R32F（不是 R32UI）：见预处理 FS 里的说明
+                        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, sw, sh2, 0, gl.RED, gl.FLOAT, padded);
                         this._sortedIdxLen = si.length;
-                        // ⚠ 必须把它**真绑到单元 12**：`regPrepU` 只设了 uniform 的单元号，
-                        //   漏了这一步 ⇒ 采样器读到未绑定的纹理 ⇒ idx 恒 0 ⇒ 所有槽位都是同一个 splat
-                        //   ⇒ 画面全空（实测 slot=1 第一版就是这么炸的）。
-                        gl.activeTexture(gl.TEXTURE12);
-                        gl.bindTexture(gl.TEXTURE_2D, this._sortedIdxTex);
                         gl.activeTexture(gl.TEXTURE0);
                     }
                     const prevFbo2 = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
                     const blendWas2 = gl.isEnabled(gl.BLEND);
                     gl.disable(gl.BLEND);
                     gl.useProgram(this._prepProgram);
+                    // [阶段3 修复 2026-10-02] 预处理 pass **自己**把 splat 纹理绑回 unit 0：
+                    //   `u_texture`(usampler2D) 必须读到 RGBA32UI 的 splat 纹理；别处任何"未指定活动单元的
+                    //   bindTexture"都可能污染 unit 0（实测被 R32F 排序表覆盖 ⇒ 整帧 draw 被 GL 丢弃、
+                    //   T0 全 0 ⇒ O3 画面全空）。显式绑定后不再依赖别处遗留状态。
+                    gl.activeTexture(gl.TEXTURE0);
+                    gl.bindTexture(gl.TEXTURE_2D, this.splatTexture);
                     // 本 pass 必须自己把 SH 纹理绑到 5/6/7（与方案 B 生产遍同一理由）
                     const shBands2 = this.renderData.sphericalHarmonics;
                     if (shBands2 && !this._noshRequested) {
@@ -2881,6 +2948,9 @@ function setSplatTransformUniforms(
                         }
                         if (PREP_SLOT) {
                             gl.uniform1i(U.u_prepSlotCount ?? null, this.depthIndex.length);
+                            // [阶段3 O3 修复 2026-10-02] 排序表采样单元**每帧重设**（不依赖创建期一次性设置）：
+                            //   实测创建期设置会因为记录表缺项而静默失效 ⇒ 槽位臂全空。见 regPrepU 的注释。
+                            gl.uniform1i(U.u_sortedIdx ?? null, 12);
                         }
                     };
                     setPrepU(this._prepU);
@@ -2900,6 +2970,115 @@ function setSplatTransformUniforms(
                             gl.bindFramebuffer(gl.FRAMEBUFFER, this._prepFboT1);
                             gl.drawArrays(gl.TRIANGLES, 0, 3);
                         }
+                    }
+                    // [阶段3 O3-DEBUG 2026-10-02] 槽位臂"画面全空但零报错"⇒ 必须自证四件事（只在前 3 帧、只在 slot=1）：
+                    //   ① depthIndex 真有内容；② 排序表纹理真上传成功（整数回读）；③ 预处理 program 里
+                    //   u_prepSlotCount / u_sortedIdx 的 location 真存在；④ 预处理写出的 T0 真非零（中心回读）。
+                    //   ⚠ 纯诊断：非 slot 臂恒不进入 ⇒ 不影响任何已验收路径（O2/base/frag 逐字不变）。
+                    if (PREP_DBG && PREP_SLOT && this._prepDbgFrames < 3 && this._sortedIdxTex) {
+                        this._prepDbgFrames++;
+                        const di = this.depthIndex;
+                        gl.bindFramebuffer(gl.FRAMEBUFFER, this._prepFboT0);
+                        // ① 逐行非零统计 + 行 0 的去重计数：
+                        //   · 每行非零个数 ⇒ "预处理到底写了哪些行"（若只有行 0 有效 ⇒ 写出的槽位范围不对）
+                        //   · 行 0 的 distinct cx 个数 ⇒ 若远小于非零个数 ⇒ 大量槽位写了**同一个 splat**（采样器恒 0）
+                        const rowsWant = [0, 1, 2, 74, 148, 297].filter((r) => r < this._prepH);
+                        const rowStats: string[] = [];
+                        let distinct0 = -1;
+                        for (const r of rowsWant) {
+                            const buf = new Uint32Array(this._prepW * 4);
+                            gl.readPixels(0, r, this._prepW, 1, gl.RGBA_INTEGER, gl.UNSIGNED_INT, buf);
+                            const f = new Float32Array(buf.buffer);
+                            let nz = 0;
+                            const set = new Set<number>();
+                            for (let i = 0; i < this._prepW; i++) {
+                                if (f[i * 4] !== 0) nz++;
+                                set.add(f[i * 4]);
+                            }
+                            if (r === 0) distinct0 = set.size;
+                            rowStats.push(`r${r}:nz=${nz},distinct=${set.size}`);
+                        }
+                        // ② 稀疏采样：槽位 0 / 1/4 / 1/2 / 末槽位
+                        const samples: string[] = [];
+                        for (const s of [0, 152500, 305000, Math.max(0, di.length - 1)]) {
+                            const b = new Uint32Array(4);
+                            gl.readPixels(
+                                s % this._prepW,
+                                Math.floor(s / this._prepW),
+                                1,
+                                1,
+                                gl.RGBA_INTEGER,
+                                gl.UNSIGNED_INT,
+                                b,
+                            );
+                            const f = new Float32Array(b.buffer);
+                            samples.push(`s${s}:cx=${f[0].toFixed(6)}`);
+                        }
+                        const tmpFbo = gl.createFramebuffer();
+                        gl.bindFramebuffer(gl.FRAMEBUFFER, tmpFbo);
+                        gl.framebufferTexture2D(
+                            gl.FRAMEBUFFER,
+                            gl.COLOR_ATTACHMENT0,
+                            gl.TEXTURE_2D,
+                            this._sortedIdxTex,
+                            0,
+                        );
+                        const si2 = new Float32Array(4);
+                        for (const s of [0, 305000, 609999]) {
+                            gl.readPixels(
+                                s % this._prepW,
+                                Math.floor(s / this._prepW),
+                                1,
+                                1,
+                                gl.RED,
+                                gl.FLOAT,
+                                si2,
+                            );
+                            samples.push(`siTex${s}=${si2[0]}`);
+                        }
+                        gl.deleteFramebuffer(tmpFbo);
+                        const prepProg = this._prepProgram as WebGLProgram;
+                        gl.useProgram(prepProg);
+                        const locSI = gl.getUniformLocation(prepProg, "u_sortedIdx");
+                        const unitSI = locSI ? (gl.getUniform(prepProg, locSI) as number) : -999;
+                        gl.useProgram(this.program);
+                        console.log(
+                            `[prep-dbg3#${this._prepDbgFrames}] ${rowStats.join(" ")} distinct0=${distinct0}` +
+                                ` ${samples.join(" ")} di.len=${di.length} prepW=${this._prepW} prepH=${this._prepH}` +
+                                ` unit(si)=${unitSI} di[0..7]=[${Array.from(di.slice(0, 8))}]`,
+                        );
+                        // [阶段3 DIAG] 干净的绑定自证（**不调用任何可能非法的查询**，避免自己产生 GL 错误
+                        //   掩盖真正的那条）：逐个采样单元报告"实绑的是哪张已知纹理"。
+                        //   ⚠ 上一版用了 `getTexParameter(TEXTURE_INTERNAL_FORMAT)` —— 该 pname 在 WebGL2 里非法，
+                        //   自己产生 INVALID_ENUM(0x500) 把真正的 0x502 盖掉了，导致两轮白测。
+                        const ePrep = gl.getError();
+                        const known: Array<[string, unknown]> = [
+                            ["splat", this.splatTexture],
+                            ["prepT0", this._prepT0],
+                            ["prepT1", this._prepT1],
+                            ["sortIdx", this._sortedIdxTex],
+                            ["colorTex", this._colorTex],
+                            ["shR", this._shTextures[0]],
+                            ["shG", this._shTextures[1]],
+                            ["shB", this._shTextures[2]],
+                            ["sh16R", this._shTextures16[0]],
+                            ["lrRank", this._lrRankTex],
+                        ];
+                        const bl: string[] = [];
+                        for (let u = 0; u <= 12; u++) {
+                            gl.activeTexture(gl.TEXTURE0 + u);
+                            const t = gl.getParameter(gl.TEXTURE_BINDING_2D) as unknown;
+                            let nm = "-";
+                            if (t) {
+                                const hit = known.find(([, obj]) => obj !== null && obj === t);
+                                nm = hit ? hit[0] : "other";
+                            }
+                            bl.push(`u${u}=${nm}`);
+                        }
+                        gl.activeTexture(gl.TEXTURE0);
+                        console.log(
+                            `[prep-bind#${this._prepDbgFrames}] errAfterPrep=0x${ePrep.toString(16)} ${bl.join(" ")}`,
+                        );
                     }
                     if (blendWas2) gl.enable(gl.BLEND);
                     gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo2);
@@ -3168,10 +3347,36 @@ function setSplatTransformUniforms(
                 gl.vertexAttribDivisor(this._colorAttr, 1);
             }
 
+            // [阶段3 DIAG 2026-10-02] ?armdbg=1：打印活跃属性+绑定+glErr（定位"某条臂 draw 被拒"）
+            if (ARM_DBG && this._armDbgFrames < 2) {
+                this._armDbgFrames++;
+                const n = gl.getProgramParameter(this.program, gl.ACTIVE_ATTRIBUTES) as number;
+                const rows: string[] = [];
+                for (let i = 0; i < n; i++) {
+                    const info = gl.getActiveAttrib(this.program, i);
+                    if (!info) continue;
+                    const loc = gl.getAttribLocation(this.program, info.name);
+                    const en = loc >= 0 ? gl.getVertexAttrib(loc, gl.VERTEX_ATTRIB_ARRAY_ENABLED) : false;
+                    const buf = loc >= 0 ? gl.getVertexAttrib(loc, gl.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING) : null;
+                    const div = loc >= 0 ? gl.getVertexAttrib(loc, gl.VERTEX_ATTRIB_ARRAY_DIVISOR) : -1;
+                    rows.push(`${info.name}@${loc} en=${en ? 1 : 0} buf=${buf ? 1 : 0} div=${div}`);
+                }
+                const glErrBefore = gl.getError();
+                console.log(
+                    `[armdbg#${this._armDbgFrames}] vc=${this.renderData.vertexCount} di=${this.depthIndex.length}` +
+                        ` shcache=${this._shCache ? 1 : 0} shPassPre=${this._shPassPre ? 1 : 0}` +
+                        ` attribs=[${rows.join(" | ")}] glErrBefore=0x${glErrBefore.toString(16)}`,
+                );
+            }
             const drawSubmitStart = performance.now();
             // [DIAG-EXPERIMENT-1] draw 段边界（默认关闭时恒为 0）
             const tDrawStart = diagFrameTimingEnabled ? performance.now() : 0;
-            gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, this.depthIndex.length);
+            // [阶段3 修复 2026-10-02] renderData 还没建好时（demo 页首帧就是这条路），实例属性缓冲
+            //   仍是 null ⇒ 若照常发 draw，GL 会报
+            //   `INVALID_OPERATION: drawArrays: no buffer is bound to enabled attribute` 并**整帧不画**（黑屏）。
+            //   发 0 个实例等价于不画，且不再触发该错误。
+            const instanceCount = this.renderData.vertexCount > 0 ? this.depthIndex.length : 0;
+            gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, instanceCount);
             const tDrawEnd = diagFrameTimingEnabled ? performance.now() : 0;
             if (perf.enabled) {
                 perf.sample("gl.drawSubmit.ms", performance.now() - drawSubmitStart);

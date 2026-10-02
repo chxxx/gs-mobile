@@ -40,6 +40,12 @@ $caseDefs = [ordered]@{
     "fragboth" = "cg-frag-both&shcache=frag&notx=1&nocolortx=1"
     "lrboth"   = "cg-lr-both&shcache=frag&lr=1&notx=1&nocolortx=1"
     "lrfrzzboth" = "cg-lr-frz-both&shcache=frag&lr=1&notx=1&nocolortx=1&shfreeze=2"
+    # [阶段3 2026-10-02] 预处理臂（O2/O3）：判据与其它臂一致（对 BASE 的 PSNR ≥ 45 dB、无 >8 级像素）
+    #   ⚠ 这条闸门本来必须先跑：它能抓到"vSelected 恒 1 ⇒ 每个 splat 画描边"这类**视觉错误**
+    #     （`covered` 这类覆盖度指标看不出来 —— 2026-10-02 移动端肉眼发现）。
+    "prep"     = "cg-prep&shcache=frag&notx=1&nocolortx=1&prep=1"
+    "prepboth" = "cg-prep-both&shcache=frag&notx=1&nocolortx=1&prep=1&mrt=0"
+    "prepslot" = "cg-prep-slot&shcache=frag&notx=1&nocolortx=1&prep=1&slot=1"
 }
 foreach ($name in $Cases) {
     if (-not $caseDefs.Contains($name)) { Write-Output ("skip-unknown=" + $name); continue }

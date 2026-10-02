@@ -67,9 +67,15 @@ def main() -> None:
     print("raw =", RAW)
     print("parsed u ->", {k: v[0] for k, v in reps.items()})
     base_key = next((k for k in reps if k.endswith("base")), None)
-    frag_key = next((k for k in reps if k.endswith("frag")), None)
+    # [阶段3 2026-10-02] 允许用第一个命令行参数指定"对照臂"的 u 后缀（缺省 `frag` ⇒ 原行为逐字不变）：
+    #   python tools/ch7_color_gate_compare.py prep-slot   → 对拍 cg-base vs cg-prep-slot
+    #   python tools/ch7_color_gate_compare.py prep        → 对拍 cg-base vs cg-prep（非槽位预处理臂）
+    other_suffix = sys.argv[1] if len(sys.argv) > 1 else "frag"
+    frag_key = next((k for k in reps if k.endswith(other_suffix)), None)
     if not base_key or not frag_key:
-        raise SystemExit("需要一份 u=*-base 与一份 u=*-frag（都带 framedump_png）；实际：%s" % list(reps))
+        raise SystemExit(
+            "需要一份 u=*-%s 与一份 u=*-base（都带 framedump_png）；实际：%s" % (other_suffix, list(reps))
+        )
 
     nb, A, covA = reps[base_key]
     nf, B, covB = reps[frag_key]
