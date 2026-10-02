@@ -1,0 +1,14 @@
+[
+    {
+        "name": "DrJohnson (r7 QPLY)",
+        "file": "scenes/point_cloud_quantised_half_r7-drjohnson.ply"
+    },
+    {
+        "name": "Garden (r7 QPLY)",
+        "file": "scenes/point_cloud_quantised_half_r7-garden.ply"
+    },
+    {
+        "name": "Truck (r7 QPLY)",
+        "file": "scenes/point_cloud_quantised_half_r7-truck.ply"
+    }
+]
