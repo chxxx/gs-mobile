@@ -173,6 +173,51 @@ const LR_ENABLED: boolean = (() => {
 const LR_RANK_WIDTH = 2048;
 const SHCACHE_ENABLED: boolean = SHCACHE_FRAG_REQUESTED && typeof WebGL2RenderingContext !== "undefined";
 
+// =====================================================================================
+// [阶段2 O1 2026-10-01] `?notx=1` / `?nocolortx=1`：删掉"逐点读恒等仿射"的纯冗余取样
+//   第 0 步只读核查结论（详见 docs/ch7_stage2_o1.md）：
+//     · garden 场景**只有 1 个对象**：`splat.transform = Matrix4.Compose(pos=0, rot=id, scale=1)` = **单位阵**；
+//     · `_transformIndices` 全 0（单对象）；`u_transforms` 每对象 5 纹素（0..3 = mat4，4 = selected）；
+//     · `_colorTransforms` 块 0 **被显式填成单位阵**（RenderData 构造里 fill(0) 后置 [0],[5],[10],[15]=1），
+//       `colorTransformIndices` 全 0 ⇒ colorTransform 恒等。
+//   ⇒ 每点在"恒等仿射"上花掉：
+//       transform      : 1×index + 4×mat4 (+ 0~1×selected) = 5~6 次取样
+//       colorTransform : 1×index + 4×mat4                  = 5 次取样
+//     合计 10~11 次/点（Flux 在加载期把变换烘焙进几何 ⇒ 这部分为 0）。
+//
+//   `?notx=1`      ⇒ `#define NO_SPLAT_TRANSFORM`：不再取样，改用 `uniform mat4 u_splatTransform`
+//                    + `uniform float u_splatSelected`。**仅单对象场景成立**（多对象时每个点的 M 不同，
+//                    一个 uniform 表达不了）⇒ 运行期自证，不成立则 `arm=…+notx-rejected` 并报错（该轮作废）。
+//                    单对象 + 单位阵 ⇒ 与逐点取样结果**逐位相同**（IEEE754 下 I·x 精确）。
+//   `?notx=bake`   ⇒ 预留（加载期把 M 烘焙进位置/协方差）。本轮**未实现** ⇒ 按 notx=1 处理并 WARN 自证。
+//   `?nocolortx=1` ⇒ `#define NO_COLOR_TRANSFORM`：连**声明**带分支一起删
+//                    （实测证据：声明但不使用的 sampler 仍有 ~11% 惩罚 ⇒ 不能只跳过取样）。
+//
+//   缺省（不传）⇒ 两个 #define 都不注入 ⇒ 缺省着色器（预处理后）逐字不变（见 tools/ch7_desktop_shader_verify.ps1）。
+// =====================================================================================
+const NOTX_PARAM: string = (() => {
+    try {
+        return new URLSearchParams(location.search).get("notx") ?? "";
+    } catch {
+        return "";
+    }
+})();
+/** 请求 notx（`=1` 或预留的 `=bake`）。 */
+const NOTX_REQUESTED: boolean = NOTX_PARAM === "1" || NOTX_PARAM === "bake";
+/** 请求的是预留的加载期烘焙模式（本轮未实现，仅用于自证日志）。 */
+const NOTX_BAKE_REQUESTED: boolean = NOTX_PARAM === "bake";
+const NOCTX_REQUESTED: boolean = (() => {
+    try {
+        return new URLSearchParams(location.search).get("nocolortx") === "1";
+    } catch {
+        return false;
+    }
+})();
+/** 编译期注入判据（必须与运行期上传同源；texelFetch/usampler 以 WebGL2 为前提）。 */
+const NOTX_ENABLED: boolean = NOTX_REQUESTED && typeof WebGL2RenderingContext !== "undefined";
+const NOCTX_ENABLED: boolean = NOCTX_REQUESTED && typeof WebGL2RenderingContext !== "undefined";
+
+
 /**
  * 从顶点着色器模板里**原样切出**一段：保证方案 B 与 BASE 的 SH 逻辑**逐字相同**（不靠"看起来一样"判断正确）。
  */
@@ -207,11 +252,21 @@ void main() {
  */
 function buildShCacheFragmentSourceForArm(): string {
     const src = buildShCacheFragmentSource();
-    if (!LR_ENABLED) return src;
+    // [阶段2 O1 2026-10-01] notx/nocolortx 必须**同时注入到生产遍的 FS**：否则 FS 会走
+    //   `#ifndef NO_SPLAT_TRANSFORM` 分支，而该分支的采样器声明已被剔除 ⇒ 编译失败
+    //   （实测：`'u_transformIndices' : undeclared identifier`，2026-10-01）。
+    const armDefines: string[] = [];
+    if (NOTX_ENABLED) armDefines.push("#define NO_SPLAT_TRANSFORM 1");
+    if (NOCTX_ENABLED) armDefines.push("#define NO_COLOR_TRANSFORM 1");
+    if (!LR_ENABLED) {
+        return armDefines.length === 0
+            ? src
+            : src.replace("#version 300 es", "#version 300 es\n" + armDefines.join("\n"));
+    }
     // LR_RANK_MAX = 7（该数据集 rank；loader 对不足的槽位补 0 ⇒ 定长循环不引入误差）
     // LR_REST = 45（每行基的列数 = 15 个 rest 系数 × 3 通道）
     // LR_UBO_VEC4 = ⌈7×45/4⌉ = 79 个 vec4 = 1,264 B
-    const defines = ["#define LR_RANK_MAX 7", "#define LR_REST 45", "#define LR_UBO_VEC4 79"].join("\n");
+    const defines = armDefines.concat(["#define LR_RANK_MAX 7", "#define LR_REST 45", "#define LR_UBO_VEC4 79"]).join("\n");
     return src.replace("#version 300 es", "#version 300 es\n" + defines);
 }
 
@@ -310,6 +365,33 @@ function buildShCacheFragmentSource(): string {
         "uniform highp usampler2D u_texture;",
         "uniform highp usampler2D u_colorTransformIndices;",
     );
+    // [阶段2 O1 2026-10-01] `?notx=1` / `?nocolortx=1` 下，对应 sampler **连声明一起删**
+    //   （实测：只跳过取样、留着未使用声明仍有约 11% 惩罚 —— 见 §25 的同类记录）。
+    //     · notx      ⇒ 不再需要 u_transforms / u_transformIndices（M 与 selected 走 uniform）
+    //     · nocolortx ⇒ 不再需要 u_colorTransforms / u_colorTransformIndices（恒等变换，分支整段删）
+    //   用正则（容忍 CRLF）：源码是 CRLF、模板串里的换行也是 CRLF ⇒ 精确串匹配会静默失败（阶段 1 踩过）。
+    const stripDeclLine = (src: string, line: string): string =>
+        src.replace(new RegExp("\\r?\\n" + line.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "");
+    let samplerDeclsForArm = samplerDecls;
+    if (NOTX_ENABLED) {
+        samplerDeclsForArm = stripDeclLine(
+            stripDeclLine(samplerDeclsForArm, "uniform highp sampler2D u_transforms;"),
+            "uniform highp usampler2D u_transformIndices;",
+        );
+    }
+    if (NOCTX_ENABLED) {
+        samplerDeclsForArm = stripDeclLine(
+            stripDeclLine(samplerDeclsForArm, "uniform highp sampler2D u_colorTransforms;"),
+            "uniform highp usampler2D u_colorTransformIndices;",
+        );
+    }
+    // ⚠️ 切片以 `uniform highp usampler2D u_colorTransformIndices;` **收尾（含该行）** ⇒
+    //   [阶段2 O1] 我在这行后面加的 `#endif` **不在切片内** ⇒ 预处理器报
+    //   `0:12: 'ifndef' : unexpected end of file found in conditional block`（2026-10-01 实测）。
+    //   与阶段 1 的"切片丢 #endif"是同一类坑 ⇒ 这里按开/闭计数补齐（不依赖具体行文本）。
+    const opens = (samplerDeclsForArm.match(/#if(n?def)?\b/g) ?? []).length;
+    const closes = (samplerDeclsForArm.match(/#endif\b/g) ?? []).length;
+    if (opens > closes) samplerDeclsForArm += "\n#endif".repeat(opens - closes);
     // [阶段1 2026-09-30] 低秩臂的源码变体：`lr=1` 时那 3 张 SH 纹理**根本不存在** ⇒
     //   必须把它们的声明整段去掉（否则会走"声明未使用/未绑定 sampler"的路径，污染 P_lr 归因）；
     //   两个辅助函数（`fillSHFromPacked`/`evalSHRGB`）也要去掉（它们引用那些 sampler），
@@ -336,7 +418,7 @@ precision highp float;
 precision highp int;
 
 ` +
-        samplerDecls +
+        samplerDeclsForArm +
         /* glsl */ `
 uniform mat4 view;
 uniform int u_splatCount;
@@ -361,7 +443,9 @@ void main() {
     // ---- 以下与 BASE 顶点着色器逐行同源（cen/cov → dir → evalSHRGB → colorTransform）----
     uint uidx = uint(idx);
     uvec4 cen = texelFetch(u_texture, ivec2((uidx & 0x3ffu) << 1, uidx >> 10), 0);
+#ifndef NO_SPLAT_TRANSFORM
     uint transformIndex = texelFetch(u_transformIndices, ivec2(uidx & 0x3ffu, uidx >> 10), 0).x;
+#endif
     uvec4 cov = texelFetch(u_texture, ivec2(((uidx & 0x3ffu) << 1) | 1u, uidx >> 10), 0);
 
     vec4 color = vec4(
@@ -398,12 +482,17 @@ void main() {
         }
 
         if (degree > 0u || u_bandIndex[0] < 0) {
+#ifndef NO_SPLAT_TRANSFORM
             mat4 transform = mat4(
                 texelFetch(u_transforms, ivec2(0, transformIndex), 0),
                 texelFetch(u_transforms, ivec2(1, transformIndex), 0),
                 texelFetch(u_transforms, ivec2(2, transformIndex), 0),
                 texelFetch(u_transforms, ivec2(3, transformIndex), 0)
             );
+#else
+            // [阶段2 O1 notx] 单对象：M 走 uniform（与逐点取样逐位等价）
+            mat4 transform = u_splatTransform;
+#endif
             vec3 worldPosition = (transform * vec4(uintBitsToFloat(cen.xyz), 1.0)).xyz;
             vec3 cameraPosition = inverse(view)[3].xyz;
             vec3 dir = normalize(worldPosition - cameraPosition);
@@ -414,6 +503,7 @@ ${LR_ENABLED ? LR_SH_BLOCK : "            color.rgb = evalSHRGB(shIndex, degree,
         }
     }
 
+#ifndef NO_COLOR_TRANSFORM
     if (u_colorTransformEnabled) {
         uint colorTransformIndex = texelFetch(u_colorTransformIndices, ivec2(uidx & 0x3ffu, uidx >> 10), 0).x;
         mat4 colorTransform = mat4(
@@ -424,6 +514,9 @@ ${LR_ENABLED ? LR_SH_BLOCK : "            color.rgb = evalSHRGB(shIndex, degree,
         );
         color = colorTransform * color;
     }
+#else
+    // [阶段2 O1 nocolortx] 声明与分支一起删（见文件头）；恒等变换 ⇒ 输出不变
+#endif
 
     fragColor = color;
 }
@@ -439,6 +532,9 @@ ${LR_ENABLED ? LR_SH_BLOCK : "            color.rgb = evalSHRGB(shIndex, degree,
 function buildTransformFeedbackVertexSource(): string {
     const defines = ["#define SHPASS_TF 1"];
     if (SHPASS_PRE_PACKF16) defines.push("#define SHPASS_PRE_PACKF16 1");
+    // [阶段2 O1] TF 臂同样享有 notx/nocolortx（与主 pass 共用同一份源码 ⇒ 判据必须一致）
+    if (NOTX_ENABLED) defines.push("#define NO_SPLAT_TRANSFORM 1");
+    if (NOCTX_ENABLED) defines.push("#define NO_COLOR_TRANSFORM 1");
     return vertexShaderSource.replace("#version 300 es", "#version 300 es\n" + defines.join("\n") + "\n");
 }
 
@@ -447,10 +543,18 @@ precision highp float;
 precision highp int;
 
 uniform highp usampler2D u_texture;
+#ifndef NO_SPLAT_TRANSFORM
 uniform highp sampler2D u_transforms;
 uniform highp usampler2D u_transformIndices;
+#else
+// [阶段2 O1 notx] 单对象统一变换从 uniform 取（不再 5~6 次/点取样）；见文件头 notx 说明。
+uniform highp mat4 u_splatTransform;
+uniform highp float u_splatSelected;
+#endif
+#ifndef NO_COLOR_TRANSFORM
 uniform highp sampler2D u_colorTransforms;
 uniform highp usampler2D u_colorTransformIndices;
+#endif
 // [NOCT 2026-09-29] noct=1 且数据自证颜色变换为恒等（索引全 0 且块 0 = 单位矩阵）时置 0：
 //   跳过“每点索引 fetch + 4 个 texel 拼 mat4 + mat4×vec4”这条恒等路径（纯冗余开销）。
 //   缺省恒为 1 ⇒ 与历史行为逐字不变。
@@ -715,7 +819,9 @@ void main () {
 #endif
 
     uvec4 cen = texelFetch(u_texture, ivec2((uint(index) & 0x3ffu) << 1, uint(index) >> 10), 0);              // ← 主 pass L316
+#ifndef NO_SPLAT_TRANSFORM
     uint transformIndex = texelFetch(u_transformIndices, ivec2(uint(index) & 0x3ffu, uint(index) >> 10), 0).x; // ← L319
+#endif
     uvec4 cov = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << 1) | 1u, uint(index) >> 10), 0);       // ← L342
 
     vec4 color = vec4(                                                                                      // ← L379-384
@@ -752,12 +858,16 @@ void main () {
         }
 
         if (degree > 0u || u_bandIndex[0] < 0) {                                                            // ← L412
+#ifndef NO_SPLAT_TRANSFORM
             mat4 transform = mat4(                                                                          // ← L320-325
                 texelFetch(u_transforms, ivec2(0, transformIndex), 0),
                 texelFetch(u_transforms, ivec2(1, transformIndex), 0),
                 texelFetch(u_transforms, ivec2(2, transformIndex), 0),
                 texelFetch(u_transforms, ivec2(3, transformIndex), 0)
             );
+#else
+            mat4 transform = u_splatTransform;
+#endif
             vec3 worldPosition = (transform * vec4(uintBitsToFloat(cen.xyz), 1.0)).xyz;                      // ← L413
             vec3 cameraPosition = inverse(view)[3].xyz;                                                      // ← L414
             vec3 dir = normalize(worldPosition - cameraPosition);                                            // ← L415
@@ -766,6 +876,7 @@ void main () {
         }
     }
 
+#ifndef NO_COLOR_TRANSFORM
     if (u_colorTransformEnabled) {                                                                          // ← L368-377 + L421
         uint colorTransformIndex = texelFetch(u_colorTransformIndices, ivec2(uint(index) & 0x3ffu, uint(index) >> 10), 0).x;
         mat4 colorTransform = mat4(
@@ -776,6 +887,9 @@ void main () {
         );
         color = colorTransform * color;
     }
+#else
+    // [阶段2 O1 nocolortx] 恒等颜色变换 ⇒ 与逐点取样等价（TF 臂同享）
+#endif
 
 #ifdef SHPASS_PRE_PACKF16
     tfColorPacked = uvec2(packHalf2x16(color.xy), packHalf2x16(color.zw));
@@ -807,6 +921,7 @@ void main () {
     uvec4 cen = texelFetch(u_texture, ivec2((uint(index) & 0x3ffu) << 1, uint(index) >> 10), 0);
     float selected = float((cen.w >> 24) & 0xffu);
 
+#ifndef NO_SPLAT_TRANSFORM
     uint transformIndex = texelFetch(u_transformIndices, ivec2(uint(index) & 0x3ffu, uint(index) >> 10), 0).x;
     mat4 transform = mat4(
         texelFetch(u_transforms, ivec2(0, transformIndex), 0),
@@ -818,6 +933,13 @@ void main () {
     if (selected < 0.5) {
         selected = texelFetch(u_transforms, ivec2(4, transformIndex), 0).x;
     }
+#else
+    // [阶段2 O1 notx] 单对象：M 与 selected 走 uniform（与逐点取样逐位等价）
+    mat4 transform = u_splatTransform;
+    if (selected < 0.5) {
+        selected = u_splatSelected;
+    }
+#endif
 
     mat4 viewTransform = view * transform;
 
@@ -900,6 +1022,7 @@ void main () {
     uvec4 cen = texelFetch(u_texture, ivec2((uint(index) & 0x3ffu) << 1, uint(index) >> 10), 0);
     float selected = float((cen.w >> 24) & 0xffu);
 
+#ifndef NO_SPLAT_TRANSFORM
     uint transformIndex = texelFetch(u_transformIndices, ivec2(uint(index) & 0x3ffu, uint(index) >> 10), 0).x;
     mat4 transform = mat4(
         texelFetch(u_transforms, ivec2(0, transformIndex), 0),
@@ -911,6 +1034,13 @@ void main () {
     if (selected < 0.5) {
         selected = texelFetch(u_transforms, ivec2(4, transformIndex), 0).x;
     }
+#else
+    // [阶段2 O1 notx] 单对象：M 与 selected 走 uniform（与逐点取样逐位等价）
+    mat4 transform = u_splatTransform;
+    if (selected < 0.5) {
+        selected = u_splatSelected;
+    }
+#endif
 
     mat4 viewTransform = view * transform;
 
@@ -949,6 +1079,7 @@ void main () {
     vec2 majorAxis = min(sqrt(2.0 * lambda1) * u_footprintScale, u_maxSplatSize) * diagonalVector;
     vec2 minorAxis = min(sqrt(2.0 * lambda2) * u_footprintScale, u_maxSplatSize) * vec2(diagonalVector.y, -diagonalVector.x);
 
+#ifndef NO_COLOR_TRANSFORM
     mat4 colorTransform = mat4(1.0);
     if (u_colorTransformEnabled) {
         uint colorTransformIndex = texelFetch(u_colorTransformIndices, ivec2(uint(index) & 0x3ffu, uint(index) >> 10), 0).x;
@@ -959,6 +1090,7 @@ void main () {
             texelFetch(u_colorTransforms, ivec2(3, colorTransformIndex), 0)
         );
     }
+#endif
 
     vec4 color = vec4(
         (cov.w) & 0xffu,
@@ -1002,7 +1134,12 @@ void main () {
         }
     }
 
+#ifndef NO_COLOR_TRANSFORM
     vColor = u_colorTransformEnabled ? colorTransform * color : color;
+#else
+    // [阶段2 O1 nocolortx] 颜色变换恒等（块 0 = 单位阵）⇒ 直接输出（省 5 次/点取样）
+    vColor = color;
+#endif
 
     vPosition = position;
     vSize = length(majorAxis);
@@ -1215,6 +1352,20 @@ class RenderProgram extends ShaderProgram {
     private publishEffectiveArm(): void {
         if (this._armPublished) return;
         this._armPublished = true;
+        // [阶段2 O1 notx] 运行期自证：单对象才能把"该点的 M"放进一个 uniform；
+        //   多对象 ⇒ 显式失败并把 `arm=` 标成 `+notx-rejected`（该轮数据作废，不允许静默错标）。
+        if (NOTX_ENABLED && !this._notxChecked) {
+            this._notxChecked = true;
+            const th = this.renderData ? this.renderData.transformsHeight : 0;
+            this._notxRuntimeOk = th === 1;
+            if (!this._notxRuntimeOk) {
+                console.error(
+                    `[notx=1] REJECTED: transformsHeight=${th}（>1 个对象 ⇒ 每点的 M 不同，一个 uniform 表达不了）⇒ 本轮数据作废`,
+                );
+            } else if (NOTX_BAKE_REQUESTED) {
+                console.warn("[notx=bake] 本轮未实现（只有 uniform 路径）⇒ 按 notx=1 处理");
+            }
+        }
         const shCacheActive = this._shCache && this._shCacheProgram !== null;
         const tfActive = this._shPassPre && this._tfProgram !== null;
         let arm = "base";
@@ -1228,6 +1379,9 @@ class RenderProgram extends ShaderProgram {
         else if (SHPASS_PARAM === "produce") arm = tfActive ? "tf_produce" : "tf_produce-failed";
         else if (SHPASS_PARAM === "pre") arm = tfActive ? "tf_full" : "tf_full-failed";
         if (this._noshRequested) arm += "+nosh";
+        // [阶段2 O1 notx/nocolortx] 后缀只写**实际生效**的：notx 还需运行期单对象自证通过。
+        if (NOTX_ENABLED) arm += this._notxRuntimeOk ? "+notx" : "+notx-rejected";
+        if (NOCTX_ENABLED) arm += "+nocolortx";
         const switches = [
             `shcache=${SHCACHE_FRAG_REQUESTED ? SHCACHE_PARAM : "-"}`,
             `lr=${LR_ENABLED ? 1 : 0}`,
@@ -1235,6 +1389,8 @@ class RenderProgram extends ShaderProgram {
             `shpass=${SHPASS_PARAM || "-"}`,
             `nosh=${this._noshRequested ? 1 : 0}`,
             `noct=${this._noctRequested ? 1 : 0}`,
+            `notx=${NOTX_ENABLED ? (this._notxRuntimeOk ? (NOTX_BAKE_REQUESTED ? "bake->uniform" : 1) : "rejected") : 0}`,
+            `nocolortx=${NOCTX_ENABLED ? 1 : 0}`,
             `shdeg=${this._maxSHDegree}`,
             `shfmt=${this._shF16 ? (SHFMT_F16_INCR ? "f16_incr" : "f16") : "-"}`,
             `shprobe=${this._shFixedCoordProbe ? "fixedcoord" : "-"}`,
@@ -1245,6 +1401,9 @@ class RenderProgram extends ShaderProgram {
             switches,
         };
     }
+    /** [阶段2 O1 notx] 运行期自证：只有单对象场景（transformsHeight === 1）才能用一个 uniform 表达 M。 */
+    private _notxRuntimeOk = false;
+    private _notxChecked = false;
     private _colorTex: WebGLTexture | null = null;
     private _colorFbo: WebGLFramebuffer | null = null;
     private _shCacheProgram: WebGLProgram | null = null;
@@ -1297,6 +1456,27 @@ class RenderProgram extends ShaderProgram {
         let u_colorTransforms: WebGLUniformLocation;
         let u_colorTransformIndices: WebGLUniformLocation;
         let u_colorTransformEnabled: WebGLUniformLocation;
+// [阶段2 O1 notx 2026-10-01] 单对象统一变换（`?notx=1`）：缺省路径下这两个 uniform **不存在**
+//   ⇒ `getUniformLocation` 返回 null ⇒ 写 null 位置是合法的 no-op（与既有 uniform 同一模式）。
+let u_splatTransform: WebGLUniformLocation | null = null;
+let u_splatSelected: WebGLUniformLocation | null = null;
+
+/**
+ * [阶段2 O1 notx 2026-10-01] 把"单对象统一变换"写进**当前已绑定**的程序。
+ *   ⚠️ 必须是模块级函数而非类方法：`gl` 是本文件**构造函数里的局部量**（`const gl = renderer.gl`），
+ *      类方法看不到它（实测 `TS2304: Cannot find name 'gl'`）。
+ *   为什么必须"写进当前 program"：uniform 是**逐 program** 的状态 ⇒ 主 pass / 生产遍 / TF 遍各写一次。
+ */
+function setSplatTransformUniforms(
+    glCtx: WebGL2RenderingContext,
+    locM: WebGLUniformLocation | null,
+    locSel: WebGLUniformLocation | null,
+    transforms: Float32Array | null,
+): void {
+    if (!transforms || transforms.length < 17) return;
+    glCtx.uniformMatrix4fv(locM, false, transforms.subarray(0, 16));
+    glCtx.uniform1f(locSel, transforms[16]);
+}
         let u_maxSHDegree: WebGLUniformLocation;
         let u_shFixedCoord: WebGLUniformLocation;
 
@@ -1474,6 +1654,20 @@ class RenderProgram extends ShaderProgram {
             ) as WebGLUniformLocation;
             gl.uniform1i(u_colorTransformIndices, 4);
 
+            // [阶段2 O1 notx] 单对象统一变换：`?notx=1` 时由 uniform 代替 5~6 次/点取样。
+            //   缺省（未注入 #define）时这两个 uniform 不存在 ⇒ 位置为 null，写入是 no-op。
+            //   这里写一次即可（静止场景下 M 不变；对象移动 ⇒ transformsChanged 触发上传并重跑本分支）。
+            u_splatTransform = gl.getUniformLocation(this.program, "u_splatTransform") as WebGLUniformLocation | null;
+            u_splatSelected = gl.getUniformLocation(this.program, "u_splatSelected") as WebGLUniformLocation | null;
+            if (NOTX_ENABLED && this._notxRuntimeOk) {
+                setSplatTransformUniforms(
+                    gl,
+                    u_splatTransform,
+                    u_splatSelected,
+                    this.renderData ? this.renderData.transforms : null,
+                );
+            }
+
             u_useSH = gl.getUniformLocation(this.program, "u_useSH") as WebGLUniformLocation;
             gl.uniform1i(u_useSH, 0);
             // [NOCT 2026-09-29] 缺省恒为 1（历史行为逐字不变）；`?noct=1` 时置 0（诊断：跳过恒等颜色变换路径）
@@ -1602,6 +1796,9 @@ class RenderProgram extends ShaderProgram {
                     "u_shFixedCoord",
                     "u_bandIndex",
                     "u_colorTransformEnabled",
+                    // [阶段2 O1 notx] 生产遍（FS）在 notx 下用 uniform 取 M/selected ⇒ 必须登记
+                    "u_splatTransform",
+                    "u_splatSelected",
                 ]) {
                     this._shCacheU[name] = gl.getUniformLocation(prog, name);
                 }
@@ -1698,6 +1895,9 @@ class RenderProgram extends ShaderProgram {
                                 "u_shFixedCoord",
                                 "u_bandIndex",
                                 "u_colorTransformEnabled",
+                                // [阶段2 O1 notx] TF 第一遍在 notx 下用 uniform 取 M/selected ⇒ 必须登记
+                                "u_splatTransform",
+                                "u_splatSelected",
                             ]) {
                                 this._tfU[name] = gl.getUniformLocation(prog, name);
                             }
@@ -1869,6 +2069,21 @@ class RenderProgram extends ShaderProgram {
 
             // [阶段0 2026-09-30] 发布"实际生效"的臂标签（第一帧一次）⇒ 报告里的 `arm=` 不可能与实跑分叉
             this.publishEffectiveArm();
+
+            // [阶段2 O1 notx 2026-10-01] 主 pass 的 M **必须每帧写**：
+            //   ① `_notxRuntimeOk` 只在上面那次 `publishEffectiveArm()` 里才确定 ⇒ 构造函数里写不了；
+            //   ② uniform 是逐 program 状态 ⇒ 这里显式绑一次主 pass 再写（后续各分支各自会重新绑）。
+            //   实测教训：漏了这一步 ⇒ `u_splatTransform` 恒为全 0 ⇒ 所有 splat 被投到原点、画面全空
+            //   （存活探针 ok=0，`kept=1`）。
+            if (NOTX_ENABLED && this._notxRuntimeOk) {
+                gl.useProgram(this.program);
+                setSplatTransformUniforms(
+                    gl,
+                    u_splatTransform,
+                    u_splatSelected,
+                    this.renderData ? this.renderData.transforms : null,
+                );
+            }
 
             // [DIAG-EXPERIMENT-1] prep 段起点（默认关闭时恒为 0，不参与任何计算）
             const tPrep = diagFrameTimingEnabled ? performance.now() : 0;
@@ -2139,6 +2354,15 @@ class RenderProgram extends ShaderProgram {
                     gl.uniform1i(this._shCacheU.u_maxSHDegree ?? null, this._maxSHDegree);
                     gl.uniform1i(this._shCacheU.u_shFixedCoord ?? null, this._shFixedCoordProbe ? 1 : 0);
                     gl.uniform1i(this._shCacheU.u_colorTransformEnabled ?? null, this._noctRequested ? 0 : 1);
+            // [阶段2 O1 notx] 生产遍同样需要 M（SH 的视角方向 = M·p − camPos，见文件头 notx 说明）
+            if (NOTX_ENABLED && this._notxRuntimeOk) {
+                setSplatTransformUniforms(
+                    gl,
+                    (this._shCacheU.u_splatTransform ?? null) as WebGLUniformLocation | null,
+                    (this._shCacheU.u_splatSelected ?? null) as WebGLUniformLocation | null,
+                    this.renderData ? this.renderData.transforms : null,
+                );
+            }
                     // [SHCACHE 方案 B 修复 2026-09-30] `u_bandIndex` 必须与主 pass **同一来源**
                     //   （主 pass 在 `uploadSphericalHarmonics()` 里用 `sh.bandsIndices`）。
                     //   此前这里漏设 ⇒ 默认 (0,0,0) 使 band 分支误判为"有分层"（`u_bandIndex[0] >= 0` 为真）
@@ -2257,6 +2481,15 @@ class RenderProgram extends ShaderProgram {
                 gl.uniform1i(this._tfU.u_maxSHDegree ?? null, this._maxSHDegree);
                 gl.uniform1i(this._tfU.u_shFixedCoord ?? null, this._shFixedCoordProbe ? 1 : 0);
                 gl.uniform1i(this._tfU.u_colorTransformEnabled ?? null, this._noctRequested ? 0 : 1);
+            // [阶段2 O1 notx] TF 第一遍同样需要 M（与主 pass 逐行等价 ⇒ 判据一致）
+            if (NOTX_ENABLED && this._notxRuntimeOk) {
+                setSplatTransformUniforms(
+                    gl,
+                    (this._tfU.u_splatTransform ?? null) as WebGLUniformLocation | null,
+                    (this._tfU.u_splatSelected ?? null) as WebGLUniformLocation | null,
+                    this.renderData ? this.renderData.transforms : null,
+                );
+            }
 
                 gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, this._tf);
                 gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, this._tfBuffer);
@@ -2574,6 +2807,9 @@ class RenderProgram extends ShaderProgram {
         if (SHCACHE_ENABLED) {
             defines.push("#define SHPASS_PRE 1", "#define SHCACHE_FRAG 1");
         }
+        // [阶段2 O1 2026-10-01] notx/nocolortx：同样"只在请求时才编译进"，缺省不注入 ⇒ 缺省源码逐字不变。
+        if (NOTX_ENABLED) defines.push("#define NO_SPLAT_TRANSFORM 1");
+        if (NOCTX_ENABLED) defines.push("#define NO_COLOR_TRANSFORM 1");
         if (defines.length === 0) return vertexShaderSource;
         return vertexShaderSource.replace("#version 300 es", "#version 300 es\n" + defines.join("\n") + "\n");
     }
