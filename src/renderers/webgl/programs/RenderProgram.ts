@@ -1692,7 +1692,6 @@ class RenderProgram extends ShaderProgram {
     private _prepFboT1: WebGLFramebuffer | null = null;
     /** O3：排序结果（splat 下标）上传成的 R32UI 纹理；预处理按槽位读它。 */
     private _sortedIdxTex: WebGLTexture | null = null;
-    private _sortedIdxLen = -1;
     private _prepW = 0;
     private _prepH = 0;
     /** 实际生效的 MRT 开关（若混合格式 MRT 在本设备不完整 ⇒ 自动退回两次单目标 pass）。 */
@@ -2810,7 +2809,6 @@ function setSplatTransformUniforms(
                         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
                         // [阶段3 修复 2026-10-02] R32F（不是 R32UI）：见预处理 FS 里的说明
                         gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, sw, sh2, 0, gl.RED, gl.FLOAT, padded);
-                        this._sortedIdxLen = si.length;
                         gl.activeTexture(gl.TEXTURE0);
                     }
                     const prevFbo2 = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
