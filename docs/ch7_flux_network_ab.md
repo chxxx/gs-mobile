@@ -1,6 +1,6 @@
 # Flux 网络口径 A/B（本地副本 vs 默认 HF）— 供决策，**不预设结论**
 
-> 生成 2026-10-04。依据：`docs/ch7_flux_runtime.md`（13/13 场景运行时实测）与 `_tmp_ch7probe/probe_*` 源码定位。
+> 生成 2026-10-04。依据：`docs/ch7_flux_runtime.md`（13/13 场景运行时实测）与源码定位（`tools/ch7_flux_runtime_net.mjs`、`flux-gs-project-gh-pages/render_shared/main.js:1668-1678`）。
 > 结论：**两个方案都不需要改渲染逻辑**；差别只是"数据从哪取"。
 
 ## 事实（实测，非推断）
