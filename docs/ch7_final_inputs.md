@@ -35,15 +35,40 @@
 | 待补 | std45 三个文件的点数为 `?`（PLY 头格式与 r7 不同，4096 B 内未匹配到 `element vertex`） | 若表 7-5 需要，我再按实际头结构解析（不影响 FINAL 口径） |
 | 待补 | `bench-scenes.json` 只声明了 garden/truck/drjohnson 的 `points` | 其余 10 个场景的点数已由**头实测**给出，建议回填清单 |
 
-## 1b. Flux 页面实际资源清单（撤销原 `.mobilegs` 要求）
+## 1b. Flux 页面实际资源清单（**更正**：场景数据在仓库内）
 
-* **仓库内确实存在的 Flux 文件**（`flux-gs-project-gh-pages/`，只列 >64 KB 的数据类文件）：
-  `tools/tmc3.wasm` **1,238,308 B (1.18 MiB)**、`static/images/teaser.png` 309,336 B、`motivation.png` 195,456 B、`method.png` 185,062 B、`densification.png` 67,478 B、`static/css/bulma.css.map.txt` 96,528 B。
-  ⇒ **仓库内没有任何场景数据文件**（无 `.ply` / `.splat` / `.json` 场景数据）。
-* **页面/脚本引用的资源 URL**（逐条判定"业务逻辑 arg + 占位符"或"外部托管"）：
-  `--compressedStreamPath=/xyz.bin`、`--reconstructedDataPath=/xyz.ply`、`model.splat`、`<scene>.json`（`render_kitchen/playroom/room/stump/train/treehill/truck/main.js` 各自引用）——均为**占位/本地不存在**；
-  真正取数来源是 **`https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/`**（`render_shared/main.js`），即运行时远程拉取。
-* 因此 T4 的 Flux 侧体积/编码数据 **无法从仓库确定** ⇒ 标注为：**「需用户在 Network 面板提供」**，需记录每条的：文件名、URL 路径、原始字节数、传输字节数（含 `Content-Encoding`）。
+> ⚠ 更正说明：上一版本的脚本把 `.json` 从"数据文件"列表里排除了，导致误报"仓库内无场景数据"。实际路径是
+> **`flux-gs-project-gh-pages/scene/<scene>.json`**（Flux 页面即用它渲染）。
+
+**Flux 场景数据（仓库内实测，13 个 = 与我们 13 个 r7 场景一一对应）**
+
+| scene | Flux `scene/<scene>.json` (B) | Flux (MiB) | 本文 `…r7-<scene>.ply` (B) | 本文 (MiB) | Flux/本文 |
+|---|---|---|---|---|---|
+| garden | 7,287,834 | 6.95 MiB | 14,648,586 | 13.97 MiB | 0.50 |
+| bicycle | 4,995,740 | 4.76 MiB | 13,928,586 | 13.28 MiB | 0.36 |
+| flowers | 4,939,481 | 4.71 MiB | 12,728,586 | 12.14 MiB | 0.39 |
+| stump | 3,939,877 | 3.76 MiB | 13,208,586 | 12.60 MiB | 0.30 |
+| treehill | 4,395,068 | 4.19 MiB | 11,768,586 | 11.22 MiB | 0.37 |
+| room | 2,550,067 | 2.43 MiB | 5,288,586 | 5.04 MiB | 0.48 |
+| counter | 2,430,005 | 2.32 MiB | 6,008,586 | 5.73 MiB | 0.40 |
+| kitchen | 3,578,216 | 3.41 MiB | 6,008,586 | 5.73 MiB | 0.60 |
+| bonsai | 3,241,322 | 3.09 MiB | 5,288,586 | 5.04 MiB | 0.61 |
+| truck | 2,903,845 | 2.77 MiB | 6,564,642 | 6.26 MiB | 0.44 |
+| train | 3,051,204 | 2.91 MiB | 6,903,882 | 6.58 MiB | 0.39 |
+| drjohnson | 2,747,767 | 2.62 MiB | 10,376,586 | 9.90 MiB | 0.26 |
+| playroom | 1,991,225 | 1.90 MiB | 7,688,586 | 7.33 MiB | 0.26 |
+
+* 合计：Flux **42.44 MiB**（13 场景） vs 本文 r7 **114.87 MiB**（13 场景）⇒ 本文格式**更大**（比值 0.26~0.61）。
+* 传输入口：`flux-gs-project-gh-pages/render_<scene>/main.js` 引用 `<scene>.json`；`render_shared/main.js` 另含
+  `--compressedStreamPath=/xyz.bin` / `--reconstructedDataPath=/xyz.ply` 的**占位参数**与一条
+  `https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/` 的**远程兜底路径**。
+* **本机测量口径（T4）**：两面都由同一个 vite dev server 提供，dev 默认**不做 gzip**（静态文件原样发出）
+  ⇒ 记录时以"原始字节 = 传输字节、`Content-Encoding: none`（本地）"为准；若要报 gzip 后体积，由 T4 的独立测量页/脚本对**同一批文件**做 gzip 后再比（不依赖 Network 面板）。若你希望以 Flux 官方站点（GitHub Pages + HuggingFace）的**真实传输编码**为准，再请从 Network 面板补录。
+
+**仓库内其它 Flux 资源（>64 KB 的非场景文件）**：`tools/tmc3.wasm` **1,238,308 B (1.18 MiB)**、
+`static/images/teaser.png` 309,336 B、`motivation.png` 195,456 B、`method.png` 185,062 B、`densification.png` 67,478 B、
+`static/css/bulma.css.map.txt` 96,528 B。
+
 
 ## 1c. 三件〔待核〕回填状态
 
