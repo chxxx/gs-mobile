@@ -113,10 +113,10 @@
 
 | 项 | 状态 |
 |---|---|
-| `lr=1` 每点打包字节数 | **已定案：32 B/点**。`QPLYLoaderUtils.ts:719` `new Uint32Array(8 * count)`（8×uint32 = 32 B/splat）；打包循环 `:802-809` 实际写 **6 个 uint = 24 B**（rank r=7 → 4 uint / 8 half：`(r0,r1)(r2,r3)(r4,r5)(r6,0)`；f_dc → 2 uint / 3 half：`(fdc0,fdc1)(fdc2,0)`），余 2 uint 未写。与 `ch6_code_facts.md` 的「SH 96→32 B/点」同源 |
+| `lr=1` 每点打包字节数 | **分配 32 B/点，有效写入 24 B/点**。`QPLYLoaderUtils.ts:719` `new Uint32Array(8 * count)`（8×uint32 = 32 B/splat）；打包循环 `:802-809` 实际写 **6 个 uint = 24 B**（rank r=7 → 4 uint / 8 half：`(r0,r1)(r2,r3)(r4,r5)(r6,0)`；f_dc → 2 uint / 3 half：`(fdc0,fdc1)(fdc2,0)`），余 2 uint 未写。与 `ch6_code_facts.md` 的「SH 96→32 B/点」同源 |
 | garden 的 transform 是否单位阵 | **仍待一次 `u_splatTransform` 打印**（本轮不做推测）。**已取得的等价证据**：`notx=1`（改用 uniform `u_splatTransform`）与原逐 splat 取样路径在 garden 上**逐像素等价** —— PSNR **60.03 dB**、SSIM 0.999863、最大级差 5、**>8 级 = 0**（`colorgate_20261004_151300/151327.txt`，见 `docs/ch7_b_layer.md`） |
 | `f16 −9.8%` 的确切来源文件名 | **已确证**：BASE = `raw/shfmt2_20260929_210825.txt`（`u=shfmt2-chrome-base`、`shfmt=-`、**43.9 ± 0.4 fps**）；F16 = `raw/shfmt2_20260929_210448.txt`（`u=shfmt2-chrome-f16`、`shfmt=f16`、**39.6 ± 0.3 fps**）⇒ **(39.6−43.9)/43.9 = −9.79%**。两臂同设备（Adreno 740）/同场景（garden）/同分辨率（1600×1063）/同 `driver=msgchannel & bench_mode=offscreen-paper-match`、rounds=1 |
-| `TF 生产遍 30.5 ms` 的确切来源文件名 | **部分**：TF 臂记录已定位 = `raw/stage0_20260930_190611.txt`（`arm=base`，43.1/43.5 fps）+ `raw/stage0_20260930_190730.txt`（`arm=tf_consume`，95.9/96.7 fps，两轮），唯一标识字段是 `sw_effective=…\|shpass=consume\|…`（`?shpass=pre\|produce\|consume`，见 `RenderProgram.ts:75-83/1564/1654`）。**但 `30.5 ms` 这个数字在 `raw/` 任何记录里都搜不到**（按 `shpass=produce`、`shpass=pre`、`produce_ms`、`tf_produce`、`transform feedback`、`生产遍`，以及逐文件搜 `30.5` 全部未命中）⇒ **来源不是 raw 记录**（可能是当时的控制台/中间报告）。**请指明来源文件**，否则建议把该句改为可核对的 TF 臂数据（上列两条记录） |
+| `TF 生产遍 30.5 ms` 的确切来源文件名 | **已撤销（2026-10-04）**：30.5 ms 系**推导值**（`PRODUCE_ONLY` 帧时 52.9 ms − `BASE` 帧时 22.4 ms），同页可加性检验 −6% 不符 ⇒ 不作数据引用。臂记录已定位 = `raw/stage0_20260930_190611.txt`（`arm=base`，43.1/43.5 fps）+ `raw/stage0_20260930_190730.txt`（`arm=tf_consume`，95.9/96.7 fps，两轮），唯一标识字段是 `sw_effective=…\|shpass=consume\|…`（`?shpass=pre\|produce\|consume`，见 `RenderProgram.ts:75-83/1564/1654`）。**但 `30.5 ms` 不是任何记录的字段**（记录里只有臂级帧时）（按 `shpass=produce`、`shpass=pre`、`produce_ms`、`tf_produce`、`transform feedback`、`生产遍`，以及逐文件搜 `30.5` 全部未命中）⇒ **来源不是 raw 记录**（可能是当时的控制台/中间报告）。**请指明来源文件**，否则建议把该句改为可核对的 TF 臂数据（上列两条记录） |
 
 
 ## 2. T8 反例表（只用 garden 已有数据）
@@ -124,7 +124,7 @@
 | 臂 | 结果（对同机基线） | 一句话机制 | 来源文件 |
 |---|---|---|---|
 | `?shfmt=f16` | **−9.8%** | SH 系数改 RGBA16F 存储：取样字节数减半，但驱动侧半精度取样路径更慢 | `shfmt2_20261003_134803.txt`〔待核文件名〕 |
-| TF 生产遍（`shpass=produce/consume/pre`） | 生产遍 **30.5 ms**（一次性成本） | 用 transform feedback 把逐 splat 颜色写进 VBO 再作实例属性；一次性成本高 | 〔待核：阶段 1 记录〕 |
+| ~~TF 生产遍（`shpass=produce/consume/pre`）~~ | **⚠ 已撤销（2026-10-04）**：原文"生产遍 **30.5 ms**（一次性成本）"是**推导值**（`PRODUCE_ONLY` 帧时 52.9 ms − `BASE` 帧时 22.4 ms），且同页可加性检验 −6% 不符 ⇒ 不作为数据引用。臂级原始记录在 `raw/stage0_20260930_190730.txt`（含 `arm=tf_consume`） | 机制描述保留：用 transform feedback 把逐 splat 颜色写进 VBO 再作实例属性 | — |
 | `?prep=1`（O2） | Adreno 740 **−5~8%**；Mali-925 **+12%** | 预处理把顶点端 ALU 换成每帧 ±15 MB 显存流量；ALU 相对弱的 Mali 净正，强的 Adreno 净负 | Gen2：`o2-prep_20261002_184301.txt` / `o3-prep_20261002_191130.txt`；Mali：`o2-prep_20261002_184917.txt` / `o3-prep_20261002_192054.txt` |
 | `?prep=1&slot=1`（O3） | Adreno 740 **−66%**（frame_ms 0.40→2.50、sync_ms 13.4→37.3）；Mali-925 **−31%**（0.15→2.30、12.8→15.6） | 现象：主 pass 去掉 `index` 实例属性、改为 `gl_InstanceID` 取槽位后，移动驱动的实例化路径显著变慢（机理未验证，仅记录现象） | Gen2：`o3-slot_20261002_191221.txt`；Mali：`o3-slot_20261002_191939.txt` |
 
