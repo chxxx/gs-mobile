@@ -59,6 +59,41 @@
 | playroom | 1,991,225 | 1.90 MiB | 7,688,586 | 7.33 MiB | 0.26 |
 
 * 合计：Flux **42.44 MiB**（13 场景） vs 本文 r7 **114.87 MiB**（13 场景）⇒ 本文格式**更大**（比值 0.26~0.61）。
+
+### 1b-实测 · Flux 页面运行时请求清单（2026-10-04；无头 Edge + CDP `Network` **实测**，非推断）
+
+口径：`_tmp_ch7probe/flux_net.mjs`（`Network.enable` + `setCacheDisabled(true)` + `Page.navigate`，load 后静默 6 s 收尾），
+页面 = `flux-gs-project-gh-pages/render_garden/index.html`，由本机 vite dev server 托管该静态站。
+
+| # | 请求 | 类型 | 传输字节 | Body 字节 | Content-Encoding | 来源 |
+|---|---|---|---|---|---|---|
+| 1 | `https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/garden.json` | Fetch | **7,292,354** | **7,287,834** | 无（不压缩） | **远程 HF** |
+| 2 | `/flux-gs-project-gh-pages/render_shared/main.js` | Script | 106,120 | 671,429 | br | 本地 |
+| 3 | `/@vite/client` | Script | 29,799 | 137,725 | br | 本地（**dev 注入**） |
+| 4 | `/node_modules/vite/dist/client/env.mjs` | Script | 1,694 | 4,021 | br | 本地（**dev 注入**） |
+| 5 | `/flux-gs-project-gh-pages/render_shared/viewer.css` | CSS | 1,223 | 3,171 | br | 本地 |
+| 6 | `/flux-gs-project-gh-pages/render_garden/index.html` | Document | 1,025 | 758 | — | 本地 |
+| 7 | `/flux-gs-project-gh-pages/render_garden/main.js` | Script | 753 | 481 | — | 本地 |
+| 8 | `/favicon.ico` | Other | 157 | 0 | — | 本地（404） |
+
+* **结论 1（场景数据不是本地 json）**：`render_garden/main.js` 只设 `defaultModel:"garden.json"`、**未设 `modelBaseUrl`**
+  ⇒ `render_shared/main.js:1669-1678` 的基址落到 HF。仓库内 `scene/*.json` 是**同字节副本**
+  （garden：本地 7,287,834 B = HF `Content-Length` 7,287,834 B）——**页面不读它**。⇒ 13 场景表的口径应写
+  "HF 上的 `<scene>.json`"，而不是"仓库内 `scene/<scene>.json`"（体积相同，来源不同）。
+* **结论 2（无 xyz.bin / xyz.ply / 其它远程文件）**：`--compressedStreamPath=/xyz.bin`、`--reconstructedDataPath=/xyz.ply`
+  只出现在 **Emscripten 虚拟文件系统**（`main.js:878` `writeFile('/xyz.bin')`、`:882` `mainObject/…`、`:893` `readFile('/xyz.ply')`），
+  **不是网络请求**；实测 `xyz.*` 请求数 = 0，远程请求只有 HF 的 1 个 `garden.json`。json 即全部场景数据
+  （msgpack：`{"xyz":{"_type":"bytes","offset":0,"length":1616757}, …"scale_code":[…ndarray float16…]}`）。
+* **结论 3（`tmc3.wasm` 本次**未被请求**）**：`tools/tmc3.js`+`tools/tmc3.wasm` 只被 **Worker** 用 `importScripts`
+  载入（建 worker：`main.js:1699-1707`；worker 内：`:317-349`），且仅当 Worker 收到 `mobilegs` 载荷才走解码分支。
+  实测本次 garden 运行 **0 个解码器请求**（本地请求合计仅 140,771 B，远小于 `tmc3.wasm` 1,238,308 B）。
+  ⇒ ① 按"**实测首次加载**"口径：**不计入**；② 按"**发布包/解码器可用**"口径：另计 **1.18 MiB**。〔**取哪一口径请你定**〕
+* **结论 4（首屏代码体积）**：站点代码 = `render_shared/main.js` 671,429 B（未压缩）/ 106,120 B（brotli）
+  + html/css/入口 js 小文件 ≈ **0.64 MiB 未压缩 / 0.13 MiB 线上**；其中 `@vite/client`+`env.mjs` 的 31,493 B
+  是 **vite dev 注入**（正式 gh-pages 部署不存在，故线上更小）。
+* **口径拆分（按你的要求）**：① **场景数据** = 7,287,834 B（**6.95 MiB**，HF `Content-Length`，实测）；
+  ② **解码器** = 1,238,308 B（**1.18 MiB**，本次未加载，见结论 3）；③ **合计** = **8,526,142 B（8.13 MiB）**（含解码器）
+  / **7,287,834 B（6.95 MiB）**（实测首载口径）。〔其余 12 场景待 B 层结束后用同一脚本补跑，方法不变〕
 * 传输入口：`flux-gs-project-gh-pages/render_<scene>/main.js` 引用 `<scene>.json`；`render_shared/main.js` 另含
   `--compressedStreamPath=/xyz.bin` / `--reconstructedDataPath=/xyz.ply` 的**占位参数**与一条
   `https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/` 的**远程兜底路径**。
@@ -74,9 +109,10 @@
 
 | 项 | 状态 |
 |---|---|
-| `lr=1` 每点打包字节数 | **部分**：加载期只反量化 r 个 rank 系数并写入 `lrRank`（`ArrayBuffer`，`LowRankQPLYWorker.ts:9-57`），rank 纹理为 `RGBA32UI`（`RenderProgram.ts:3018`）；**具体 B/点**需读 worker 的打包循环后给出〔下一步补〕 |
-| garden 的 transform 是否单位阵 | **待实测**（需一次 `u_splatTransform` 打印）——本轮不写推测 |
-| `f16 −9.8%` / `TF 生产遍 30.5 ms` 的确切来源文件名 | 归属 `shfmt2_*` 记录族（最近一批 `shfmt2_20261003_161301/161331.txt`）；**配对的具体文件对**待用 `fps_hist.csv` 按 `shfmt=f16` 与同会话 `base` 反查后回填〔下一步补〕 |
+| `lr=1` 每点打包字节数 | **已定案：32 B/点**。`QPLYLoaderUtils.ts:719` `new Uint32Array(8 * count)`（8×uint32 = 32 B/splat）；打包循环 `:802-809` 实际写 **6 个 uint = 24 B**（rank r=7 → 4 uint / 8 half：`(r0,r1)(r2,r3)(r4,r5)(r6,0)`；f_dc → 2 uint / 3 half：`(fdc0,fdc1)(fdc2,0)`），余 2 uint 未写。与 `ch6_code_facts.md` 的「SH 96→32 B/点」同源 |
+| garden 的 transform 是否单位阵 | **仍待一次 `u_splatTransform` 打印**（本轮不做推测）。**已取得的等价证据**：`notx=1`（改用 uniform `u_splatTransform`）与原逐 splat 取样路径在 garden 上**逐像素等价** —— PSNR **60.03 dB**、SSIM 0.999863、最大级差 5、**>8 级 = 0**（`colorgate_20261004_151300/151327.txt`，见 `docs/ch7_b_layer.md`） |
+| `f16 −9.8%` 的确切来源文件名 | **已确证**：BASE = `raw/shfmt2_20260929_210825.txt`（`u=shfmt2-chrome-base`、`shfmt=-`、**43.9 ± 0.4 fps**）；F16 = `raw/shfmt2_20260929_210448.txt`（`u=shfmt2-chrome-f16`、`shfmt=f16`、**39.6 ± 0.3 fps**）⇒ **(39.6−43.9)/43.9 = −9.79%**。两臂同设备（Adreno 740）/同场景（garden）/同分辨率（1600×1063）/同 `driver=msgchannel & bench_mode=offscreen-paper-match`、rounds=1 |
+| `TF 生产遍 30.5 ms` 的确切来源文件名 | **部分**：TF 臂记录已定位 = `raw/stage0_20260930_190611.txt`（`arm=base`，43.1/43.5 fps）+ `raw/stage0_20260930_190730.txt`（`arm=tf_consume`，95.9/96.7 fps，两轮），唯一标识字段是 `sw_effective=…\|shpass=consume\|…`（`?shpass=pre\|produce\|consume`，见 `RenderProgram.ts:75-83/1564/1654`）。**但 `30.5 ms` 这个数字在 `raw/` 任何记录里都搜不到**（按 `shpass=produce`、`shpass=pre`、`produce_ms`、`tf_produce`、`transform feedback`、`生产遍`，以及逐文件搜 `30.5` 全部未命中）⇒ **来源不是 raw 记录**（可能是当时的控制台/中间报告）。**请指明来源文件**，否则建议把该句改为可核对的 TF 臂数据（上列两条记录） |
 
 
 ## 2. T8 反例表（只用 garden 已有数据）
