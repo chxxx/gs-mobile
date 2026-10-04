@@ -46,12 +46,13 @@ PLATFORM_LABEL = {
     "gen3-xweb": "Snapdragon 8 Gen 3 / Adreno 750 · 微信 XWEB",
     "gen2-xweb": "Snapdragon 8 Gen 2 / Adreno 740 · 微信 XWEB（Flux-GS 唯一可用内核）",
     "d9400-xweb": "Dimensity 9400 / Mali · 微信 XWEB",
-    # [收口阶段 2026-10-03] 新增：MediaTek Mali-925（天玑）Chrome 内核的实测平台
-    "mali925-chrome": "ARM Mali-925 (MediaTek Dimensity) · Chrome",
+    # [收口阶段 2026-10-03] 新增：MediaTek Mali-925（天玑）**实测在微信 XWEB 内核下采集**
+    #   按协议 §6.4（同 WebGL 实现不同内核不得当硬件差异）⇒ id 用 xweb 后缀，Chrome 内核不用于 Mali。
+    "mali925-xweb": "ARM Mali-925 (MediaTek Dimensity) · 微信 XWEB",
 }
 # 可选对照平台：默认**不跑、不计入核心期望数**。需要"同一设备不同内核"的对照证据时
 # （内核敏感性 / Flux-GS 黑白取证），用 `--platforms gen2-chrome` 单独补。
-OPTIONAL_PLATFORMS = ("gen3-chrome", "gen2-chrome", "d9400-chrome", "mali925-chrome")
+OPTIONAL_PLATFORMS = ("gen3-chrome", "gen2-chrome", "d9400-chrome", "mali925-xweb")
 
 
 def platform_base(platform):
