@@ -2,18 +2,57 @@
 
 > 生成：2026-10-03。与 `docs/ch6_code_facts.md`（T11）配套；论文数字必须 rounds=3 同会话 ABAB。
 
-## 1. 三个数据集清单（③）
+## 1. 全量场景清单（论文需覆盖三个数据集的**全部场景**）
 
-| 数据集 | 代表场景 | QPLY（FINAL 使用：r7） | 点数 | 秩 r | SH 阶数 | QPLY 体积 | std45 对照文件（体积） | Flux 的 .mobilegs |
-|---|---|---|---|---|---|---|---|---|
-| **Mip-NeRF 360** | garden | `scenes/point_cloud_quantised_half_r7-garden.ply` | **610,000** | **7** | **3**（15 rest × 3 通道 = 45 系数） | **14,648,586 B = 13.97 MiB** | `…std45-garden.ply`（**37,834,087 B = 36.08 MiB**） | **N/A（仓库内不存在）** |
-| **Tanks & Temples** | truck | `scenes/point_cloud_quantised_half_r7-truck.ply` | **273,169** | 7 | 3 | **6,564,642 B = 6.26 MiB** | `…std45-truck.ply`（16,950,565 B = 16.17 MiB） | **N/A（仓库内不存在）** |
-| **Deep Blending** | drjohnson | `scenes/point_cloud_quantised_half_r7-drjohnson.ply` | **432,000** | 7 | 3 | **10,376,586 B = 9.90 MiB** | `…std45-drjohnson.ply`（26,798,087 B = 25.56 MiB） | **N/A（仓库内不存在）** |
+点数由 **PLY 头 `element vertex N` 实测**（不靠体积反推）；体积同时给 B 与 MiB。`B/点` 一列用于交叉校验（r7 全部为 24）。
 
-* 点数取自 `bench-scenes.json` 的 `points` 字段（garden 610000 / truck 273169 / drjohnson 432000）。
-* 体积为本机实测（`dir scenes\*.ply`，2026-10-03）。**论文 6.2 的「36.08 MB」= std45 口径，不是 FINAL 用的 r7 口径** ⇒ 需改口径（见 `ch6_code_facts.md` §7 冲突）。
-* Flux 的 `.mobilegs`：在 `flux-gs-project-gh-pages/` 下递归搜索 **0 个命中** ⇒ 需向 Flux 官方取件；无对应文件的数据集在 T4/对比表里标 **N/A**。
-* 说明：本仓库另有 bicycle/flowers/stump/treehill/room/counter/kitchen/bonsai/train/playroom 共 10 个 r7 场景文件（供扩展），但论文三数据集只用上表三个。
+| 数据集 | scene id | QPLY 文件 | 类型 | 点数(头实测) | 体积 B | 体积 MiB | B/点 | mtime | 清单声明点数 | FINAL(r7) 兼容 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| mip360 | garden | `point_cloud_quantised_half_r7-garden.ply` | r7 | **610,000** | 14,648,586 | 13.97 MiB | 24 | **2026-09-08 14:07** ⚠ | 610000 | 是 |
+| mip360 | bicycle | `…r7-bicycle.ply` | r7 | 580,000 | 13,928,586 | 13.28 MiB | 24 | 2026-09-24 13:54 | — | 是 |
+| mip360 | flowers | `…r7-flowers.ply` | r7 | 530,000 | 12,728,586 | 12.14 MiB | 24 | 2026-09-24 13:54 | — | 是 |
+| mip360 | stump | `…r7-stump.ply` | r7 | 550,000 | 13,208,586 | 12.60 MiB | 24 | 2026-09-24 13:54 | — | 是 |
+| mip360 | treehill | `…r7-treehill.ply` | r7 | 490,000 | 11,768,586 | 11.22 MiB | 24 | 2026-09-24 13:54 | — | 是 |
+| mip360 | room | `…r7-room.ply` | r7 | 220,000 | 5,288,586 | 5.04 MiB | 24 | 2026-09-24 13:54 | — | 是 |
+| mip360 | counter | `…r7-counter.ply` | r7 | 250,000 | 6,008,586 | 5.73 MiB | 24 | 2026-09-24 13:54 | — | 是 |
+| mip360 | kitchen | `…r7-kitchen.ply` | r7 | 250,000 | 6,008,586 | 5.73 MiB | 24 | 2026-09-24 13:54 | — | 是 |
+| mip360 | bonsai | `…r7-bonsai.ply` | r7 | 220,000 | 5,288,586 | 5.04 MiB | 24 | 2026-09-24 13:54 | — | 是 |
+| tnt | truck | `…r7-truck.ply` | r7 | **273,169** | 6,564,642 | 6.26 MiB | 24 | 2026-09-24 13:54 | 273169 | 是 |
+| tnt | train | `…r7-train.ply` | r7 | 287,304 | 6,903,882 | 6.58 MiB | 24 | 2026-09-24 13:54 | — | 是 |
+| db | drjohnson | `…r7-drjohnson.ply` | r7 | **432,000** | 10,376,586 | 9.90 MiB | 24 | 2026-09-24 13:54 | 432000 | 是 |
+| db | playroom | `…r7-playroom.ply` | r7 | 320,000 | 7,688,586 | 7.33 MiB | 24 | 2026-09-24 13:54 | — | 是 |
+| mip360 | garden-std45 | `…std45-garden.ply` | std45 | 头解析失败〔待核〕 | 37,834,087 | **36.08 MiB** | — | 2026-09-24 13:54 | 610000 | 否（仅表 7-5 对照） |
+| tnt | truck-std45 | `…std45-truck.ply` | std45 | 同上 | 16,950,565 | 16.17 MiB | — | 2026-09-24 13:54 | 273169 | 否（仅表 7-5） |
+| db | drjohnson-std45 | `…std45-drjohnson.ply` | std45 | 同上 | 26,798,087 | 25.56 MiB | — | 2026-09-24 13:54 | 432000 | 否（仅表 7-5） |
+
+**小计**：r7 **13** 个（三个数据集全覆盖：mip360×9 / tnt×2 / db×2）+ std45 3 个 = **16 个 .ply**。
+
+**缺失 / 需确认清单（不替代、不推测）**
+
+| 类别 | 内容 | 处置 |
+|---|---|---|
+| ⚠ 可疑过期 | **mip360/garden（r7）mtime = 2026-09-08 14:07**，比其余 15 个文件早 16 天 | 需你确认它是否属于当前 FINAL 导出流程；若否则**重新导出后重测**，本次不用旧数据代替 |
+| 待补 | std45 三个文件的点数为 `?`（PLY 头格式与 r7 不同，4096 B 内未匹配到 `element vertex`） | 若表 7-5 需要，我再按实际头结构解析（不影响 FINAL 口径） |
+| 待补 | `bench-scenes.json` 只声明了 garden/truck/drjohnson 的 `points` | 其余 10 个场景的点数已由**头实测**给出，建议回填清单 |
+
+## 1b. Flux 页面实际资源清单（撤销原 `.mobilegs` 要求）
+
+* **仓库内确实存在的 Flux 文件**（`flux-gs-project-gh-pages/`，只列 >64 KB 的数据类文件）：
+  `tools/tmc3.wasm` **1,238,308 B (1.18 MiB)**、`static/images/teaser.png` 309,336 B、`motivation.png` 195,456 B、`method.png` 185,062 B、`densification.png` 67,478 B、`static/css/bulma.css.map.txt` 96,528 B。
+  ⇒ **仓库内没有任何场景数据文件**（无 `.ply` / `.splat` / `.json` 场景数据）。
+* **页面/脚本引用的资源 URL**（逐条判定"业务逻辑 arg + 占位符"或"外部托管"）：
+  `--compressedStreamPath=/xyz.bin`、`--reconstructedDataPath=/xyz.ply`、`model.splat`、`<scene>.json`（`render_kitchen/playroom/room/stump/train/treehill/truck/main.js` 各自引用）——均为**占位/本地不存在**；
+  真正取数来源是 **`https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/`**（`render_shared/main.js`），即运行时远程拉取。
+* 因此 T4 的 Flux 侧体积/编码数据 **无法从仓库确定** ⇒ 标注为：**「需用户在 Network 面板提供」**，需记录每条的：文件名、URL 路径、原始字节数、传输字节数（含 `Content-Encoding`）。
+
+## 1c. 三件〔待核〕回填状态
+
+| 项 | 状态 |
+|---|---|
+| `lr=1` 每点打包字节数 | **部分**：加载期只反量化 r 个 rank 系数并写入 `lrRank`（`ArrayBuffer`，`LowRankQPLYWorker.ts:9-57`），rank 纹理为 `RGBA32UI`（`RenderProgram.ts:3018`）；**具体 B/点**需读 worker 的打包循环后给出〔下一步补〕 |
+| garden 的 transform 是否单位阵 | **待实测**（需一次 `u_splatTransform` 打印）——本轮不写推测 |
+| `f16 −9.8%` / `TF 生产遍 30.5 ms` 的确切来源文件名 | 归属 `shfmt2_*` 记录族（最近一批 `shfmt2_20261003_161301/161331.txt`）；**配对的具体文件对**待用 `fps_hist.csv` 按 `shfmt=f16` 与同会话 `base` 反查后回填〔下一步补〕 |
+
 
 ## 2. T8 反例表（只用 garden 已有数据）
 
