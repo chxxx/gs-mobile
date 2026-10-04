@@ -58,7 +58,11 @@
 | drjohnson | 2,747,767 | 2.62 MiB | 10,376,586 | 9.90 MiB | 0.26 |
 | playroom | 1,991,225 | 1.90 MiB | 7,688,586 | 7.33 MiB | 0.26 |
 
-* 合计：Flux **42.44 MiB**（13 场景） vs 本文 r7 **114.87 MiB**（13 场景）⇒ 本文格式**更大**（比值 0.26~0.61）。
+* 合计（**更正**）：Flux **45.86 MiB**（13 场景，逐场景**运行时实测** `encodedDataLength` 求和；旧稿写的 42.44 MiB 是我求和错误）
+  vs 本文 r7 **114.82 MiB**（13 场景）⇒ 本文格式**更大**（逐场景比值 0.26~0.61，均值 0.40）。逐场景实测表见 `docs/ch7_flux_runtime.md`。
+* **运行时结论（13/13 场景，实测）**：每个场景的**唯一远程请求**都是 `https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/<scene>.json`
+  （仓库内 `scene/*.json` 只是**同字节副本**，页面不读它）；**0 个 `.wasm` / `xyz.bin` / `xyz.ply` 请求**；
+  每个场景的本地请求恒为 7~8 条、约 0.13 MiB（站点代码 + vite dev 注入）。
 
 ### 1b-实测 · Flux 页面运行时请求清单（2026-10-04；无头 Edge + CDP `Network` **实测**，非推断）
 
