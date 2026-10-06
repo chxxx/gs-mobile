@@ -25,13 +25,15 @@ except Exception:
 
 GS = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 TMP = os.path.join(GS, "_tmp_ch7probe")
-KEEP_TOP = {"cdp.mjs", "flux_net.mjs", "fps_hist.py", "f0_table.py",
-            "c_link_c1.txt", "c_link_c2.txt", "c_link_c3.txt", "c_links_final.md"}
+KEEP_TOP = {"cdp.mjs", "c_link_c1.txt", "c_link_c2.txt", "c_link_c3.txt", "c_links_final.md"}
 KEEP_OUT = {"fps_hist.csv", "f0_analysis.md", "f0_table.md", "cg_base.png", "cg_frag.png"}
 
 
 def keep(rel):
     if rel in KEEP_TOP:
+        return True
+    if rel.startswith("bin" + os.sep):
+        # 隧道二进制（`tools/ch7_serve.ps1` 期望 `bin/cloudflared.exe`，且**不会自动下载**）——勿删
         return True
     if rel.startswith("out" + os.sep):
         base = os.path.basename(rel)

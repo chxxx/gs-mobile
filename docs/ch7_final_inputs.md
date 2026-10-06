@@ -66,7 +66,7 @@
 
 ### 1b-实测 · Flux 页面运行时请求清单（2026-10-04；无头 Edge + CDP `Network` **实测**，非推断）
 
-口径：`_tmp_ch7probe/flux_net.mjs`（`Network.enable` + `setCacheDisabled(true)` + `Page.navigate`，load 后静默 6 s 收尾），
+口径：`tools/ch7_flux_runtime_net.mjs`（`Network.enable` + `setCacheDisabled(true)` + `Page.navigate`，load 后静默 6 s 收尾），
 页面 = `flux-gs-project-gh-pages/render_garden/index.html`，由本机 vite dev server 托管该静态站。
 
 | # | 请求 | 类型 | 传输字节 | Body 字节 | Content-Encoding | 来源 |

@@ -1,6 +1,6 @@
 # Flux 页面**运行时**请求清单（实测，13 场景）
 
-> 口径：`_tmp_ch7probe/flux_net.mjs`（CDP `Network.enable` + 禁缓存 + `Page.navigate`），
+> 口径：`tools/ch7_flux_runtime_net.mjs`（CDP `Network.enable` + 禁缓存 + `Page.navigate`），
 > 页面 `flux-gs-project-gh-pages/render_<scene>/index.html` 由本机 vite dev server 托管。
 > 「本地字节」含 `@vite/client` 等 **dev 注入**（正式 gh-pages 部署不存在）。
 
