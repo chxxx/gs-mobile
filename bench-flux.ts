@@ -444,9 +444,16 @@ async function loadInjectedViews(): Promise<Record<string, number[]>> {
     }
 }
 
+/** [NETREGIME 2026-10-06] 网络口径判据：只认 URL 参数 `fluxsrc=official`；缺省/其它值 = 受控（本地副本）。 */
+const FLUXSRC_OFFICIAL: boolean = param("fluxsrc", "") === "official";
+
 async function loadManifest(): Promise<void> {
-    const res = await fetch("./flux-baseline-scenes.json");
-    if (!res.ok) throw new Error(`flux-baseline-scenes.json 加载失败：HTTP ${res.status}`);
+    // [NETREGIME 2026-10-06] `?fluxsrc=official` ⇒ 用**官方网络路径**清单（model = HuggingFace 绝对 URL）；
+    //   缺省（不传）⇒ 用现有本地副本清单 ⇒ **既有行为逐字不变**（口径 A 仍是默认）。
+    //   两份清单除 `model` 外完全一致（同一批 id/page/dataset），保证 A/B 只差"数据来源"这一个变量。
+    const file = FLUXSRC_OFFICIAL ? "./flux-baseline-scenes-official.json" : "./flux-baseline-scenes.json";
+    const res = await fetch(file);
+    if (!res.ok) throw new Error(`${file} 加载失败：HTTP ${res.status}`);
     const json = (await res.json()) as { scenes?: FluxSceneMeta[] };
     manifest = Array.isArray(json.scenes) ? json.scenes : [];
 }
@@ -1584,6 +1591,10 @@ function buildResultText(st: BenchState): string {
     lines.push("[RESULT]");
     lines.push("engine=fluxgs");
     lines.push(`u=${st.u}`);
+    // [NETREGIME 2026-10-06] 网络口径标签：official（HuggingFace 官方源）/ controlled（本地副本）。
+    //   为什么必须打标：口径 A/B 两组**只有数据来源**一个变量不同，分析侧只认本字段，
+    //   不靠文件名或链接备注推断；缺省（不传 fluxsrc）报 controlled —— 这正是既有 Gen3 数据的口径。
+    lines.push(`network_regime=${FLUXSRC_OFFICIAL ? "official" : "controlled"}`);
     lines.push(`chip=${env.chip}`);
     lines.push(`vendor=${env.vendor}`);
     lines.push("mode=bench");

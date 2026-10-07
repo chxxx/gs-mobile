@@ -1,0 +1,19 @@
+{
+    "version": 1,
+    "note": "第7章对比方法（Flux-GS）**口径 B = 官方/真实网络路径**场景清单：model 指向 HuggingFace 官方下载源（datasets/mobile-gs2/mobile-gs2），page 仍用同源 iframe 桥（render_<scene>/index.html）。由 bench-flux.html 在 ?fluxsrc=official 时选用本清单；缺省仍用 flux-baseline-scenes.json（口径 A = 本地副本）。两份清单的 id/page/dataset 完全一致，**唯一差别是 model 字段**，保证 A/B 两组只有数据来源这一个变量不同。",
+    "scenes": [
+        { "id": "bicycle", "name": "Flux-GS · Bicycle", "dataset": "mip360", "page": "flux-gs-project-gh-pages/render_bicycle/index.html", "model": "https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/bicycle.json", "storageMB": 4.76 },
+        { "id": "flowers", "name": "Flux-GS · Flowers", "dataset": "mip360", "page": "flux-gs-project-gh-pages/render_flowers/index.html", "model": "https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/flowers.json", "storageMB": 4.71 },
+        { "id": "garden", "name": "Flux-GS · Garden", "dataset": "mip360", "page": "flux-gs-project-gh-pages/render_garden/index.html", "model": "https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/garden.json", "storageMB": 6.95 },
+        { "id": "stump", "name": "Flux-GS · Stump", "dataset": "mip360", "page": "flux-gs-project-gh-pages/render_stump/index.html", "model": "https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/stump.json", "storageMB": 3.76 },
+        { "id": "treehill", "name": "Flux-GS · Treehill", "dataset": "mip360", "page": "flux-gs-project-gh-pages/render_treehill/index.html", "model": "https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/treehill.json", "storageMB": 4.19 },
+        { "id": "room", "name": "Flux-GS · Room", "dataset": "mip360", "page": "flux-gs-project-gh-pages/render_room/index.html", "model": "https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/room.json", "storageMB": 2.43 },
+        { "id": "counter", "name": "Flux-GS · Counter", "dataset": "mip360", "page": "flux-gs-project-gh-pages/render_counter/index.html", "model": "https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/counter.json", "storageMB": 2.32 },
+        { "id": "kitchen", "name": "Flux-GS · Kitchen", "dataset": "mip360", "page": "flux-gs-project-gh-pages/render_kitchen/index.html", "model": "https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/kitchen.json", "storageMB": 3.41 },
+        { "id": "bonsai", "name": "Flux-GS · Bonsai", "dataset": "mip360", "page": "flux-gs-project-gh-pages/render_bonsai/index.html", "model": "https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/bonsai.json", "storageMB": 3.09 },
+        { "id": "truck", "name": "Flux-GS · Truck", "dataset": "tnt", "page": "flux-gs-project-gh-pages/render_truck/index.html", "model": "https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/truck.json", "storageMB": 2.77 },
+        { "id": "train", "name": "Flux-GS · Train", "dataset": "tnt", "page": "flux-gs-project-gh-pages/render_train/index.html", "model": "https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/train.json", "storageMB": 2.91 },
+        { "id": "drjohnson", "name": "Flux-GS · DrJohnson", "dataset": "db", "page": "flux-gs-project-gh-pages/render_drjohnson/index.html", "model": "https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/drjohnson.json", "storageMB": 2.62 },
+        { "id": "playroom", "name": "Flux-GS · Playroom", "dataset": "db", "page": "flux-gs-project-gh-pages/render_playroom/index.html", "model": "https://huggingface.co/datasets/mobile-gs2/mobile-gs2/resolve/main/playroom.json", "storageMB": 1.90 }
+    ]
+}

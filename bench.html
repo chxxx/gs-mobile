@@ -29,6 +29,37 @@
         button:disabled { opacity: .45; cursor: not-allowed; }
         #view-area { position: relative; flex: 1; min-height: 240px; background: #000; overflow: hidden; }
         #view { width: 100%; height: 100%; display: block; touch-action: none; outline: none; }
+        /* [2026-10-07] `?mode=view`（展示浏览 / 录屏）：渲染区**占满整屏**，标题栏 / 状态行 / 控制条改为浮层。
+           进入该模式时由 bench.ts 给 body 加 `.mode-view`（回 bench 设置页时移除）。 */
+        body.mode-view { overflow: hidden; }
+        body.mode-view #topbar, body.mode-view #statusline { display: none; }
+        body.mode-view main { position: fixed; inset: 0; }
+        body.mode-view #view-area { position: absolute; inset: 0; min-height: 0; }
+        body.mode-view #welcome, body.mode-view #result-card { display: none; }
+        body.mode-view #controls { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%);
+            z-index: 20; max-width: calc(100vw - 24px); background: rgba(13,17,23,.72); border: 1px solid var(--line);
+            border-radius: 12px; opacity: .28; transition: opacity .18s ease; }
+        body.mode-view #controls:hover, body.mode-view #controls:focus-within { opacity: 1; }
+        /* [2026-10-07] 真机可读性：手机屏幕小，信息条/大字提示要放大，否则现场看不出 splats/canvas 等关键值 */
+        body.mode-view #info-overlay { font-size: 15px; }
+        body.mode-view #status-big { font-size: 20px; bottom: 60px; padding: 0 10px; }
+        /* [2026-10-07] 手机上的控制条：实心、单行横向滚动（不再换行成一大坨）、点得到；
+           `隐藏工具栏` 按钮可整体收起（录屏时画面更干净）。 */
+        body.mode-view.view-bar-hidden #controls { display: none; }
+        @media (max-width: 900px) {
+            body.mode-view #controls {
+                left: 6px; right: 6px; transform: none; bottom: 8px; max-width: none;
+                padding: 8px 10px; opacity: .96;
+            }
+            body.mode-view #controls .row { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+            body.mode-view #controls .row > * { flex: 0 0 auto; }
+            body.mode-view #controls select,
+            body.mode-view #controls input,
+            body.mode-view #controls button { font-size: 15px; padding: 10px 12px; }
+            body.mode-view #fps-overlay { font-size: 40px !important; }
+            body.mode-view #info-overlay { font-size: 14px; max-width: 58vw; word-break: break-word; }
+            body.mode-view #status-big { bottom: 74px; }
+        }
         /* 测试 iframe 宿主：一次只放一个 iframe。
            默认**铺满整个渲染区**（与旧 bench.html 的画布行为一致：画布后备缓冲仍是 res=WxH，
            显示尺寸只影响观感，不影响被测负载），因此不会有左右黑边/缩成一团。
@@ -57,6 +88,13 @@
         body.running #bench-controls { display: none; }
         #diag-line { position: absolute; left: 0; right: 0; bottom: 0; font: 11px/1.4 ui-monospace, Menlo, Consolas, monospace; color: #9be; background: rgba(0,0,0,.55); padding: 2px 6px; white-space: pre-wrap; pointer-events: none; }
         .hidden { display: none !important; }
+        /* [2026-10-07] 加载遮罩：转圈 + 已等待秒数。真机一次加载十几秒，全黑会被当成卡死。 */
+        #view-loading { position: absolute; inset: 0; z-index: 15; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 16px; padding: 24px; text-align: center;
+            background: rgba(13,17,23,.88); color: var(--text); font-size: 16px; line-height: 1.6; white-space: pre-line; }
+        #view-loading .spin { width: 46px; height: 46px; border-radius: 50%;
+            border: 4px solid rgba(230,237,243,.22); border-top-color: var(--accent); animation: ch7spin .9s linear infinite; }
+        @keyframes ch7spin { to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
@@ -108,6 +146,7 @@
                 <label><input type="checkbox" id="ck-overlay" checked /> 帧率叠加</label>
                 <label><input type="checkbox" id="ck-info" checked /> 显示信息</label>
                 <button id="btn-reset-view" class="ghost">重置视角</button>
+                <button id="btn-view-bar" class="ghost">隐藏工具栏</button>
             </div>
             <div class="row hidden" id="bench-progress">
                 <span>测试进行中，请保持屏幕常亮、不要切换页面。每一轮都会新建并销毁一个测试 iframe，画面短暂黑屏属正常现象。</span>
@@ -122,6 +161,10 @@
             <div id="fps-overlay" class="hidden"></div>
             <div id="info-overlay" class="hidden"></div>
             <div id="status-big" class="hidden"></div>
+            <div id="view-loading" class="hidden">
+                <div class="spin"></div>
+                <div id="view-loading-text">正在加载…</div>
+            </div>
             <div id="diag-line" class="hidden"></div>
         </section>
 

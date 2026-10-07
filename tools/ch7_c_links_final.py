@@ -45,6 +45,26 @@ def main():
         out += ["## 批次 %s · %s（%d 场景）· `u=%s`" % (tag, name, n, u.group(1) if u else "?"), "",
                 "**冷组（cold=1，主结果）**", "", "```", base + FINAL, "```", "",
                 "**热组（cold=0，首帧热值）**", "", "```", base.replace("cold=1", "cold=0") + FINAL, "```", ""]
+    # ---- Flux 臂链接（P0=口径A 受控 / P1=口径B 官方）----
+    #   注意：Flux 臂跑的是 bench-flux.html（同源 iframe 桥），**不加**本文的 4 个 FINAL 开关
+    #   （那些是 bench.html 渲染器的开关，对 Flux 无意义）；口径 B 只追加 `fluxsrc=official`。
+    for tag, name, n in BATCHES:
+        for regime, files in (("A(受控)", "c_linkA_f%s.txt"), ("B(官方)", "c_linkB_f%s.txt")):
+            p = os.path.join(SRC, files % tag[1])
+            if not os.path.exists(p):
+                out += ["## Flux 臂 · 批次 %s · %s（%d 场景）" % (tag, regime, n), "", "**缺产物：%s**" % p, ""]
+                continue
+            t = open(p, encoding="utf-8", errors="replace").read()
+            m2 = re.search(r"(https?://\S+)", t)
+            if not m2:
+                out += ["## Flux 臂 · 批次 %s · %s" % (tag, regime), "", "**产物里没找到 URL**", ""]
+                continue
+            u = m2.group(1)
+            if regime.startswith("B"):
+                u = u + "&fluxsrc=official"
+            out += ["## Flux 臂 · 批次 %s · 口径 %s（%d 场景）" % (tag, regime, n), "",
+                    "> 与同批本文臂链接**同会话交替**（ABAB）；结果头自带 `network_regime=` 字段。", "",
+                    "```", u, "```", ""]
     txt = "\n".join(out) + "\n"
     print(txt)
     open(os.path.join(SRC, "c_links_final.md"), "w", encoding="utf-8", newline="\n").write(txt)

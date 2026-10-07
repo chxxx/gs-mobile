@@ -135,6 +135,7 @@ const btnDone = $<HTMLButtonElement>("btn-done");
 const btnExport = $<HTMLButtonElement>("btn-export");
 const btnLoadView = $<HTMLButtonElement>("btn-load-view");
 const btnResetView = $<HTMLButtonElement>("btn-reset-view");
+const btnViewBar = $<HTMLButtonElement>("btn-view-bar");
 const selProfile = $<HTMLSelectElement>("sel-profile");
 const inpRounds = $<HTMLInputElement>("inp-rounds");
 const selCold = $<HTMLSelectElement>("sel-cold");
@@ -775,7 +776,10 @@ async function runCaseJob(meta: SceneMeta, roundNo: number, st: BenchState, atte
     const mark = (phase: string): void => {
         trace.push([phase, performance.now() - tRound]);
     };
-    const token = `r${Date.now()}_${Math.floor(Math.random() * 1e9)}`;
+    // [2026-10-07] 冷/热组的真正区别：`cold=1` 每轮换新 `ts=` 令牌（强制重新下载模型）；
+    //   `cold=0`（热组）用**按场景稳定的令牌**，让浏览器真的命中 HTTP 缓存 ⇒ 第 2 轮起 fetch ≈ 0。
+    //   修之前 `cold=0` 也换令牌 ⇒ 缓存必 miss ⇒ 冷/热两组测出来是同一件事（白跑）。
+    const token = st.cold ? `r${Date.now()}_${Math.floor(Math.random() * 1e9)}` : `warm_${meta.id}`;
     const modelUrl = new URL(meta.file, location.href);
     modelUrl.searchParams.set("ts", token);
     const childUrl = buildCasePageUrl({
@@ -1195,6 +1199,7 @@ function exportArchive(): void {
 // ------------------------------------------------------------------ view（展示浏览）模式
 /** 只有本函数会创建 renderer：bench 模式下连 bench-view.ts 都不会被下载/执行。 */
 async function setupViewMode(): Promise<void> {
+    document.body.classList.add("mode-view"); // [2026-10-07] 展示浏览：渲染区占满整屏（见 bench.html 的 body.mode-view 规则）
     benchControls.classList.add("hidden");
     viewControls.classList.remove("hidden");
     progressRow.classList.add("hidden");
@@ -1204,7 +1209,19 @@ async function setupViewMode(): Promise<void> {
     progressFill.style.width = "0%";
     stPhase.textContent = "-";
     const mod = await import("./bench-view");
-    view = new mod.BenchView({ canvas, stScene, fpsOverlay, infoOverlay, welcome, statusBig }, manifest);
+    view = new mod.BenchView(
+        {
+            canvas,
+            stScene,
+            fpsOverlay,
+            infoOverlay,
+            welcome,
+            statusBig,
+            loading: $<HTMLElement>("view-loading"),
+            loadingText: $<HTMLElement>("view-loading-text"),
+        },
+        manifest,
+    );
     view.start({ big: param("fpsoverlay") === "1", overlay: ckOverlay.checked, info: ckInfo.checked });
     glRendererReported = view.glRendererName();
     stDevice.textContent = view.deviceLabel();
@@ -1234,6 +1251,11 @@ function setupViewEvents(): void {
         void view?.load(selViewScene.value);
     });
     btnResetView.addEventListener("click", () => view?.resetCamera());
+    // [2026-10-07] 手机上控制条会挡住画面，给一个一键收起/展开（录屏时画面更干净）。
+    btnViewBar.addEventListener("click", () => {
+        const hidden = document.body.classList.toggle("view-bar-hidden");
+        btnViewBar.textContent = hidden ? "显示工具栏" : "隐藏工具栏";
+    });
     ckOverlay.addEventListener("change", () => {
         view?.setOverlayVisible(ckOverlay.checked);
         fpsOverlay.classList.toggle("hidden", !ckOverlay.checked);
@@ -1271,6 +1293,7 @@ function buildStateFromParams(): BenchState {
 }
 
 function showBenchSettings(): void {
+    document.body.classList.remove("mode-view"); // [2026-10-07] 与 setupViewMode 对称
     benchControls.classList.remove("hidden");
     viewControls.classList.add("hidden");
     progressRow.classList.add("hidden");
