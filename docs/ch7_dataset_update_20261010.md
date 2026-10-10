@@ -16,20 +16,32 @@
   另有 `element codebook_centers 256` 与 `element sh_basis 7` ⇒ **与本渲染器的 `r7 QPLY` 读取路径一致**，无需改代码。
 - 场景清单/相机：`bench-scenes.json` 已有 `drjohnson`（`points:432000`）与 `playroom`（`db`）；`bench-cameras.json` 两场景均有条目 ⇒ 手机端 `cam=flux` 对位可用，**无需新增配置**。
 
-## 2. 对应的新性能指标（`_aggregated_results/all_metrics_latest.txt`，2026-09-07 批次）
+## 2. 性能指标：**以 `thesis_project/thesis.md` 表 4-1/4-2 为准**
+
+> ⚠️ 权威数字在论文里（用户已更新）：**`thesis_project/thesis.md`**。下列逐场景值来自
+> `D:\study\output\benchmark_deep_blending_ours\_aggregated_results\all_metrics_latest.txt`（2026-09-07 批次），
+> **与论文表中的数据集均值有一处不一致，需你确认哪一批对应新 PLY**。
+
+**论文表 4-2（Deep Blending，本文方法）**：`PSNR 30.09 / SSIM 0.911 / LPIPS 0.243 / #G 0.311M`
+（对照：3DGS 29.42/0.900/0.250/2.780M；Mini-Splatting 30.00/0.908/0.255/0.311M）
+
+**逐场景（`all_metrics_latest.txt`，同批次）**：
 
 | Scene | PSNR | SSIM | LPIPS | Q-PSNR | Q-SSIM | Q-LPIPS | Points | Size(MB) | Half(MB) | FPS |
 |---|---|---|---|---|---|---|---|---|---|---|
 | playroom | 30.0589 | 0.9089 | 0.2461 | 29.9921 | 0.9085 | 0.2471 | **190,000** | 17.40 | 4.36 | 261.59 |
 | drjohnson | 29.4680 | 0.9067 | 0.2422 | 29.3497 | 0.9048 | 0.2436 | **432,000** | 39.55 | 9.90 | 237.99 |
 
-均值：PSNR **29.7634** / SSIM **0.9078** / LPIPS **0.2441**；Q-PSNR **29.6709** / Q-SSIM **0.9067** / Q-LPIPS **0.2454**；
-Final Points 均值 **311,000**；Half PLY 均值 **7.13 MB**；Bits per Gaussian **768.07**；**Native GPU FPS 均值 249.79**；
-Peak VRAM 训练 14.18 GB / 渲染 1.285 GB。
+该批均值 PSNR **29.7634** / SSIM **0.9078** / LPIPS **0.2441**；Final Points 均值 311,000；
+Half PLY 均值 7.13 MB；Bits per Gaussian 768.07；**Native GPU FPS 均值 249.79**；Peak VRAM 训练 14.18 GB / 渲染 1.285 GB。
 
-> ⚠️ 两点口径提醒：
-> 1. `FPS` 一栏是**桌面原生 GPU** 口径，**不是**我们手机 harness 的 `Offscreen-PaperMatch`，两者不可混写；
-> 2. `Points` 已变（playroom 190k）⇒ 任何**基于旧副本**的覆盖率/点数/FPS 记录都要按新点数重取（本次替换后自动生效）。
+**差异说明（重要）**：论文表 4-2 的 Deep Blending 本文方法为 **30.09 dB**，而上面这批的**两场景均值是 29.76 dB**（差 0.33 dB）。
+两种可能：① 论文用的是**更新的一批**（点数同为 0.311M ⇒ 点数对得上，只是质量指标更高）；② 论文那一行是**不同子集/配置**的均值。
+⇒ **以论文为准**；若要做"手机实测 vs 论文"的对照，请以论文表 4-2 的 30.09/0.911/0.243 为基准。
+
+> 另有两点口径提醒：`FPS` 一栏是**桌面原生 GPU**（不是手机 harness 的 `Offscreen-PaperMatch`）；`Points` 已随新 PLY 变为
+> drjohnson 432,000 / playroom 190,000，任何**基于旧副本**的点数/覆盖率/FPS 记录都要按新点数重取（替换后自动生效）。
+
 
 ## 3. 影响面（需要跟着更新数字的地方）
 
