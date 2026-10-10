@@ -97,6 +97,16 @@ npm run site:preview
 | `bench-resolutions.json` | `tools/make_bench_resolutions.py` | 逐场景原生分辨率表；**已废弃**（主表改用统一像素协议），仅作历史记录 |
 | `../thesis_project/data/ch7_measurements/**` | 结果卡片复制 + `tools/ch7_baseline_report.py` | 原始结果与报表（在论文仓库侧，已被主仓库 `.gitignore` 忽略） |
 
+### 3.1 协议输入资产（**已入库**：随提交分发，勿删）
+
+| 文件 | 生成方式 | 用途 |
+| :--- | :--- | :--- |
+| `bench-flux-camera.json` | `tools/extract_flux_camera.py` | `?cam=flux` 的输入：Flux-GS 原相机（位置/姿态/焦距），三臂同视角的基础 |
+| `bench-aligned-poses.json` | `_tmp_ch7probe/sim3.mjs` | `?pose_src=aligned` 的输入：**只**把 reduced 臂登记的 `r3dgs-*` 场景换成「本文臂 flux 相机经 ours→reduced 相似变换搬过来」的机位（`sim3_ver=ch7-sim3-202610090709`）；重生成 `_tmp_ch7probe/sim3_run.cmd`（需两侧 PLY）。本文臂机位不受影响 |
+
+> 与 §3 的区别：§3 那些是**实验派生生成物**（可删，正式流程不需要），故在 `.gitignore` 里；
+> 上面两份是**测量协议的输入**（页面运行时 `fetch` 它们），删了协议就跑不起来 ⇒ 入库。
+
 ## 4. 正式实测（三方严格同口径：统一像素协议）
 
 ```text

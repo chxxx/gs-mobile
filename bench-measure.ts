@@ -21,6 +21,7 @@ import {
 import { perf } from "./src/utils/PerfDebug";
 import {
     CAM_FLUX,
+    POSE_ALIGNED,
     PROTO_FLUX,
     applySegTimingFields,
     clipInsideRatio,
@@ -110,10 +111,43 @@ interface SpinState {
     frames: number;
 }
 
+/** 机位指纹数值比较（见调用处注释：页面内部是 float32，逐位字符串比较可能在正确机位下也判 0）。 */
+function poseKeyClose(a: string, b: string, tol = 1e-5): boolean {
+    const A = String(a ?? "").split(",").map(Number);
+    const B = String(b ?? "").split(",").map(Number);
+    if (A.length !== B.length || A.length === 0) return false;
+    for (let i = 0; i < A.length; i++) {
+        if (!Number.isFinite(A[i]) || !Number.isFinite(B[i])) return false;
+        if (Math.abs(A[i] - B[i]) > tol) return false;
+    }
+    return true;
+}
+
 /** Flux-GS 原相机资产（`bench-flux-camera.json`，由 tools/extract_flux_camera.py 抽出）。 */
 export interface FluxCameraAsset {
     focal_px: number;
     default_view: { position: number[]; quaternion: number[] };
+}
+
+/**
+ * 第7章「相机对齐」资产（`bench-aligned-poses.json`，由 `_tmp_ch7probe/sim3.mjs` 生成）。
+ * 每个登记场景给出 reduced 坐标系里的机位 = 本文臂 flux 相机经 ours→reduced 相似变换后的位置/朝向，
+ * 以及该变换本身（`model`/`resid`）与预期机位指纹（`cam.pose_key`，页面据此自证是否按刻度渲染）。
+ */
+export interface AlignedPoseEntry {
+    r3dgs: string;
+    mode: string;
+    resid?: { diagMedPct?: number; sim3MedPct?: number; sim3InlierPct?: number; RvsIdentityDeg?: number };
+    cam: { position: number[]; quaternion: number[]; view_matrix?: number[]; fx: number; pose_key: string };
+    model?: { s?: number; R?: number[]; t?: number[]; A?: number[]; b?: number[] };
+}
+export interface AlignedPoseAsset {
+    version: number;
+    sim3_ver: string;
+    camera: string;
+    res: string;
+    fx: number;
+    scenes: Record<string, AlignedPoseEntry>;
 }
 
 /** 一轮测量需要的、来自父页面 job 的参数。 */
@@ -337,6 +371,10 @@ export class BenchCase {
     renderCalls = 0;
 
     private _fluxCamera: FluxCameraAsset | null = null;
+    /** 第7章对齐机位资产（`?pose_src=aligned`）：null = 未加载/不可达 ⇒ 一律回退 flux 相机 */
+    private _alignedPoses: AlignedPoseAsset | null = null;
+    /** 本轮实际应用的对齐机位信息（供结果字段自证用；未应用时为 null） */
+    private _alignedApplied: { scene: string; ver: string; s: number | null; poseKey: string } | null = null;
     /** 动态相机（`?spin=`）本轮配置；null = 静止协议（历史口径，机位全程不变） */
     private _spin: SpinState | null = null;
     /** 离屏论文协议的非阻塞 GPU 进度门（`mode=offscreen-paper-match` 时创建，其余路径恒为 null） */
@@ -1474,6 +1512,56 @@ export class BenchCase {
             .join(",");
     }
 
+    /** 读取第7章对齐机位资产（`?pose_src=aligned` 时由子页面在测帧前调用）。 */
+    async loadAlignedPoses(): Promise<void> {
+        try {
+            const res = await fetch("./bench-aligned-poses.json");
+            if (!res.ok) return;
+            this._alignedPoses = (await res.json()) as AlignedPoseAsset;
+        } catch {
+            /* 取不到就回退 flux 相机（与 `cam=flux` 资产缺失时的回退一致） */
+        }
+    }
+
+    /**
+     * 应用**对齐机位**（仅当该场景已在资产里登记时）。返回 false ⇒ 调用方照旧走 flux / 自动取景。
+     * 语义：本文臂不受影响（它不在资产表里），只有 reduced-3DGS 臂的 `r3dgs-*` 场景换机位，
+     * 从而两臂在同一视角下渲染「同一份内容」。
+     */
+    applyAlignedCamera(sceneId: string): boolean {
+        const table = this._alignedPoses?.scenes;
+        // 资产表可能以「场景名」为键（bicycle），而 case 传进来的是登记 id（r3dgs-bicycle）；
+        // 也可能相反。两种都认，避免"资产在、只是键对不上"导致静默回退 flux（实测踩过一次）。
+        let entry = table?.[sceneId];
+        if (!entry && table) {
+            const stripped = sceneId.replace(/^r3dgs-/, "");
+            entry = table[stripped] ?? Object.values(table).find((e) => e?.r3dgs === sceneId) ?? undefined;
+        }
+        if (!entry?.cam?.position || !entry.cam.quaternion) return false;
+        const [px, py, pz] = entry.cam.position;
+        const [x, y, z, w] = entry.cam.quaternion;
+        const fx = Number.isFinite(entry.cam.fx) && entry.cam.fx > 0 ? entry.cam.fx : this._alignedPoses!.fx;
+        this.camera.data.fx = fx;
+        this.camera.data.fy = fx;
+        this.camera.position = new SPLAT.Vector3(px, py, pz);
+        this.camera.rotation = new SPLAT.Quaternion(x, y, z, w);
+        this.camera.update();
+        this.cameraLocked = true;
+        const s = entry.model?.s;
+        this._alignedApplied = {
+            scene: sceneId,
+            ver: this._alignedPoses!.sim3_ver ?? "",
+            s: typeof s === "number" && Number.isFinite(s) ? s : null,
+            poseKey: entry.cam.pose_key ?? "",
+        };
+        return true;
+    }
+
+    /** 本轮应用的对齐机位信息（未应用时 null）；用于写 `sim3_ver=`/`sim3_s=`/`aligned_pose_ok=`。 */
+    alignedInfo(): { scene: string; ver: string; s: number | null; poseKey: string } | null {
+        return this._alignedApplied;
+    }
+
     glRendererName(): string {
         try {
             const gl = this.renderer?.gl as WebGL2RenderingContext | undefined;
@@ -1738,15 +1826,27 @@ export async function measureOneRound(
         }
         const tLoaded = performance.now();
         mark("decode-done", `splats=${splat.data?.vertexCount ?? "?"}`);
+        // 第7章对齐协议（`?pose_src=aligned`）：**只**对资产里登记过的场景（reduced 臂 `r3dgs-*`）
+        // 换成「由本文臂 flux 相机经 ours→reduced 相似变换搬过来」的机位；本文臂与未登记场景照旧。
+        const usedAligned = POSE_ALIGNED && ctx.applyAlignedCamera(meta.id);
         // cam=flux：用 Flux-GS 原相机（位置 + 姿态 + 焦距）复现同一视角；资产缺失时才退回包围盒取景
-        if (!(CAM_FLUX && ctx.applyFluxCamera())) {
+        if (!usedAligned && !(CAM_FLUX && ctx.applyFluxCamera())) {
             ctx.frameScene(splat);
         }
         ctx.camera.update();
         // 机位指纹（写进逐轮结果）：与 Flux-GS 臂的 `pose=` 同格式，跨轮/跨臂可直接核对。
         // 注意在**相机就位之后**取值：frameScene 也会 update 相机，取早了记的是默认机位。
         base.poseKey = ctx.viewFingerprint();
-        base.poseSrc = ctx.cameraLocked ? "flux" : "auto";
+        base.poseSrc = usedAligned ? "aligned" : ctx.cameraLocked ? "flux" : "auto";
+        if (usedAligned) {
+            // 协议自证：把资产版本、相似变换缩放、以及「页面重算的指纹 == 资产里的 pose_key」写进结果。
+            // 指纹比较用**数值容差**（1e-5）：页面内部是 float32 视图矩阵，末位舍入可能让逐位字符串比较
+            // 在正确机位下也判 0；而四元数约定若真错了，偏差是 O(1)，容差比得出来。
+            const info = ctx.alignedInfo();
+            base.sim3Ver = info?.ver || undefined;
+            base.sim3Scale = info?.s ?? undefined;
+            base.alignedPoseOk = !!info && poseKeyClose(info.poseKey, base.poseKey);
+        }
         mark("camera-ready", `camLocked=${ctx.cameraLocked} pose=${base.poseKey}`);
         // ---- 动态相机（`?spin=`，效度自查；`spin=0` 时下面全是 no-op）----
         // 必须在机位就位之后、测帧之前：`pose=` 记的仍是第 0 帧机位，此后每帧由共享实现转动。

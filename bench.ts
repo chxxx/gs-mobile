@@ -47,6 +47,7 @@ import {
     ARCHIVE_KEY,
     BENCH_FADE_LABEL,
     CAM_FLUX,
+    POSE_ALIGNED,
     CASE_DISPOSE_TIMEOUT_MS,
     CASE_DOC_RETRY_DELAY_MS,
     CASE_READY_TIMEOUT_MS,
@@ -467,11 +468,15 @@ function buildResultText(st: BenchState): string {
     lines.push(`cam=${CAM_FLUX ? "flux" : "auto"}`);
     // 机位来源（与 Flux-GS 臂的 `pose_src=` 同名字段）：ch7_baseline_report.py 用它核对
     // "两臂的机位口径是否同一档"，避免只靠人记得看 cam= 这一个参数
-    lines.push(`pose_src=${CAM_FLUX ? "flux" : "auto"}`);
+    // `aligned` = 第7章对齐协议：reduced 臂用「本文臂 flux 相机搬到 reduced 坐标系」的机位
+    // （资产 `bench-aligned-poses.json`；逐轮还带 `sim3_ver=` / `sim3_s=` / `aligned_pose_ok=`）
+    lines.push(`pose_src=${POSE_ALIGNED ? "aligned" : CAM_FLUX ? "flux" : "auto"}`);
     lines.push(`warmup=${benchMode() === BENCH_MODE_OFFSCREEN ? offscreenWarmupFrames() : warmupFrames()}`);
     lines.push(`fx=${Math.round(fx * 1000) / 1000}`);
     lines.push(`ts=${new Date().toISOString()}`);
     lines.push(`ua=${env.ua}`);
+    // [DEV 2026-10-09] 设备型号 token（自证）：WebGL 失败时 `chip=unknown`，本字段保证失败也能归因到具体机型
+    lines.push(`dev=${env.dev || "-"}`);
     lines.push(`gl_renderer=${env.gl_renderer}`);
     lines.push(`screen=${env.screen}`);
     lines.push(`dpr=${env.dpr}`);
@@ -536,6 +541,15 @@ function buildResultText(st: BenchState): string {
         // 机位口径（**始终打印**，不受 diag 开关影响）：`pose=` 与 Flux-GS 臂逐轮行的同名同格式，
         // tools/ch7_baseline_report.py 据此跨臂核对"两臂是否同一个机位"。
         tags.push(`pose=${r.poseKey ?? ""}`, `pose_src=${r.poseSrc ?? ""}`);
+        // 第7章对齐协议（`?pose_src=aligned`）：资产版本 + 相似变换缩放 + 「页面重算的指纹是否与
+        // 资产逐位一致」。三项都在同一行 ⇒ 报表侧不必另找文件就能判定这一轮是不是真的按对齐机位跑的。
+        if (r.sim3Ver) {
+            tags.push(
+                `sim3_ver=${r.sim3Ver}`,
+                `sim3_s=${fmt(r.sim3Scale, 6)}`,
+                `aligned_pose_ok=${r.alignedPoseOk ? 1 : 0}`,
+            );
+        }
         // 离屏论文协议（`?benchmode=offscreen-paper-match`）逐轮明细：模式/渲染目标/run 数/预热帧数/
         // 多轮 FPS 均值±标准差/逐 run 列表/栅栏代价与积压峰值/驱动地板。在屏协议的轮次**一个都不打印**
         // （函数内部按 `bench_mode` 守卫）→ 历史逐轮行格式逐字不变。

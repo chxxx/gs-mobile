@@ -28,8 +28,17 @@ const throttleSpeedMbps = process.env.THROTTLE_SPEED ? parseFloat(process.env.TH
  *     （`.part` 不匹配 `*.txt`，即使脚本正在扫描也只是看不到这个尚未完成的文件）。
  */
 const CH7_RAW_DIR = resolve(__dirname, '../thesis_project/data/ch7_measurements/raw');
-/** 单次回传体上限：结果文本正常只有几十 KB，超过说明不是结果文本 */
-const CH7_MAX_BODY = 4 * 1024 * 1024;
+/**
+ * 单次回传体上限。历史值是 4 MiB，理由是"结果文本正常只有几十 KB"——但那条假设在
+ * `?framedump=1`（取图口径）下**不成立**：每场景每轮会内嵌一张整幅无损 PNG data URL
+ * （800×531 ≈ 1.2 MB/张），5 场景 × 1 轮 ≈ 6 MB ⇒ 会被 413 拒收、整份记录丢失
+ * （2026-10-08 实测：`[ch7-report] 拒收（413）：body too large (>4194304 bytes)`，
+ *  见 `_tmp_ch7probe/out/dev_host.log`）。因此上限抬到 64 MiB：
+ *  - 仍能挡住"明显不是结果文本"的垃圾/探测请求（真机进表记录 10–300 KB，取图记录 ≤ 15 MB）；
+ *  - 同源、带令牌（`rtok`）闸门不变，公网暴露面不变；
+ *  - 只是 dev / preview server 的中间件参数，不影响构建产物与任何测量逻辑。
+ */
+const CH7_MAX_BODY = 64 * 1024 * 1024;
 /**
  * 回传口令（2026-09-17 追加）：外部测试者的页面 URL 带 `rtok=<口令>`，页面提交时把它转成请求的
  * `token=<口令>`；隧道把本服务暴露到公网后，这是唯一的写入闸门。

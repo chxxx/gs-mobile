@@ -1731,6 +1731,8 @@ function buildResultText(st: BenchState): string {
     lines.push(`pose_src=${param("pose", "flux")}`);
     lines.push(`ts=${new Date().toISOString()}`);
     lines.push(`ua=${env.ua}`);
+    // [DEV 2026-10-09] 设备型号 token（自证）：WebGL 失败时 `chip=unknown`，本字段保证失败也能归因到具体机型
+    lines.push(`dev=${env.dev || "-"}`);
     lines.push(`gl_renderer=${env.gl_renderer}`);
     lines.push(`screen=${env.screen}`);
     lines.push(`dpr=${env.dpr}`);

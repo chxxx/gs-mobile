@@ -296,6 +296,14 @@ export const PROTO_FLUX = param("proto", "") === "flux";
  * 都按同一个判定打印，避免再出现「参数漏带却无人察觉」。
  */
 export const CAM_FLUX = param("cam", "flux") !== "auto";
+/**
+ * `?pose_src=aligned`：机位取**对齐资产** `bench-aligned-poses.json`（第7章对比专用）。
+ * 该资产把本文臂的 flux 相机经「ours→reduced」相似变换（`_tmp_ch7probe/sim3.mjs` 用两侧
+ * 高斯中心点云 ICP/Umeyama 拟合，残差与对应点像素误差见 `out/sim3_report.txt`）搬到 reduced
+ * 坐标系，使两臂在**同一视角**下取景基本一致。只对资产里登记过的场景 id（reduced-3DGS 臂的
+ * `r3dgs-*`）生效；未登记的场景与本文臂照旧走 flux 相机 ⇒ 不存在“顺手把本文臂也改了”的风险。
+ */
+export const POSE_ALIGNED = param("pose_src", "") === "aligned";
 /** 计帧前预热帧数：参考协议（Flux-GS 原协议）为 0，旧 1600×1063 口径为 10；`?warmup=N` 可显式覆盖。 */
 export function warmupFrames(): number {
     const n = parseInt(param("warmup", PROTO_FLUX ? "0" : "10"), 10);
@@ -1899,19 +1907,32 @@ export function expandProfile(list: SceneMeta[], profile: string): string[] {
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
-    const resolved = named.filter((id) => {
-        const meta = sceneById(list, id);
-        return !!meta && !meta.baseline;
-    });
+    const resolveNamed = (allowBaseline: boolean): string[] =>
+        named.filter((id) => {
+            const meta = sceneById(list, id);
+            return !!meta && (allowBaseline || !meta.baseline);
+        });
+    const resolved = resolveNamed(false);
     if (named.length > 0 && resolved.length === named.length) return resolved;
+    // 2026-10-09 追加：允许**直接点名对比臂（baseline）场景**，例如 `profile=r3dgs-bonsai`。
+    // 用途：reduced 臂整包 5 场景以 48 MB 的 bicycle 打头，弱一些的设备/容器（如 Snapdragon 8 Gen 2 上的
+    // 微信 XWEB）会在第一场景就丢失 WebGL 上下文 ⇒ 需要按**单场景/递增规模**试探，才能把"上下文崩溃"
+    // 与"算力不足"分开。此分支只在严格解析完全失败时才启用，因此不影响既有 profile 写法。
+    const resolvedBaseline = resolveNamed(true);
+    if (named.length > 0 && resolvedBaseline.length === named.length) return resolvedBaseline;
     return [];
 }
 
 // ------------------------------------------------------------------ 设备信息（纯计算：由调用方把 GL renderer 名传进来）
 export function deviceInfo(glRenderer: string): Record<string, string | number> {
     const chip = guessChip(glRenderer);
+    // [DEV 2026-10-09] 设备型号 token：从 UA 里抽 `; <TOKEN> Build/`（如 `PGEM10` / `PKC110`）。
+    // 用途：WebGL 上下文创建/丢失时页面读不到 GPU 名（`chip=unknown`），失败记录无法自证是哪台设备
+    // （第7章实测：`helper01m2*` / `helper01m11_173857` 三条 reduced 失败记录全靠事后解析 ua 才归因到 Gen2）。
+    const dev = (navigator.userAgent.match(/;\s*([A-Z0-9]{4,14})\s+Build\//) || [])[1] || "";
     return {
         ua: navigator.userAgent,
+        dev,
         gl_renderer: glRenderer,
         vendor: chip.vendor,
         chip: chip.chip,
@@ -1968,6 +1989,13 @@ export interface RoundResult extends SegTimingFields {
     /** 本轮机位来源：`flux` = Flux-GS 原相机（bench-flux-camera.json 的 default_view）；
      *  `auto` = 包围盒自动取景（`?cam=auto`，或 cam=flux 但相机资产缺失时回退）。 */
     poseSrc?: string;
+    /** 对齐机位资产版本号（`pose_src=aligned` 且该场景已登记时写入）：协议自证字段 */
+    sim3Ver?: string;
+    /** ours→reduced 相似变换的缩放 s（`x_reduced = s·R·x_ours + t` 中的 s）：协议自证字段 */
+    sim3Scale?: number;
+    /** 应用对齐机位后再读一次机位指纹，与资产里的 `pose_key` **逐位一致**时为 true。
+     *  这是“页面确实按资产里的机位在渲染”的证据（四元数约定若不一致，这里会变 false）。 */
+    alignedPoseOk?: boolean;
     /** 动态相机（`?spin=`）实际应用的转动速度（deg/帧；0/缺省 = 静止协议，`pose=` 即全程机位）。
      *  >0 时 `pose=` 只代表**起始**机位（第 0 帧），机位随帧号线性转动。 */
     spinDeg?: number;
@@ -2233,6 +2261,8 @@ export const ROUND_RESULT_BASE_KEYS = ["scene", "round", "ts", "ok"] as const;
 export const ROUND_RESULT_NUM_KEYS = [
     "coveredPct",
     "keptPct",
+    // 第7章对齐协议：ours→reduced 相似变换的缩放（协议自证，见 `sim3Ver`）
+    "sim3Scale",
     "points",
     "bytes",
     "fetchMs",
@@ -2364,6 +2394,7 @@ export const ROUND_RESULT_STR_KEYS = [
     "offscreenGpuDiag",
     "poseKey",
     "poseSrc",
+    "sim3Ver",
     "spinPivot",
     "spinPivotSrc",
     "spinNote",
@@ -2400,6 +2431,8 @@ export const ROUND_RESULT_BOOL_KEYS = [
     // 离屏论文协议：msgchannel 驱动地板是否卡住了本轮的帧率
     "offscreenDriverCapped",
     "sortLagOn",
+    // 第7章对齐协议（`?pose_src=aligned`）：页面重算的机位指纹是否与资产逐位一致
+    "alignedPoseOk",
 ] as const satisfies readonly (keyof RoundResult)[];
 /** 三张表的并集（`copyRoundResultFields` 的遍历对象） */
 export type RoundResultFieldKey =

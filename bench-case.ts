@@ -23,6 +23,7 @@ import { BenchCase, measureOneRound } from "./bench-measure";
 import {
     BENCH_MODE_OFFSCREEN,
     CAM_FLUX,
+    POSE_ALIGNED,
     ERR_CONTEXT_LOST,
     ERR_WEBGL_UNAVAILABLE,
     benchFrameCount,
@@ -247,6 +248,8 @@ async function main(): Promise<void> {
     caseCtx = ctx;
     ctx.applyFocalFromParam();
     if (CAM_FLUX) await ctx.loadFluxCamera(); // 三方同视角：读 Flux-GS 原相机（取不到则回退包围盒取景）
+    // 第7章对齐机位（`?pose_src=aligned`）：读 `bench-aligned-poses.json`（reduced 臂换机位，本文臂不变）
+    if (POSE_ALIGNED) await ctx.loadAlignedPoses();
     if (disposed) return;
 
     const res = resolution();

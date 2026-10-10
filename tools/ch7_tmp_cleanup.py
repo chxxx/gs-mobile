@@ -1,19 +1,25 @@
 # -*- coding: utf-8 -*-
-"""清理 `_tmp_ch7probe/` 里的一次性探针产物（白名单保留，其余删除）。默认 dry-run。
+"""清理 `_tmp_ch7probe/` 里的一次性探针产物（**黑名单删垃圾**，默认 dry-run）。
 
-为什么要白名单：该目录是 **gitignore 的 scratch 区**（351 个文件，绝大多数是一次性探针的
-`.err/.log/stat*.txt/probe*.txt` 与已被 `tools/` 取代的旧脚本）。删错会丢证据 ⇒ 只保留：
-  · `cdp.mjs`                     —— `tools/ch7_batch.py run` 依赖的 CDP 驱动器（**不能删**）
-  · `out/fps_hist.csv`            —— 文档引用的历史汇总
-  · `out/flux_net_<scene>.json`   —— Flux 运行时抓包原始产物（13 份，`docs/ch7_flux_runtime.md` 的证据）
-  · `c_link_c{1,2,3}.txt`         —— `tools/ch7_c_links_final.py` 的输入
-  · `c_links_final.md`            —— 已发出的 C 层链接留档
+为什么改成黑名单：旧版按白名单保留（只认 `cdp.mjs` / `c_link_c*.txt` / `flux_net_*.json` /
+`fps_hist.csv` 这一代产物），而目录里现在是**第 7 章画幅证据**（`out/side_*` 并排图与页面记录、
+`ch7_D9400_table_*.md`、`sim3.mjs` / `plylib.mjs` / `compose_side.mjs` 等工具）——
+照旧白名单 `--apply` 会把它们全删掉。现在只删"可再生成"的垃圾：
+
+  · `*.log`                —— dev server / 隧道 / 无头取景日志（进程在跑时删不掉，跳过即可）
+  · `_*.txt` / `_*.html`   —— 探针临时输出与 `compose_side.mjs` 的排版中间件
+  · `_side_mask.png`       —— 差集掩码中间件（`compose_side.mjs` 每次重生成）
+  · `diag_*.txt`、`*_fail.png` —— 一次性诊断与失败截图
+
+一律**不删**：`bin/`（隧道二进制，`tools/ch7_serve.ps1` 依赖且不会自动下载）、
+所有 `.mjs/.py/.cmd/.ps1/.md/.csv/.json/.txt` 文本与 `.png` 证据。
 
 用法：python tools/ch7_tmp_cleanup.py          # 只看将删什么
       python tools/ch7_tmp_cleanup.py --apply  # 真的删
 """
 
 import argparse
+import fnmatch
 import glob
 import os
 import sys
@@ -25,20 +31,24 @@ except Exception:
 
 GS = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 TMP = os.path.join(GS, "_tmp_ch7probe")
-KEEP_TOP = {"cdp.mjs", "c_link_c1.txt", "c_link_c2.txt", "c_link_c3.txt", "c_links_final.md"}
-KEEP_OUT = {"fps_hist.csv", "f0_analysis.md", "f0_table.md", "cg_base.png", "cg_frag.png"}
+# 黑名单：文件名匹配这些模式的就是"可再生成的垃圾"（其余一律保留）
+JUNK_PATTERNS = [
+    "*.log",           # dev server / 隧道 / 无头取景日志
+    "_*.txt",          # 探针临时输出（_q*.txt / _s.txt / _p.txt / _dir.txt / _chk*.txt …）
+    "_*.html",         # compose_side.mjs 的排版中间件
+    "_side_mask.png",  # 差集掩码中间件（每次重生成）
+    "diag_*.txt",
+    "*_fail.png",      # 失败截图
+]
 
 
-def keep(rel):
-    if rel in KEEP_TOP:
-        return True
+def is_junk(rel):
+    """True = 可再生成的垃圾（会被删）；False = 保留。"""
     if rel.startswith("bin" + os.sep):
         # 隧道二进制（`tools/ch7_serve.ps1` 期望 `bin/cloudflared.exe`，且**不会自动下载**）——勿删
-        return True
-    if rel.startswith("out" + os.sep):
-        base = os.path.basename(rel)
-        return base in KEEP_OUT or (base.startswith("flux_net_") and base.endswith(".json"))
-    return False
+        return False
+    base = os.path.basename(rel).lower()
+    return any(fnmatch.fnmatch(base, pat) for pat in JUNK_PATTERNS)
 
 
 def main():
@@ -50,7 +60,7 @@ def main():
         if os.path.isdir(p):
             continue
         rel = os.path.relpath(p, TMP)
-        if keep(rel):
+        if not is_junk(rel):
             kept.append(rel)
             continue
         try:

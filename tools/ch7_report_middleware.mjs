@@ -47,8 +47,8 @@ export function ch7TargetPath(rawDir, name) {
     return file;
 }
 
-/** 单次回传体上限：结果文本正常只有几十 KB，超过说明不是结果文本 */
-export const CH7_MAX_BODY_DEFAULT = 4 * 1024 * 1024;
+/** 单次回传体上限缺省值：见 vite.config.js 里 CH7_MAX_BODY 的说明（framedump 取图记录可达 ~6 MB）。 */
+export const CH7_MAX_BODY_DEFAULT = 64 * 1024 * 1024;
 
 /**
  * connect 风格中间件（dev / preview 通用）。
