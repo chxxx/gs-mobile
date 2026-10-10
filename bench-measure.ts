@@ -73,6 +73,8 @@ import {
     offscreenAsThroughputStats as offscreenAsThroughputStatsShared,
     resolveOffscreenSyncMode,
     runOffscreenProtocol,
+    // [TW 2026-10-10] `?twindow=` 解析器（离屏计时窗口口径；见 bench-offscreen 里的说明）
+    resolveTimingWindowFromUrl,
     syncPolicyLabelWithNote,
 } from "./bench-offscreen";
 import type { OffscreenGateSample, OffscreenProtocolResult } from "./bench-offscreen";
@@ -579,8 +581,18 @@ export class BenchCase {
             framesPerRun: frames,
             numRuns,
             warmupFrames: warmup,
-            // `batch` 策略：计时终点必须取在 run 末排空之后（否则只量到提交速率）
-            timingEndAfterDrain: gate?.mode === "batch",
+            // `batch` 策略：计时终点取在 run 末排空之后（否则只量到提交速率）
+            //   [TW 2026-10-10] 可被 `?twindow=frame` 覆盖（排空移出窗口）。**必须与父页读到同一个 search**：
+            //   本文臂的驱动跑在 iframe（bench-case.html）里，优先取**父页**的 search，同源失败再退回自身。
+            timingEndAfterDrain:
+                gate?.mode === "batch" &&
+                resolveTimingWindowFromUrl((() => {
+                    try {
+                        return window.parent && window.parent !== window ? window.parent.location.search : location.search;
+                    } catch {
+                        return location.search;
+                    }
+                })()).afterDrain,
             // 驱动降频：手机逐帧让出 ≈ 43ms/帧（会盖住 GPU 真实吞吐），缺省每 16 帧让出一次
             tickEveryFrames: offscreenTickEvery(),
             // 自然模式：驱动取自 URL（自然模式链接给 `driver=raf` = vsync 边界），并按 30 秒墙钟跑满
@@ -768,8 +780,21 @@ export class BenchCase {
     /** 读一帧像素统计覆盖率（%）：`renderFrame()` + `gl.finish()` + 全幅 readPixels + stride=8 稀疏采样
      *  （`alpha > 0` 即视为被高斯覆盖）。`covered=` 与 `sweep_cov=` 共用这一个量法，口径不可能分叉。 */
     private readCoveragePct(): number {
+        return this.readOutputStats().coveredPct;
+    }
+
+    /**
+     * [OUTCHK 2026-10-10] 一次读回同时给出两个**输出检查**量（同一份像素、同一个 stride=8 网格）：
+     *   - `coveredPct`：`alpha > 0`（既有量法；判据宽 —— 一块被 clear 成 `(0,0,0,1)` 的空 FBO 也会报 100%）；
+     *   - `inkPct`：`RGB > 8`（非黑/非背景）—— 回答"这一帧到底有没有往当前渲染目标写出内容"。
+     *
+     * **定位：输出检查，不是"两臂工作量相同"的证明。**
+     * 同点数、同输出尺寸、同机位、同驱动**只能**说明输入与测试协议基本对齐；
+     * 每个 splat 的实际着色量（SH 阶数、裁剪、混合）不同时，两臂的"工作量"仍然不等价，必须另行核对。
+     */
+    private readOutputStats(): { coveredPct: number; inkPct: number } {
         const renderer = this.renderer;
-        if (!renderer) return 0;
+        if (!renderer) return { coveredPct: 0, inkPct: 0 };
         const gl = renderer.gl as WebGL2RenderingContext;
         const w = renderer.canvas.width || 1;
         const h = renderer.canvas.height || 1;
@@ -780,6 +805,7 @@ export class BenchCase {
             /* ignore */
         }
         let covered = 0;
+        let ink = 0;
         let samples = 0;
         try {
             const buf = new Uint8Array(w * h * 4);
@@ -788,14 +814,18 @@ export class BenchCase {
             const stride = 8;
             for (let y = 0; y < h; y += stride) {
                 for (let x = 0; x < w; x += stride) {
-                    if (buf[(y * w + x) * 4 + 3] > 0) covered++;
+                    const o = (y * w + x) * 4;
+                    if (buf[o + 3] > 0) covered++;
+                    if (buf[o] > 8 || buf[o + 1] > 8 || buf[o + 2] > 8) ink++;
                     samples++;
                 }
             }
         } catch {
             /* readPixels 不可用时忽略 */
         }
-        return samples > 0 ? (covered / samples) * 100 : 0;
+        return samples > 0
+            ? { coveredPct: (covered / samples) * 100, inkPct: (ink / samples) * 100 }
+            : { coveredPct: 0, inkPct: 0 };
     }
 
     /**
@@ -1396,14 +1426,14 @@ export class BenchCase {
      * 还原到基准位姿后，本字段在所有轮次里都表示"基准机位的画面覆盖率"，与静止轮、与另一臂同义可比。
      * 画面内容随轨迹如何变化，由 `contentSweep()` 的逐姿态 `sweep_cov=` / `sweep_seen=` 负责回答。
      */
-    probeFrameCoverage(): { coveredPct: number; keptPct: number } {
+    probeFrameCoverage(): { coveredPct: number; keptPct: number; inkPct: number } {
         const renderer = this.renderer;
-        if (!renderer) return { coveredPct: 0, keptPct: 0 };
+        if (!renderer) return { coveredPct: 0, keptPct: 0, inkPct: 0 };
         this.restoreBasePose();
-        const coveredPct = this.readCoveragePct();
+        const stats = this.readOutputStats();
         const cull = renderer.renderProgram?.cullStats;
         const keptPct = cull && cull.total > 0 ? cull.keptRatio * 100 : 0;
-        return { coveredPct, keptPct };
+        return { coveredPct: stats.coveredPct, keptPct, inkPct: stats.inkPct };
     }
 
     /**
@@ -2164,6 +2194,10 @@ export async function measureOneRound(
 
         const probe = ctx.probeFrameCoverage();
         base.coveredPct = probe.coveredPct;
+        // [OUTCHK 2026-10-10] 非黑/非背景输出检查（与 coveredPct 同一份像素、同一网格、判据不同）。
+        //   配对读法：covered 高而 ink ~0 ⇒ 只有 clear/空画面；两者都 ~0 ⇒ 这一帧没写当前渲染目标。
+        //   **不是**工作量等价证明（见 readOutputStats 注释）。
+        base.inkPct = probe.inkPct;
         base.keptPct = probe.keptPct;
         // [阶段0 2026-09-30] 臂标签：读子页面发布的**实际生效**配置（`window.__CH7_ARM__`）。
         //   为什么不用 URL 推断：URL 是"请求"，可能因不支持/冲突/建 program 失败而未生效；

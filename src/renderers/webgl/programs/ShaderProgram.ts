@@ -44,10 +44,17 @@ abstract class ShaderProgram {
             try {
                 const shfmtParam = new URLSearchParams(location.search).get("shfmt") ?? "";
                 const shpassParam = new URLSearchParams(location.search).get("shpass") ?? "";
+                const stripCtParam = new URLSearchParams(location.search).get("strip_ct") ?? "";
                 // [SHPASS-PRE] 诊断变体（f16 / shpass=pre）里编译失败必须**可见**（落进报告 err=），
                 //   缺省路径保持历史行为（只 console.error）。
+                // [STRIP-CT 2026-10-10] `?strip_ct=1` 若删错声明（活跃分支仍引用）会报 undeclared identifier，
+                //   这里同样升级为抛错 —— 即"删除不得静默失效"的编译期兜底。
                 experimental =
-                    shfmtParam.startsWith("f16") || shpassParam === "pre" || shpassParam === "produce" || shpassParam === "consume";
+                    shfmtParam.startsWith("f16") ||
+                    shpassParam === "pre" ||
+                    shpassParam === "produce" ||
+                    shpassParam === "consume" ||
+                    stripCtParam === "1";
             } catch {
                 experimental = false;
             }

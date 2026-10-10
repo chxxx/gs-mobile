@@ -1,3 +1,6 @@
+> ⚠️ **【2026-10-10 失效标注】本文件中的 Flux 臂离屏数据可能无效** —— harness 的 `clearColor(0,0,0,1)` 状态泄漏（commit `acf1b6d`，2026-09-29 引入）使 Flux 离屏帧"绘制但无可见输出"（`ink_pct=0`）。规则/清单/处置见 **`docs/ch7_invalidated_by_clearcolor_leak.md`**。
+
+
 # 收口阶段 · 数据/计划输入（数据集清单 + T8 反例表）
 
 > 生成：2026-10-03。与 `docs/ch6_code_facts.md`（T11）配套；论文数字必须 rounds=3 同会话 ABAB。

@@ -1,3 +1,6 @@
+> ⚠️ **【2026-10-10 失效标注】本文件汇总的 Flux 离屏记录可能无效** —— harness 的 `clearColor(0,0,0,1)` 状态泄漏（commit `acf1b6d`，2026-09-29 引入）使 Flux 离屏帧"绘制但无可见输出"（`ink_pct=0`）。**2026-09-29 及之后**的 Flux 读数按**待重跑**处理（`raw/_` 黑名单与规则见 `docs/ch7_invalidated_by_clearcolor_leak.md`）。
+
+
 # 已有 Flux 记录 · 首帧/加载字段只读核对（v2，按臂标识判定）
 
 > 只读：**未新增任何测量**，数值全部来自 `thesis_project/data/ch7_measurements/raw/**` 已有记录。

@@ -1553,7 +1553,7 @@ async function main() {
         if (rafId) cancelAnimationFrame(rafId);
         rafId = null;
         // [DIAG-EXPERIMENT-1] drawTimings：逐帧分段样本（prep/err1/draw/err2/post，见 frame() 里的采集点）
-        __fluxBenchState = { frames: 0, sync: [], coveredPct: 0, target: o.frames | 0, sort0: sortCount, drawTimings: [] };
+        __fluxBenchState = { frames: 0, sync: [], coveredPct: 0, inkPct: 0, alphaMean: -1, vertexCountAtProbe: -1, coveredPctLast: -1, inkPctLast: -1, alphaMeanLast: -1, vertexCountAtProbeLast: -1, target: o.frames | 0, sort0: sortCount, drawTimings: [] };
         return true;
     };
     window.__FLUXGS_BENCH_PROBE__ = () => {
@@ -1605,26 +1605,65 @@ async function main() {
         if (__fluxBenchState) {
             __fluxBenchState.frames++;
             __fluxBenchState.sync.push(syncMs);
-            // 覆盖率先测一次（仅统计，不参与计时）：与本文臂 covered% 对照，判断两臂负载是否同量级。
-            // 注意：离屏协议下这一帧读的是**当前绑定的 framebuffer**（驱动页绑定的离屏 FBO），
-            // 因此覆盖率量的仍是"这一帧真正画出来的画面"，而不是默认 framebuffer 里的空图。
-            if (__fluxBenchState.frames === 1 && __fluxBenchState.coveredPct === 0) {
+            // [OUTCHK 2026-10-10] **非黑/非背景输出检查**（RGB>8 稀疏采样，stride=8，与 `coveredPct` 同网格）。
+            //   定位：**输出检查** —— 这一帧有没有真的往**当前绑定的 framebuffer** 写出非黑内容。
+            //   **不是** "两臂工作量相同"的证明：同点数/同分辨率/同机位/同驱动只说明输入与协议基本对齐；
+            //   每 splat 的着色量（SH 阶数、裁剪、混合）仍需另行核对。
+            //   为什么探两次：`coveredPct` 判据是 alpha>0（clear 成 (0,0,0,1) 的空 FBO 也会 100%）；
+            //   而只探首帧还可能把"首帧尚未出图"误判成"整轮没出图"。故在**首帧**与**本 run 末帧**各探一次，分别记录。
+            const __fluxProbeOutput = () => {
                 try {
                     const pw = gl.canvas.width;
                     const ph = gl.canvas.height;
                     const px = new Uint8Array(pw * ph * 4);
                     gl.readPixels(0, 0, pw, ph, gl.RGBA, gl.UNSIGNED_BYTE, px);
                     let hit = 0;
+                    let ink = 0;
+                    let alphaSum = 0;
                     let total = 0;
                     for (let y = 0; y < ph; y += 8) {
                         for (let x = 0; x < pw; x += 8) {
-                            if (px[(y * pw + x) * 4 + 3] > 0) hit++;
+                            const o = (y * pw + x) * 4;
+                            if (px[o + 3] > 0) hit++;
+                            if (px[o] > 8 || px[o + 1] > 8 || px[o + 2] > 8) ink++;
+                            alphaSum += px[o + 3];
                             total++;
                         }
                     }
-                    __fluxBenchState.coveredPct = total > 0 ? (hit / total) * 100 : 0;
+                    return {
+                        coveredPct: total > 0 ? (hit / total) * 100 : 0,
+                        inkPct: total > 0 ? (ink / total) * 100 : 0,
+                        // [OUTCHK 2026-10-10] 平均 alpha（0–255）：用来区分"目标 alpha=1 导致前到后混合失效"
+                        //   与"根本没画"。与 ink 配对：alpha≈255 且 ink=0 ⇒ 混合被 dst alpha 吃掉；
+                        //   alpha≈0 且 ink=0 ⇒ 这一帧压根没写（含 `vertexCount === 0` 的空帧）。
+                        alphaMean: total > 0 ? alphaSum / total : -1,
+                        readSize: pw + "x" + ph,
+                    };
                 } catch (e) {
-                    /* readPixels 不可用时忽略 */
+                    return null;
+                }
+            };
+            if (__fluxBenchState.frames === 1) {
+                const r0 = __fluxProbeOutput();
+                if (r0) {
+                    __fluxBenchState.coveredPct = r0.coveredPct;
+                    __fluxBenchState.inkPct = r0.inkPct;
+                    __fluxBenchState.alphaMean = r0.alphaMean;
+                    __fluxBenchState.readSize = r0.readSize;
+                }
+                // [OUTCHK 2026-10-10] 首帧探针时刻的 `vertexCount`：**这里是判定空帧的关键**
+                //   （`vertexCount` 由排序 worker 的 postMessage 回包赋值；若驱动帧期间该回包未被处理，
+                //    它就停在 0 ⇒ `if (vertexCount > 0)` 为假 ⇒ 既不 clear 也不 draw ⇒ 纯黑）。
+                __fluxBenchState.vertexCountAtProbe = vertexCount;
+            }
+            // 本 run 的**末帧**再探一次（`target` = 本 run 计帧数；BEGIN 之后 `frames` 只数计帧帧）
+            if (__fluxBenchState.target > 0 && __fluxBenchState.frames === __fluxBenchState.target) {
+                const r1 = __fluxProbeOutput();
+                if (r1) {
+                    __fluxBenchState.coveredPctLast = r1.coveredPct;
+                    __fluxBenchState.inkPctLast = r1.inkPct;
+                    __fluxBenchState.alphaMeanLast = r1.alphaMean;
+                    __fluxBenchState.vertexCountAtProbeLast = vertexCount;
                 }
             }
         }
@@ -1641,6 +1680,19 @@ async function main() {
             //   用来判定"frame_ms 减去 sync_ms 的那一段"到底落在哪个区间。
             drawTimings: s ? s.drawTimings.slice(0) : [],
             coveredPct: s ? s.coveredPct : 0,
+            // [OUTCHK 2026-10-10] 非黑/非背景输出检查（RGB>8 稀疏采样，%）。与 coveredPct（alpha>0）配对看：
+            //   两者都 ~0 ⇒ 这一帧没往当前绑定的 framebuffer 写东西；covered 高而 ink ~0 ⇒ 只有 clear/空画面。
+            inkPct: s ? s.inkPct : 0,
+            readSize: s ? s.readSize : "",
+            // [OUTCHK 2026-10-10] 本 run **末帧**的同两项检查（-1 = 未探到）。三处一起看可区分
+            //   "首帧尚未出图 ⇒ 末帧有 ink" 与 "整轮都没往该 framebuffer 出图 ⇒ 两者皆 0"。
+            coveredPctLast: s ? s.coveredPctLast : -1,
+            inkPctLast: s ? s.inkPctLast : -1,
+            // [OUTCHK 2026-10-10] 空帧判定 + 混合失效判定用的两个原始量
+            alphaMean: s ? s.alphaMean : -1,
+            alphaMeanLast: s ? s.alphaMeanLast : -1,
+            vertexCountAtProbe: s ? s.vertexCountAtProbe : -1,
+            vertexCountAtProbeLast: s ? s.vertexCountAtProbeLast : -1,
             canvasW: gl.canvas.width,
             canvasH: gl.canvas.height,
             // [BENCH INSTRUMENTATION] 顶点着色器实际生效的 focal / viewport（见 resize() 的落盘）：

@@ -218,6 +218,165 @@ const NOTX_ENABLED: boolean = NOTX_REQUESTED && typeof WebGL2RenderingContext !=
 const NOCTX_ENABLED: boolean = NOCTX_REQUESTED && typeof WebGL2RenderingContext !== "undefined";
 
 // =====================================================================================
+// [STRIP-CT 2026-10-10] `?strip_ct=1`：消融实验开关（**缺省 0 ⇒ 最终源码逐字不变**）。
+//   目的：把主 pass 顶点着色器里「**声明了但在该变体的活跃分支里从不采样**」的两个 colorTransform
+//   sampler（`u_colorTransforms` / `u_colorTransformIndices`）在**拼出最终源码之后**删掉，
+//   只动声明、不动任何采样逻辑，用来判断「未使用 sampler 数量」在真机上是否值钱。
+//   硬约束：**绝不修改顶点模板里那两行声明及其位置**（生产遍 FS 靠 `sliceShaderSource` 从模板切出
+//   连续 5 行；改模板会让切片失败 / 离屏 FPS=0，见 docs/ch7_desktop_investigation_status.md §30 缺陷 A）。
+//   删除只发生在 `_getVertexSource()` 返回的字符串上，且**只对**「活跃 main() 分支不引用它们」的变体：
+//     · PREP_MAIN 主 pass（`?prep=1&shcache=frag`）
+//     · SHCACHE_FRAG 主 pass（`?shcache=frag`）
+//     · SHPASS_PRE 主 pass（`?shpass=pre|consume`）
+//   其余变体（缺省、`shfmt=f16`、TF 第一遍、方案 B 生产遍、prep 生产遍）**一律不动**，即使传了
+//   `strip_ct=1`（因为它们的活跃分支确实采样这两个 sampler）。
+//   断言：删除前全源码恰含 2 处目标声明行、删除后恰含 0 处，否则抛错（禁止静默失效）。
+//   「活跃分支不再引用」由 GL 编译兜底：若删了仍被引用的声明 ⇒ 编译报 `undeclared identifier`
+//   （`?strip_ct=1` 时该失败升级为抛错，见 ShaderProgram.ts）；链接后再用 `getUniformLocation`
+//   复核两者必须为 inactive（见 `dumpProgramDiagnostics`）。
+const STRIP_CT_REQUESTED: boolean = (() => {
+    try {
+        return new URLSearchParams(location.search).get("strip_ct") === "1";
+    } catch {
+        return false;
+    }
+})();
+
+// [DEBUG-SHADER 2026-10-10] `?debug_shader=1`：把每个 program 的最终源码 + active uniform 列表打到
+//   console（缺省关；不影响缺省路径的任何行为）。用于**运行时**取证「驱动是否把未使用 sampler
+//   当 inactive 剔除」，以及 strip_ct 前后 sampler 列表的对比。
+const DEBUG_SHADER_REQUESTED: boolean = (() => {
+    try {
+        return new URLSearchParams(location.search).get("debug_shader") === "1";
+    } catch {
+        return false;
+    }
+})();
+
+/** 两个目标声明行（与顶点模板里**逐字一致**；只用于计数与删除，不用于选择分支）。 */
+const CTRANSFORM_SAMPLER_DECLS = [
+    "uniform highp sampler2D u_colorTransforms;",
+    "uniform highp usampler2D u_colorTransformIndices;",
+];
+
+// [STRIP-CT 阳性对照 2026-10-10] `?add_ct_positive=1`：在**最终 VS 源码**末尾追加 2 个
+//   「声明但绝不采样」的 sampler（同类型：一个 sampler2D、一个 usampler2D）。
+//   用途 = 消融的阳性对照臂 C：若本设备对"未使用 sampler 数量"敏感，则 C 应比 A（不加）慢；
+//   若 C 也不慢，说明该设备/场景对此不敏感，B（strip 掉 2 个）的零收益也就合理。
+//   缺省 0 ⇒ 不追加、源码逐字不变。
+const ADD_CT_POSITIVE_REQUESTED: boolean = (() => {
+    try {
+        return new URLSearchParams(location.search).get("add_ct_positive") === "1";
+    } catch {
+        return false;
+    }
+})();
+/** 阳性对照追加的两行（名字独立，与既有 uniform 不冲突）。 */
+const CT_POSITIVE_DECLS = ["uniform highp sampler2D u_ct_positive_a;", "uniform highp usampler2D u_ct_positive_b;"];
+
+/** 追加 2 行未使用 sampler 声明（阳性对照）；断言前后计数正确，否则抛错。 */
+function addUnusedSamplerDecls(src: string, variant: string): string {
+    const before = CT_POSITIVE_DECLS.reduce((n, d) => n + countOccurrences(src, d), 0);
+    if (before !== 0) {
+        throw new Error(`[add_ct_positive] 追加前已含 ${before} 处对照声明（variant=${variant}）`);
+    }
+    const out = src + "\n" + CT_POSITIVE_DECLS.join("\n") + "\n";
+    const after = CT_POSITIVE_DECLS.reduce((n, d) => n + countOccurrences(out, d), 0);
+    if (after !== 2) {
+        throw new Error(`[add_ct_positive] 追加后应恰含 2 处对照声明，实测 ${after}（variant=${variant}）`);
+    }
+    return out;
+}
+
+/** 子串出现次数。 */
+function countOccurrences(haystack: string, needle: string): number {
+    return haystack.split(needle).length - 1;
+}
+
+/**
+ * 在**已拼好的**顶点着色器源码上删除两个 colorTransform sampler 声明（含其整行）。
+ * 断言：删除前恰 2 处、删除后恰 0 处，否则抛错（拒绝静默失效）。
+ * 只删声明行本身；`#ifndef NO_COLOR_TRANSFORM … #endif` 壳保留（空条件块合法）。
+ */
+function stripColorTransformSamplerDecls(src: string, variant: string): string {
+    const before = CTRANSFORM_SAMPLER_DECLS.reduce((n, d) => n + countOccurrences(src, d), 0);
+    if (before !== 2) {
+        throw new Error(
+            `[strip_ct] 期望删除前恰含 2 处 colorTransform 声明，实测 ${before}（variant=${variant}）—— 拒绝静默失效`,
+        );
+    }
+    let out = src;
+    for (const decl of CTRANSFORM_SAMPLER_DECLS) {
+        const re = new RegExp("[ \\t]*" + decl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "[ \\t]*\\r?\\n");
+        out = out.replace(re, "");
+    }
+    const after = CTRANSFORM_SAMPLER_DECLS.reduce((n, d) => n + countOccurrences(out, d), 0);
+    if (after !== 0) {
+        throw new Error(`[strip_ct] 期望删除后恰含 0 处 colorTransform 声明，实测 ${after}（variant=${variant}）`);
+    }
+    return out;
+}
+
+/** 当前编译期判据下，主 pass 顶点着色器是否会走"不采样 colorTransform"的分支（= 允许 strip 的变体）。 */
+function ctStripEligible(): boolean {
+    return PREP_ENABLED || SHCACHE_ENABLED || SHPASS_PRE_ENABLED;
+}
+/** 主 pass 顶点着色器的变体标签（日志/报告用）。 */
+function ctVariantLabel(): string {
+    if (PREP_ENABLED) return "prep-main";
+    if (SHCACHE_ENABLED) return "shcache-main";
+    if (SHPASS_PRE_ENABLED) return "shpass-pre-main";
+    return "default";
+}
+
+/**
+ * [DEBUG-SHADER] link 之后打印 program 的 active uniform 列表 + 4 个目标 sampler 的 active 判定；
+ *   当 `expectCtInactive`（strip_ct 已删声明的变体）时，核对两个 colorTransform sampler 确实为 inactive，
+ *   否则抛错（说明变体判错：活跃分支其实采样了它们）。
+ */
+function dumpProgramDiagnostics(
+    gl: WebGL2RenderingContext,
+    tag: string,
+    prog: WebGLProgram,
+    vsSrc: string,
+    fsSrc: string,
+    expectCtInactive: boolean,
+): void {
+    if (!DEBUG_SHADER_REQUESTED) return;
+    const n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS) as number;
+    const actives: string[] = [];
+    for (let i = 0; i < n; i++) {
+        const info = gl.getActiveUniform(prog, i);
+        if (info) actives.push(`${info.name}(size=${info.size},type=${info.type})`);
+    }
+    const probeNames = [
+        "u_transforms",
+        "u_transformIndices",
+        "u_colorTransforms",
+        "u_colorTransformIndices",
+        "u_ct_positive_a",
+        "u_ct_positive_b",
+    ];
+    const probe = probeNames.map((nm) => `${nm}=${gl.getUniformLocation(prog, nm) ? "ACTIVE" : "inactive"}`);
+    console.log(`[debug_shader] ===== program=${tag} =====`);
+    console.log(`[debug_shader] ACTIVE_UNIFORMS=${n}`);
+    console.log(`[debug_shader] uniforms: ${actives.join(", ")}`);
+    console.log(`[debug_shader] probe: ${probe.join("  ")}`);
+    if (expectCtInactive) {
+        const ctActive =
+            gl.getUniformLocation(prog, "u_colorTransforms") !== null ||
+            gl.getUniformLocation(prog, "u_colorTransformIndices") !== null;
+        if (ctActive) {
+            throw new Error(
+                `[strip_ct] program=${tag} 删声明后 colorTransform sampler 仍为 ACTIVE ⇒ 活跃分支确实采样了它们（变体判错）`,
+            );
+        }
+    }
+    console.log(`[debug_shader] --- VS (${vsSrc.length} B) ---\n${vsSrc}`);
+    console.log(`[debug_shader] --- FS (${fsSrc.length} B) ---\n${fsSrc}`);
+}
+
+// =====================================================================================
 // [阶段3 2026-10-02] `?prep=1`（+ `&slot=1`，+ `&mrt=0` 回退）：
 //   把"方案 B 的颜色生产遍"推广为**完整的单 splat 预处理 pass**（类似 CUDA 3DGS 的 preprocess）：
 //   投影、2D 协方差/半轴、视锥+近平面剔除、三阶 SH 颜色**每个 splat 只算一次**，写进 MRT 目标；
@@ -1953,6 +2112,19 @@ function setSplatTransformUniforms(
             ) as WebGLUniformLocation;
             gl.uniform1i(u_colorTransformIndices, 4);
 
+            // [DEBUG-SHADER / STRIP-CT 2026-10-10] 主 pass：打印 active uniform + 最终 VS（含 strip 与否）。
+            //   strip 生效的变体（CT_STRIP_ELIGIBLE）要求两个 colorTransform sampler 必须 inactive。
+            if (DEBUG_SHADER_REQUESTED) {
+                dumpProgramDiagnostics(
+                    gl,
+                    `main-pass(${ctVariantLabel()})`,
+                    this.program,
+                    this._getVertexSource(),
+                    fragmentShaderSource,
+                    STRIP_CT_REQUESTED && ctStripEligible(),
+                );
+            }
+
             // [阶段2 O1 notx] 单对象统一变换：`?notx=1` 时由 uniform 代替 5~6 次/点取样。
             //   缺省（未注入 #define）时这两个 uniform 不存在 ⇒ 位置为 null，写入是 no-op。
             //   这里写一次即可（静止场景下 M 不变；对象移动 ⇒ transformsChanged 触发上传并重跑本分支）。
@@ -2070,6 +2242,15 @@ function setSplatTransformUniforms(
                 }
                 this._shCacheProgram = prog;
                 this._shCacheShaders = [vs, fs];
+                // [DEBUG-SHADER 2026-10-10] 方案 B 生产遍：该 program **确实**采样 colorTransform ⇒ 期望 ACTIVE。
+                dumpProgramDiagnostics(
+                    gl,
+                    "shcache-first-pass",
+                    prog,
+                    shCacheFullscreenVertexSource,
+                    buildShCacheFragmentSourceForArm(),
+                    false,
+                );
                 this._colorTex = gl.createTexture() as WebGLTexture;
                 this._colorFbo = gl.createFramebuffer() as WebGLFramebuffer;
                 gl.useProgram(prog);
@@ -2127,6 +2308,17 @@ function setSplatTransformUniforms(
                             const log = `预处理 program 链接失败（${outMode}）：` + gl.getProgramInfoLog(prog);
                             console.error("[prep=1] " + log);
                             throw new Error("[prep=1] " + log);
+                        }
+                        if (DEBUG_SHADER_REQUESTED) {
+                            // [DEBUG-SHADER 2026-10-10] prep 生产遍同样**采样** colorTransform ⇒ 期望 ACTIVE。
+                            dumpProgramDiagnostics(
+                                gl,
+                                `prep-${outMode}`,
+                                prog,
+                                shCacheFullscreenVertexSource,
+                                buildPrepFragmentSource(outMode),
+                                false,
+                            );
                         }
                         return { prog, shaders: [vs, fs] };
                     };
@@ -2273,6 +2465,15 @@ function setSplatTransformUniforms(
                         } else {
                             this._tfProgram = prog;
                             this._tfShaders = [tfVs, tfFs];
+                            // [DEBUG-SHADER 2026-10-10] TF 第一遍：活跃分支**采样** colorTransform ⇒ 期望 ACTIVE。
+                            dumpProgramDiagnostics(
+                                gl,
+                                "tf-first-pass",
+                                prog,
+                                buildTransformFeedbackVertexSource(),
+                                "#version 300 es\nprecision mediump float;\nvoid main() {}\n",
+                                false,
+                            );
                             this._tf = gl.createTransformFeedback() as WebGLTransformFeedback;
                             this._tfBuffer = gl.createBuffer() as WebGLBuffer;
 
@@ -3455,8 +3656,32 @@ function setSplatTransformUniforms(
         // [阶段2 O1 2026-10-01] notx/nocolortx：同样"只在请求时才编译进"，缺省不注入 ⇒ 缺省源码逐字不变。
         if (NOTX_ENABLED) defines.push("#define NO_SPLAT_TRANSFORM 1");
         if (NOCTX_ENABLED) defines.push("#define NO_COLOR_TRANSFORM 1");
-        if (defines.length === 0) return vertexShaderSource;
-        return vertexShaderSource.replace("#version 300 es", "#version 300 es\n" + defines.join("\n") + "\n");
+        const raw =
+            defines.length === 0
+                ? vertexShaderSource
+                : vertexShaderSource.replace("#version 300 es", "#version 300 es\n" + defines.join("\n") + "\n");
+        // [STRIP-CT 2026-10-10] `?strip_ct=1`：只对"活跃 main() 分支不采样 colorTransform"的变体删声明。
+        //   缺省（未请求）⇒ out = raw（与改动前逐字等价）。
+        let out = raw;
+        if (STRIP_CT_REQUESTED) {
+            if (!ctStripEligible()) {
+                console.log(`[strip_ct] variant=${ctVariantLabel()} 活跃分支采样 colorTransform ⇒ 跳过（不删）`);
+            } else {
+                out = stripColorTransformSamplerDecls(raw, ctVariantLabel());
+                console.log(
+                    `[strip_ct] variant=${ctVariantLabel()} 已删除 2 行 colorTransform 声明（${raw.length} -> ${out.length} B）`,
+                );
+            }
+        }
+        // [STRIP-CT 阳性对照 2026-10-10] `?add_ct_positive=1`：在最终源码末尾追加 2 个未使用 sampler（臂 C）。
+        if (ADD_CT_POSITIVE_REQUESTED) {
+            const added = addUnusedSamplerDecls(out, ctVariantLabel());
+            console.log(
+                `[add_ct_positive] variant=${ctVariantLabel()} 已追加 2 行未使用 sampler（${out.length} -> ${added.length} B）`,
+            );
+            out = added;
+        }
+        return out;
     }
 
     protected _getFragmentSource() {

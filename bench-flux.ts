@@ -93,7 +93,13 @@ import type {
 } from "./bench-shared";
 // 离屏论文协议的测帧内核（**两臂共用同一份纯协议实现**）+ 离屏渲染目标/非阻塞栅栏门
 // （后者来自本仓库 src/，是一份与渲染器无关的 GL 小工具：本文臂与基线臂套的是同一个类）
-import { runOffscreenProtocol, offscreenAsThroughputStats, resolveOffscreenSyncMode, syncPolicyLabelWithNote } from "./bench-offscreen";
+import {
+    runOffscreenProtocol,
+    offscreenAsThroughputStats,
+    resolveOffscreenSyncMode,
+    syncPolicyLabelWithNote,
+    resolveTimingWindowFromUrl,
+} from "./bench-offscreen";
 import type { OffscreenGateSample, OffscreenProtocolResult } from "./bench-offscreen";
 import {
     NonBlockingFrameGate,
@@ -202,6 +208,23 @@ interface FluxBenchEnd {
     /** [DIAG-EXPERIMENT-1] 逐帧分段样本（与 `syncSamples` 同序同长度；旧版钩子无此字段） */
     drawTimings?: FluxDrawTiming[];
     coveredPct: number;
+    /** [OUTCHK 2026-10-10] **非黑/非背景输出检查**：与 `coveredPct` 同一份像素、同一个 stride=8 网格，
+     *  但判据是 `RGB>8`（而 `coveredPct` 是 `alpha>0`）。两个数配对看即可区分
+     *  "这一帧没往当前绑定的 framebuffer 写内容"（两者~0）与"只写了 clear/空画面"（covered 高、ink~0）。
+     *  **定位：输出检查，不是工作量等价的证明** —— 同点数/同分辨率/同机位只说明输入与协议对齐。 */
+    inkPct?: number;
+    /** [OUTCHK] 上面那次检查实际读取的尺寸（= `gl.canvas.width/height`），用于核对读的是不是同一块 target */
+    readSize?: string;
+    /** [OUTCHK] 本 run **末帧**的同样两项检查（-1 = 未探到） */
+    coveredPctLast?: number;
+    inkPctLast?: number;
+    /** [OUTCHK 2026-10-10] 平均 alpha（0–255，首帧/末帧）：与 ink 配对判定"混合被 dst alpha 吃掉"还是"压根没画" */
+    alphaMean?: number;
+    alphaMeanLast?: number;
+    /** [OUTCHK] 首帧/末帧探针时刻的**主线程** `vertexCount`（由排序 worker 回包赋值）。
+     *  若为 0 ⇒ `if (vertexCount > 0)` 为假 ⇒ 既不 clear 也不 draw ⇒ 该帧是**空帧**（与"数据未加载"无关）。 */
+    vertexCountAtProbe?: number;
+    vertexCountAtProbeLast?: number;
     canvasW: number;
     canvasH: number;
     dpr: number;
@@ -446,6 +469,63 @@ async function loadInjectedViews(): Promise<Record<string, number[]>> {
 
 /** [NETREGIME 2026-10-06] 网络口径判据：只认 URL 参数 `fluxsrc=official`；缺省/其它值 = 受控（本地副本）。 */
 const FLUXSRC_OFFICIAL: boolean = param("fluxsrc", "") === "official";
+
+/**
+ * [SIDEFRAME 2026-10-10] `?framedump=1` 抓到的整幅 PNG（data URL）。**必须是模块作用域**：
+ * 抓帧在 `measureRound()` 里，而结果文本由 `buildResultText()` 构建 ⇒ 用函数局部变量会
+ * `ReferenceError: sideFramePng is not defined`（2026-10-10 两次实测踩到）。缺省为空串。
+ */
+let sideFramePng = "";
+
+/**
+ * [SIDEFRAME 2026-10-10] `?framedump=1`（Flux 臂）的抓帧状态。
+ *
+ * **必须在驱动自己的绑定窗口内读回**（`driveFluxOffscreenRuns` 的 `renderFrame` 里 `target.bind()` 之后、
+ * `target.unbind()` 之前，即"刚画完这一帧"的时刻）。两次真机实测的教训：
+ *   ① 在 `frame()` 之前不绑目标 ⇒ Flux 把那一帧画到默认 framebuffer，读到**纯黑**（PNG 37 KB）；
+ *   ② 改成绑着目标、但放在**整轮跑完之后**抓 ⇒ 仍是**纯黑**（无损 PNG 49,464 B、`framedump_ink_pct=0.00`），
+ *      因为 run 结束后同一块 FBO 的内容已被清空/失效 —— 而它在**帧内**读回时是好的（Flux 自己的
+ *      `covered` 探针就在帧内读，报 100%）。
+ *   ⇒ 唯一可靠的点是"驱动正在画的那一帧"，因此抓帧逻辑放在驱动的逐帧钩子里。
+ */
+let sideFrameWant = false;
+let sideFramePx: Uint8Array | null = null;
+let sideFrameW = 0;
+let sideFrameH = 0;
+
+/** [SIDEFRAME 2026-10-10] 抓帧自检：非黑像素占比（%）；-1 = 本轮未抓帧。空图/黑图靠它一眼识别。 */
+let sideFrameInkPct = -1;
+
+/**
+ * [SIDEFRAME 2026-10-10] 把整幅 RGBA 像素编码成**无损 PNG** data URL（结果字段 `framedump_png=`），
+ * 顺手算出 `framedump_ink_pct=`。翻转 Y 的约定与本文臂 `encodeCrop` 一致（GL 原点在左下）。
+ */
+function encodeFramePngFromPixels(px: Uint8Array, w: number, h: number): string {
+    // 自检：非黑像素占比（与 pngstats/compose_side 同一阈值 8/255）——空图/黑图据此一眼识别
+    let ink = 0;
+    for (let i = 0; i < w * h; i++) {
+        const o = i * 4;
+        if (px[o] > 8 || px[o + 1] > 8 || px[o + 2] > 8) ink++;
+    }
+    sideFrameInkPct = (ink / (w * h)) * 100;
+    try {
+        const cv = document.createElement("canvas");
+        cv.width = w;
+        cv.height = h;
+        const ctx = cv.getContext("2d");
+        if (!ctx) return "";
+        const img = ctx.createImageData(w, h);
+        const stride = w * 4;
+        for (let y = 0; y < h; y++) {
+            // GL 原点在左下 → 翻转成图片坐标
+            img.data.set(px.subarray((h - 1 - y) * stride, (h - y) * stride), y * stride);
+        }
+        ctx.putImageData(img, 0, 0);
+        return cv.toDataURL("image/png");
+    } catch {
+        return "";
+    }
+}
 
 async function loadManifest(): Promise<void> {
     // [NETREGIME 2026-10-06] `?fluxsrc=official` ⇒ 用**官方网络路径**清单（model = HuggingFace 绝对 URL）；
@@ -986,6 +1066,22 @@ const fluxLab = {
  *  viewportUniform != [resW,resH]，结果行会直接显形。 */
 let lastFocalApplied: number[] | null = null;
 let lastViewportUniform: number[] | null = null;
+/** [OUTCHK 2026-10-10] 输出检查实际读取的尺寸（写进 `offscreen_note` 的 `RD`；缺省 "-"） */
+let lastReadSize = "";
+/** [SIDEFRAME 2026-10-10] 空帧/混合诊断（写进 `offscreen_note` 的 `NVP/NVPL/AM/AML`；缺省空串） */
+let lastProbeDiag = "";
+
+/**
+ * [OUTCHK 2026-10-10] `?preclear=1`：驱动在**每帧调 `frame()` 之前**把离屏目标清成 `clearColor(0,0,0,0)`。
+ *
+ * 这是"黑屏根因"的**判别实验**（真机/桌面实测已确认：Flux 的 `ink=0%` 而目标 `alphaMean=255`）：
+ *   - 若清完 alpha 后 `ink` 变非 0 ⇒ Flux **确实画到了**这块 FBO，之前的黑是"目标 alpha=1 把前到后混合
+ *     的 src 因子压成 0"（本文臂之所以正常，是因为它每帧自己 `clearColor(0,0,0,0)+clear`，见
+ *     `RenderProgram.ts:2859`）；
+ *   - 若 `ink` 仍为 0 且 `alphaMean` 变 0 ⇒ Flux **没有画到**这块 FBO（它写去了自己的 canvas/目标）。
+ * 缺省关闭 ⇒ 对既有测量路径零影响。
+ */
+const PRECLEAR_REQUESTED = param("preclear", "") !== "";
 
 async function driveFluxOffscreenRuns(
     cw: FluxWindow,
@@ -1023,6 +1119,17 @@ async function driveFluxOffscreenRuns(
                 gl0.clearColor(0, 0, 0, 1);
                 gl0.clear(gl0.COLOR_BUFFER_BIT);
                 gl0.flush();
+                // [OUTCHK 2026-10-10] **必须恢复 clearColor**（这是"离屏纯黑"的根因，已定案）：
+                //   `clearColor` 是**全局 GL 状态**，而 Flux 的 `frame()` 绘制前只 `gl.clear(COLOR_BUFFER_BIT)`、
+                //   **不设置 clearColor**（`main.js` 里没有任何 clearColor 调用）。若把它留在 `(0,0,0,1)`：
+                //     · Flux 的清屏会把离屏 FBO 清成 alpha=1 ⇒ 它的前到后混合
+                //       `blendFuncSeparate(ONE_MINUS_DST_ALPHA, ONE, …)` 的 src 因子 `1−dstA` 变 0
+                //     · ⇒ 绘制颜色贡献恒为 0 ⇒ 画面 = 清屏色 = RGB 全 0、alpha 255（"纯黑"）
+                //   实测（2026-10-10 桌面+真机一致）：不恢复时 `ink=0.0%`、`alphaMean=255.0`、
+                //   而 `vertexCount=273169`（绘制确实执行）、`RD` 尺寸正确 ⇒ 与本机制完全吻合；
+                //   恢复后 `ink=99.3%`、`alphaMean=231.1`。
+                //   本文臂不受影响的原因：它**每帧自己** `clearColor(0,0,0,0)+clear`（`RenderProgram.ts:2859`）。
+                gl0.clearColor(0, 0, 0, 0);
             } catch {
                 /* 上下文丢失时忽略 */
             }
@@ -1041,8 +1148,9 @@ async function driveFluxOffscreenRuns(
         framesPerRun,
         numRuns,
         warmupFrames,
-        // `batch` 策略：计时终点必须取在 run 末排空之后（否则只量到提交速率）
-        timingEndAfterDrain: gate.mode === "batch",
+        // `batch` 策略：计时终点取在 run 末排空之后（否则只量到提交速率）
+        //   [TW 2026-10-10] 可被 `?twindow=frame` 覆盖（排空移出窗口）；本臂驱动就在父页，search 直接可用
+        timingEndAfterDrain: gate.mode === "batch" && resolveTimingWindowFromUrl().afterDrain,
         // 驱动降频：本臂帧由父页直接调用（无 postMessage 往返），但仍与本文臂用同一个缺省，保证口径一致
         tickEveryFrames: offscreenTickEvery(),
         // 自然模式：驱动取自 URL（`driver=raf` = vsync 边界），按 30 秒墙钟跑满（与本文臂同口径）
@@ -1058,6 +1166,17 @@ async function driveFluxOffscreenRuns(
                 }
                 // 渲染目标绑定/解绑包住"恰好一帧"：这一帧的全部绘制命令落在离屏 FBO 上
                 target.bind();
+                // [OUTCHK 2026-10-10] `?preclear=1` 判别实验：把目标 alpha 清 0 后再让 Flux 画。
+                //   见 PRECLEAR_REQUESTED 注释（用于区分"画了但被 alpha 吃掉"与"没画到这块 FBO"）。
+                if (PRECLEAR_REQUESTED) {
+                    const pcGl =
+                        (cw as unknown as { __FLUXGS_BENCH_GL__?: () => WebGL2RenderingContext | null })
+                            .__FLUXGS_BENCH_GL__?.() ?? null;
+                    if (pcGl) {
+                        pcGl.clearColor(0, 0, 0, 0);
+                        pcGl.clear(pcGl.COLOR_BUFFER_BIT);
+                    }
+                }
                 try {
                     step.call(cw);
                     // [INJ 2026-09-29 实验A] 每帧注入 N MB 的 `bufferData` 重分配（同上下文、同队列），
@@ -1076,6 +1195,24 @@ async function driveFluxOffscreenRuns(
                                 g.enableVertexAttribArray(injLoc);
                                 g.vertexAttribPointer(injLoc, 4, g.FLOAT, false, 0, 0);
                                 g.drawArrays(g.POINTS, 0, 1); // ← 强制消费（GPU 必须读完这次上传）
+                            }
+                        }
+                    }
+                    // [SIDEFRAME 2026-10-10] `?framedump=1` 的抓帧点：就在**驱动自己的绑定窗口内**、刚画完
+                    //   这一帧时读回（`target` 此刻仍是绑定的）。只抓第一个真正计帧的帧（run>=0 且 frame==0）；
+                    //   `gl.finish()` 只补一次同步，抓完即止 —— 抓帧发生在**第一个计帧帧之后**，不影响 fps 口径。
+                    if (sideFrameWant && sideFramePx === null && run >= 0 && frame === 0) {
+                        const capGl =
+                            (cw as unknown as { __FLUXGS_BENCH_GL__?: () => WebGL2RenderingContext | null })
+                                .__FLUXGS_BENCH_GL__?.() ?? null;
+                        if (capGl) {
+                            try {
+                                capGl.finish();
+                                const px = new Uint8Array(sideFrameW * sideFrameH * 4);
+                                capGl.readPixels(0, 0, sideFrameW, sideFrameH, capGl.RGBA, capGl.UNSIGNED_BYTE, px);
+                                sideFramePx = px;
+                            } catch {
+                                sideFramePx = null;
                             }
                         }
                     }
@@ -1325,6 +1462,8 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
         //     （渲染 + `gl.finish()`）。BEGIN 在首个真实帧**之后**调用：native 档下机位就此冻结；
         //   - 离屏论文协议：`driveFluxOffscreenRuns()`（FBO + msgchannel + warm-up + N 轮平均），
         //     走**不带 `gl.finish()`** 的 `__FLUXGS_BENCH_FRAME_OFFSCREEN__`，GPU 进度由非阻塞栅栏门负责。
+        // [SIDEFRAME 2026-10-10] `?framedump=1` 抓到的整幅 PNG 存在**模块作用域**的 `sideFramePng` 里
+        //   （结果文本由另一个函数构建 ⇒ 不能在这里用函数局部变量）。
         const mode = benchMode();
         let bench: DriveThroughputStats;
         let end: FluxBenchEnd;
@@ -1380,6 +1519,20 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
                 // 计时器始终传入：门只在 gputimer 模式下使用它，但它的逐步诊断在真机上是唯一现场证据
                 gpuTimer,
             );
+            // [SIDEFRAME 2026-10-10] `?framedump=1`：**先武装**，由驱动在它**自己的绑定窗口内**（刚画完第一个
+            //   计帧帧时）读回整幅像素 —— 放在整轮跑完之后抓会读到已清空/失效的 FBO（真机实测纯黑）。
+            //   未请求时显式清空，避免把上一轮的帧带进本轮结果。
+            if (param("framedump", "") !== "") {
+                sideFrameWant = true;
+                sideFramePx = null;
+                sideFrameW = st.resW;
+                sideFrameH = st.resH;
+            } else {
+                sideFrameWant = false;
+                sideFramePx = null;
+                sideFramePng = "";
+                sideFrameInkPct = -1;
+            }
             let off: OffscreenProtocolResult;
             try {
                 off = await withTimeout(
@@ -1387,6 +1540,13 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
                     240000 + warmupFrames * 2000 + framesPerRun * numRuns * 400,
                     `driveFluxOffscreenRuns(${framesPerRun}f x ${numRuns}run)`,
                 );
+                // [SIDEFRAME 2026-10-10] 像素已在驱动窗口内读回（见 sideFrameWant 注释）⇒ 这里只做 CPU 侧
+                //   PNG 编码，不再碰 GL。抓不到时保持空串（结果行里也不会出现 framedump_png=）。
+                if (sideFramePx && sideFramePx.length > 0) {
+                    sideFramePng = encodeFramePngFromPixels(sideFramePx, sideFrameW, sideFrameH);
+                } else if (param("framedump", "") !== "") {
+                    sideFrameInkPct = -1; // 抓帧失败：明确置回"未抓帧"，不写误导性的 0.00
+                }
             } finally {
                 // 目标、栅栏门与计时器用完就地释放（FBO 占 res 尺寸显存：1600×1063×4 ≈ 6.8MB）
                 gate.drainAll();
@@ -1500,8 +1660,20 @@ async function measureRound(meta: FluxSceneMeta, round: number, st: BenchState):
         //   写进 `offscreen_note=|lab…FOC…PVP…` 供逐轮核对（证明 `downsample=` 没污染点尺寸）
         lastFocalApplied = Array.isArray(end.focalApplied) ? end.focalApplied : null;
         lastViewportUniform = Array.isArray(end.viewportUniform) ? end.viewportUniform : null;
+        lastReadSize = typeof end.readSize === "string" ? end.readSize : "";
+        // [OUTCHK 2026-10-10] 空帧与混合诊断（三者一起看即可定位"为什么黑"）：
+        //   NVP/NVPL = 首帧/末帧探针时刻的主线程 `vertexCount`（0 ⇒ 该帧是空帧，既没 clear 也没 draw）；
+        //   AM/AML   = 首帧/末帧平均 alpha（≈255 且 ink=0 ⇒ 目标 alpha 把前到后混合吃掉了）。
+        lastProbeDiag =
+            `NVP${end.vertexCountAtProbe ?? -1}NVPL${end.vertexCountAtProbeLast ?? -1}` +
+            `AM${typeof end.alphaMean === "number" ? end.alphaMean.toFixed(1) : "-"}` +
+            `AML${typeof end.alphaMeanLast === "number" ? end.alphaMeanLast.toFixed(1) : "-"}`;
         base.points = end.points;
         base.coveredPct = end.coveredPct;
+        // [OUTCHK 2026-10-10] 非黑/非背景输出检查（**不是**工作量等价证明，见 FluxBenchEnd.inkPct 注释）
+        base.inkPct = end.inkPct;
+        base.coveredPctLast = end.coveredPctLast;
+        base.inkPctLast = end.inkPctLast;
         // 静态轮：`pose=` = 渲染器回报的视图（= 全程机位）。动态轮（`?spin=`）：必须写**第 0 帧**视图
         // （`spin.v0`），否则与本文臂同名不同义（那边 `pose=` 取的是测帧前的起始机位），跨臂核对会误报。
         base.poseKey = spin
@@ -1668,6 +1840,9 @@ function buildResultText(st: BenchState): string {
         lines.push(
             `offscreen_note=${offscreenRunCount()}runs_x${roundStats[0]?.offscreenFramesPerRun ?? ""}frames_after_` +
                 `${offscreenWarmupFrames()}warmup_frames_on_offscreen_fbo` +
+                // [TW 2026-10-10] **计时窗口口径自证**：`TWdrain` = 窗口含 run 末排空（历史缺省，长跑时≈GPU 执行时间）；
+                //   `TWframe` = 窗口只覆盖帧段（`?twindow=frame`）。读到任何离屏 fps 都必须先看这三个字母。
+                `TW${resolveTimingWindowFromUrl().label}` +
                 // [LAB 2026-09-28] 与本文臂同结构的耗时分解（本臂帧由父页直接驱动，故在父页直接可得）：
                 //   T=tick 让出累计、F=帧内计算+GL提交累计、G=帧间纯等待累计、E=run 末收尾累计（ms，全部为**合计**）；
                 //   RA/RB = E 的两段（A=排空 finish+1×1 readPixels；B=GPU 计时查询回读等待）。
@@ -1686,6 +1861,11 @@ function buildResultText(st: BenchState): string {
                 //   downsample，FOC 会变成 3.6× 的值 —— 也就是说这一项让该质疑变成可实测证伪。
                 `FOC${lastFocalApplied ? lastFocalApplied.map((v) => v.toFixed(1)).join(",") : "-"}` +
                 `PVP${lastViewportUniform ? lastViewportUniform.map((v) => v.toFixed(0)).join(",") : "-"}` +
+                // [OUTCHK 2026-10-10] 输出检查的**读取尺寸**：应 == 离屏 FBO 尺寸（`fbo:WxH`）。
+                //   若这里印出的是画布尺寸而与 FBO 不同，则"覆盖率/输出检查"读的根本不是同一块 target。
+                `RD${lastReadSize || "-"}` +
+                // [OUTCHK 2026-10-10] 空帧（NVP=0）与混合失效（AM≈255 且 ink=0）诊断，见 lastProbeDiag 注释
+                `${lastProbeDiag}` +
                 `WU${roundStats[0]?.offscreenWarmupMs ?? ""}` +
                 // 自然模式逐秒窗口 FPS（与本文臂同结构）
                 `NW${roundStats[0]?.offscreenNatWinN ?? 0}` +
@@ -1729,6 +1909,10 @@ function buildResultText(st: BenchState): string {
     lines.push(`stage=fit1`);
     lines.push(`force=${param("force", "") || `res(${st.resW}x${st.resH})`}`);
     lines.push(`pose_src=${param("pose", "flux")}`);
+    // [SIDEFRAME 2026-10-10] 并排图用的一整幅 PNG（仅显式传 `?framedump=` 时存在；缺省不写该行）
+    if (sideFramePng) lines.push(`framedump_png=${sideFramePng}`);
+    // 抓帧自检：非黑像素占比（%。≈0 说明抓到的是一块空 FBO ⇒ 该帧不可用于对比，必须重跑）
+    if (sideFrameInkPct >= 0) lines.push(`framedump_ink_pct=${sideFrameInkPct.toFixed(2)}`);
     lines.push(`ts=${new Date().toISOString()}`);
     lines.push(`ua=${env.ua}`);
     // [DEV 2026-10-09] 设备型号 token（自证）：WebGL 失败时 `chip=unknown`，本字段保证失败也能归因到具体机型
@@ -1775,6 +1959,12 @@ function buildResultText(st: BenchState): string {
             `floor_used_ms=${fmt(r.timerFloorMs, 2)}`,
             `fps_capped=${r.fpsCapped ? 1 : 0}`,
             `covered=${fmt(r.coveredPct, 1)}%`,
+            // [OUTCHK 2026-10-10] 非黑/非背景输出检查（RGB>8 稀疏采样）。定位=**输出检查**：
+            //   证明这一帧确实往当前绑定的 framebuffer 写出了非黑内容；**不**证明两臂工作量相同。
+            `ink_pct=${fmt(r.inkPct, 1)}%`,
+            // [OUTCHK] 本 run 末帧的同两项（-1 = 未探到）：与首帧数配对即可区分"首帧尚未出图"与"整轮没出图"
+            `ink_last_pct=${fmt(r.inkPctLast, 1)}%`,
+            `covered_last=${fmt(r.coveredPctLast, 1)}%`,
             `poseInjected=${r.poseInjected === undefined ? "" : r.poseInjected ? 1 : 0}`,
             `pose=${r.poseKey ?? ""}`,
             // 动态相机（`?spin=`，效度自查）：与本文臂同名同格式；`spin=0` = 静止协议，
@@ -1867,6 +2057,7 @@ async function runBench(st: BenchState): Promise<void> {
     const allDone = st.idx === st.sceneIds.length - 1 && roundNo >= st.rounds;
     if (allDone) {
         finishBench(st);
+
         return;
     }
     if (st.cold) {

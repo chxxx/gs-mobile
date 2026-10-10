@@ -1969,6 +1969,13 @@ export interface RoundResult extends SegTimingFields {
     err?: string;
     drawOk?: boolean;
     coveredPct?: number;
+    /** [OUTCHK 2026-10-10] **非黑/非背景输出检查**：与 `coveredPct` 同一份像素、同一 stride=8 网格，
+     *  但判据是 `RGB>8`（`coveredPct` 是 `alpha>0`）。配对读法：`covered` 高而 `ink` ~0 ⇒ 只有 clear/空画面。
+     *  **定位：输出检查，不是工作量等价的证明**（同点数/同尺寸/同机位只说明输入与协议对齐）。 */
+    inkPct?: number;
+    /** [OUTCHK] 本 run **末帧**的同样两项检查（-1 = 未探到）：用于区分"首帧尚未出图"与"整轮都没出图" */
+    coveredPctLast?: number;
+    inkPctLast?: number;
     keptPct?: number;
     /** [CLRGATE 2026-09-30] `?framedump=1`：**基准位姿**整幅画面的**无损 PNG data URL**
      *  （`data:image/png;base64,…`）。只用于离线逐像素比对（BASE vs 变体：平均/最大误差 + PSNR/SSIM），
@@ -2260,6 +2267,10 @@ export const ROUND_RESULT_BASE_KEYS = ["scene", "round", "ts", "ok"] as const;
 /** 数值字段（清洗时要求 `number` 且有限） */
 export const ROUND_RESULT_NUM_KEYS = [
     "coveredPct",
+    // [OUTCHK 2026-10-10] 非黑/非背景输出检查（与 coveredPct 同网格、判据不同）；**不是**工作量等价证明
+    "inkPct",
+    "coveredPctLast",
+    "inkPctLast",
     "keptPct",
     // 第7章对齐协议：ours→reduced 相似变换的缩放（协议自证，见 `sim3Ver`）
     "sim3Scale",

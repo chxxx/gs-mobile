@@ -1,3 +1,6 @@
+> ⚠️ **【2026-10-10 失效标注・整份受影响】本文件的 Gen3 Flux 离屏记录全部落在泄漏区间**（2026-09-29 起）⇒ 其中所有 Flux 读数按**待重跑**处理。原因与处置见 **`docs/ch7_invalidated_by_clearcolor_leak.md`**。本文臂（ours）数据不受影响。
+
+
 # 第 7 章 · Gen3（Snapdragon 8 Gen 3 / Adreno 750）实验数据总结
 
 > 本文件由 `_tmp_ch7probe/gen_report.mjs` 从 `thesis_project/data/ch7_measurements/raw/` 的**原始回传记录**直接生成（数字不手抄）。

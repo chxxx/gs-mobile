@@ -1,3 +1,6 @@
+> ⚠️ **【2026-10-10 失效标注】本文件中的 Flux 臂离屏数据可能无效** —— harness 的 `clearColor(0,0,0,1)` 状态泄漏（commit `acf1b6d`，2026-09-29 引入）使 Flux 离屏帧"绘制但无可见输出"（`ink_pct=0`）；本文件里的 ours-vs-flux 倍数/区间均由该批数据得出，按**待重跑**处理。判定规则/清单/处置见 **`docs/ch7_invalidated_by_clearcolor_leak.md`**；修复后首对有效数据见 `ch7_output_check_20261010.md` §4.3。
+
+
 # 本文实现 vs Flux-GS：逐项对照 + 新方案设计要点
 
 > 生成：2026-10-01。左边=`gsplat.js`（本文，`src/renderers/webgl/programs/RenderProgram.ts` 等），

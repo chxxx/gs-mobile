@@ -343,6 +343,29 @@ export async function calibrateOffscreenDriverFloor(
  *   - 每 run 结束调用 `hooks.endRun()` 排空栅栏，**发生在终点取点之后**：不影响帧率口径，
  *     但保证各 run 相互独立（下一 run 不会把上一 run 残留的 GPU 工作算进去）。
  */
+/**
+ * [TW 2026-10-10] `?twindow=frame|drain`：离屏 run 的**计时窗口端点**，并把口径写进结果（`offscreen_note` 的 `TW`）。
+ *
+ * - `drain`（历史缺省）：终点取在 run 末**排空之后**（`finish()+1×1 readPixels`）。`batch` 下这是**有意的**设计：
+ *   CPU 只负责提交、GPU 队列饱和时"排空耗时"≈该 run 的 GPU 执行时间 ⇒ `fps = 帧数 / GPU时间`。
+ *   **但它要求 `framesPerRun` 足够大**：2026-10-10 实测 `frames=2&warmup=0` 时**排空占窗口 96%**
+ *   （`F2.1 / E58.2 / EL54.1`），读数被"2 帧尚未填满流水线"与设备状态放大 ⇒ 噪声 3×。
+ * - `frame`：终点取在**末帧提交后**，排空放到窗口之外（`if (!timingEndAfterDrain) await endRun()` 分支）。
+ *   它量的是**帧段**（纯 CPU 提交速率）。**实测（2026-10-10，本文臂 `frames=20`）它会被 harness 自己的
+ *   合理性守卫拒收**：`ok=0`、`err=离屏协议读数不可信：平均 FPS=50000 超过物理上限 5000`
+ *   （`raw/outchk5_20261010_194142.txt`）⇒ **不能当主指标**，只作诊断（证明提交侧 ~0.02 ms/帧、不是瓶颈）。
+ *
+ * 无论选哪个，**记录都会印出 `TWframe|TWdrain`** ⇒ 以后读到任何离屏 fps 都能立刻知道它是哪条窗口，
+ * 不会再出现"把排空主导的数当渲染能力"这类误读。缺省保持 `drain`（与历史记录同口径），
+ * 新跑步长（`frames ≥ 20`）时推荐显式写出口径。
+ */
+export function resolveTimingWindowFromUrl(search?: string): { afterDrain: boolean; label: "drain" | "frame" } {
+    const s = search ?? (typeof location !== "undefined" ? location.search : "");
+    const raw = (new URLSearchParams(s).get("twindow") || "").toLowerCase();
+    if (raw === "frame") return { afterDrain: false, label: "frame" };
+    return { afterDrain: true, label: "drain" };
+}
+
 export async function runOffscreenProtocol(spec: {
     framesPerRun: number;
     numRuns: number;

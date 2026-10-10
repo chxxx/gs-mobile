@@ -448,6 +448,13 @@ function buildResultText(st: BenchState): string {
         lines.push(
             `offscreen_note=${offscreenRunCount()}runs_x${okRounds[0]?.offscreenFramesPerRun ?? ""}frames_after_` +
                 `${offscreenWarmupFrames()}warmup_frames_on_offscreen_fbo` +
+                // [TW 2026-10-10] **计时窗口口径自证**（与 bench-flux 同名字段）：`TWdrain` 窗口含 run 末排空、
+                //   `TWframe` 只覆盖帧段（`?twindow=frame`）。本页是父页 ⇒ `location.search` 即权威来源。
+                `TW${
+                    (new URLSearchParams(location.search).get("twindow") || "").toLowerCase() === "frame"
+                        ? "frame"
+                        : "drain"
+                }` +
                 // [LAB 2026-09-28] 与 flux 臂同结构的耗时分解（`|lab…`，见 bench-measure 的 offscreenLabNote）：
                 //   `mark()` 时间线在真机结果里默认不落盘 ⇒ 分解必须走这里才看得到
                 `${okRounds[0]?.offscreenLabNote ?? ""}`,
@@ -513,6 +520,9 @@ function buildResultText(st: BenchState): string {
             `fps=${fmt(r.fps, 1)}`,
             `cpu_ms=${fmt(r.cpuMs, 2)}`,
             `covered=${fmt(r.coveredPct, 1)}%`,
+            // [OUTCHK 2026-10-10] 非黑/非背景输出检查（RGB>8 稀疏采样，与 covered 同网格、判据不同）。
+            //   定位=**输出检查**：证明这一帧确实往当前渲染目标写出了非黑内容；**不**证明两臂工作量相同。
+            `ink_pct=${fmt(r.inkPct, 1)}%`,
             `kept=${fmt(r.keptPct, 1)}%`,
         ];
         // 口径字段（**始终打印**，不受 diag 开关影响）：报表脚本要用它们过滤主表
