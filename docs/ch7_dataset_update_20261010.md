@@ -16,31 +16,37 @@
   另有 `element codebook_centers 256` 与 `element sh_basis 7` ⇒ **与本渲染器的 `r7 QPLY` 读取路径一致**，无需改代码。
 - 场景清单/相机：`bench-scenes.json` 已有 `drjohnson`（`points:432000`）与 `playroom`（`db`）；`bench-cameras.json` 两场景均有条目 ⇒ 手机端 `cam=flux` 对位可用，**无需新增配置**。
 
-## 2. 性能指标：**以 `thesis_project/thesis.md` 表 4-1/4-2 为准**
+## 2. 性能指标：**新 PLY 批次 = 论文现在报告的值（已更新）**
 
-> ⚠️ 权威数字在论文里（用户已更新）：**`thesis_project/thesis.md`**。下列逐场景值来自
-> `D:\study\output\benchmark_deep_blending_ours\_aggregated_results\all_metrics_latest.txt`（2026-09-07 批次），
-> **与论文表中的数据集均值有一处不一致，需你确认哪一批对应新 PLY**。
+> **口径更正**：新换的那两份 PLY 对应 `all_metrics_latest.txt`（2026-09-07 批次）的数值；
+> **论文已按这批更新**（此前论文里的 30.09 是**上一个批次**，已替换）。
+> 权威位置：`thesis_project/thesis.md` 表 4-2 / 表 4-3 / 第 4 章结论段（均已于 2026-10-10 同步）。
 
-**论文表 4-2（Deep Blending，本文方法）**：`PSNR 30.09 / SSIM 0.911 / LPIPS 0.243 / #G 0.311M`
-（对照：3DGS 29.42/0.900/0.250/2.780M；Mini-Splatting 30.00/0.908/0.255/0.311M）
+**论文表 4-2（Deep Blending，本文方法，更新后）**：**PSNR 29.76 / SSIM 0.908 / LPIPS 0.244 / #G 0.311M**
 
-**逐场景（`all_metrics_latest.txt`，同批次）**：
+**逐场景（`all_metrics_latest.txt`，与新 PLY 一一对应）**：
 
 | Scene | PSNR | SSIM | LPIPS | Q-PSNR | Q-SSIM | Q-LPIPS | Points | Size(MB) | Half(MB) | FPS |
 |---|---|---|---|---|---|---|---|---|---|---|
 | playroom | 30.0589 | 0.9089 | 0.2461 | 29.9921 | 0.9085 | 0.2471 | **190,000** | 17.40 | 4.36 | 261.59 |
 | drjohnson | 29.4680 | 0.9067 | 0.2422 | 29.3497 | 0.9048 | 0.2436 | **432,000** | 39.55 | 9.90 | 237.99 |
 
-该批均值 PSNR **29.7634** / SSIM **0.9078** / LPIPS **0.2441**；Final Points 均值 311,000；
-Half PLY 均值 7.13 MB；Bits per Gaussian 768.07；**Native GPU FPS 均值 249.79**；Peak VRAM 训练 14.18 GB / 渲染 1.285 GB。
+两场景均值 **PSNR 29.7635→29.76 / SSIM 0.9078→0.908 / LPIPS 0.2442→0.244**；Final Points 均值 311,000（=0.311M，与论文一致）；
+Half PLY 均值 7.13 MB；Bits per Gaussian 768.07；Native GPU FPS 均值 249.79（**桌面原生口径**，非手机 harness）。
 
-**差异说明（重要）**：论文表 4-2 的 Deep Blending 本文方法为 **30.09 dB**，而上面这批的**两场景均值是 29.76 dB**（差 0.33 dB）。
-两种可能：① 论文用的是**更新的一批**（点数同为 0.311M ⇒ 点数对得上，只是质量指标更高）；② 论文那一行是**不同子集/配置**的均值。
-⇒ **以论文为准**；若要做"手机实测 vs 论文"的对照，请以论文表 4-2 的 30.09/0.911/0.243 为基准。
+**这次更新连带修正的论文结论（已在 `thesis.md` 落地）**：
 
-> 另有两点口径提醒：`FPS` 一栏是**桌面原生 GPU**（不是手机 harness 的 `Offscreen-PaperMatch`）；`Points` 已随新 PLY 变为
-> drjohnson 432,000 / playroom 190,000，任何**基于旧副本**的点数/覆盖率/FPS 记录都要按新点数重取（替换后自动生效）。
+| 原来 | 改成 | 原因 |
+|---|---|---|
+| Deep Blending "PSNR、SSIM、LPIPS **三项均为表中最优**" | **仅 LPIPS 最优**；PSNR/SSIM 与最强基线同档 | 新值 29.76 低于 CompGS 29.90 / GaussianSpa 29.98 / Mini-Splatting 30.00；SSIM 0.908 低于 GaussianSpa 0.910 |
+| "PSNR 仍提高 **0.67 dB**"（相对 3DGS） | **0.34 dB** | 29.76 − 29.42 |
+| 表 4-3 DB 行 "Mini-Splatting 30.00 vs 本文 30.09 ⇒ **+0.09 dB**" | "30.00 vs 本文 29.76 ⇒ **−0.24 dB**"，并补一句"该数据集收益主要体现在感知质量（LPIPS 0.255→0.244）" | 同点数对比下本文 PSNR 已不再领先 |
+| 摘要："三个数据集上均取得最高 PSNR … Deep Blending 三项同时最优" | "Mip-NeRF 360 与 Tanks and Temples 上取得最高 PSNR；Deep Blending 上 LPIPS 唯一最优、PSNR/SSIM 与最强基线同档" | 同上 |
+
+> ⚠️ **仍待确认（未改）**：第 7 章表 7-6 的 Deep Blending 行是 **0.376M / 30.01 / 0.909 / 0.241**，
+> 其中 **0.376M = 旧 PLY 的点数**（旧 playroom 约 32 万点）⇒ **该行仍是旧 PLY 的数据，需要用新批次重测/更新**。
+> 另有两点口径提醒：`FPS` 一栏是**桌面原生 GPU**；`Points` 已随新 PLY 变为 drjohnson 432,000 / playroom 190,000。
+
 
 
 ## 3. 影响面（需要跟着更新数字的地方）
