@@ -1551,15 +1551,32 @@ export class BenchCase {
             .join(",");
     }
 
+    /** 对齐资产加载状态（详见 loadAlignedPoses）：`not-loaded` / `ok` / `http-…` / `parse-fail:…` */
+    private _alignedAssetStatus = "not-loaded";
+
     /** 读取第7章对齐机位资产（`?pose_src=aligned` 时由子页面在测帧前调用）。 */
     async loadAlignedPoses(): Promise<void> {
         try {
             const res = await fetch("./bench-aligned-poses.json");
-            if (!res.ok) return;
-            this._alignedPoses = (await res.json()) as AlignedPoseAsset;
-        } catch {
-            /* 取不到就回退 flux 相机（与 `cam=flux` 资产缺失时的回退一致） */
+            if (!res.ok) {
+                this._alignedAssetStatus = `http-${res.status}`;
+                return;
+            }
+            // [2026-10-11 修复] 必须把「200 但 body 不是 JSON」当失败处理：站点预览对未知路径会回退
+            //   index.html（200 + HTML）⇒ 旧写法只判断 `res.ok` ⇒ 解析抛错被 catch 吞掉 ⇒ 对齐机位静默失效
+            //   （实测见 out/手机结果汇总_20261011.md：5 条 reduced 记录 `pose_src=flux` + ink 只有 63~66%）。
+            const body = await res.text();
+            this._alignedPoses = JSON.parse(body) as AlignedPoseAsset;
+            this._alignedAssetStatus = "ok";
+        } catch (e) {
+            this._alignedAssetStatus = `parse-fail:${String((e as Error)?.message ?? e).slice(0, 40)}`;
+            this._alignedPoses = undefined;
         }
+    }
+
+    /** 对齐资产加载状态（`ok` / `http-404` / `parse-fail:…`）；写进结果行，杜绝"资产没到、机位静默回退"。 */
+    alignedAssetStatus(): string {
+        return this._alignedAssetStatus;
     }
 
     /**
@@ -1885,6 +1902,12 @@ export async function measureOneRound(
             base.sim3Ver = info?.ver || undefined;
             base.sim3Scale = info?.s ?? undefined;
             base.alignedPoseOk = !!info && poseKeyClose(info.poseKey, base.poseKey);
+        } else if (POSE_ALIGNED) {
+            // [2026-10-11 修复] **响亮失败**：要求了对齐机位却没生效（资产 404 / body 不是 JSON / 场景未登记）
+            //   ⇒ 把哨兵写进 `sim3_ver=` + `aligned_pose_ok=0`，让记录一眼可判。旧写法此处完全静默：
+            //   结果行只有 `pose_src=flux`，与"本来就没要求对齐"无法区分（实测污染了 5 条 reduced 记录）。
+            base.sim3Ver = `ALIGNED-ASSET-MISSING(${ctx.alignedAssetStatus()})`;
+            base.alignedPoseOk = false;
         }
         mark("camera-ready", `camLocked=${ctx.cameraLocked} pose=${base.poseKey}`);
         // ---- 动态相机（`?spin=`，效度自查；`spin=0` 时下面全是 no-op）----

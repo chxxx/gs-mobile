@@ -57,6 +57,12 @@ export default defineConfig(() => ({
                 // 机位注入表（`pose=ours` / `pose=aligned` 用）；本地没生成时自动跳过
                 ...optionalAsset("bench-camviews.json", "."),
                 ...optionalAsset("bench-camviews-flux.json", "."),
+                // [2026-10-11 修复] 第7章「对齐机位」资产（`?pose_src=aligned` 用，子页面 fetch 它）。
+                //   不复制进 site-dist 时的失败是**静默**的：`vite preview` 对未知路径回退 index.html
+                //   ⇒ fetch 拿到 200 但 body 是 HTML ⇒ `res.json()` 抛错被 catch 吞掉 ⇒ 对齐机位悄悄不生效
+                //   （实测把 5 条 reduced 记录全部污染：`pose_src=flux`、缺 `sim3_ver/aligned_pose_ok`）。
+                //   所以这里用**非 optional** 条目：文件缺失直接让构建失败，而不是静默降级。
+                { src: "bench-aligned-poses.json", dest: "." },
                 // ---- 第7章对比方法实测所需的"同源资产"（互联网实测必须同源，不能跨域直链）----
                 // Flux-GS：渲染器页面 + 压缩模型 + tmc3 解码器（约 50MB，已入库）
                 { src: "flux-gs-project-gh-pages", dest: "." },
