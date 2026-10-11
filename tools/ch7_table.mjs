@@ -47,6 +47,8 @@ for (const { f } of files) {
     const glsBad = !gls ? "无GLS" : /sc=(?!0)\d|cm=(?!1111)\d{4}|dt=(?!0)\d|cf=(?!0)\d/.test(gls) ? "GLS异常" : "";
     const alignOk = g(t, /aligned_pose_ok=(\d)/);
     const sim3s = g(t, /sim3_s=([0-9.]+)/);
+    // 记录里由引擎自己算的"轮内均值"（权威值；逐轮 fps 的算术均值应与它一致）
+    const fpsMeanField = parseFloat(g(t, /offscreen_fps_mean=([0-9.]+)/) || "NaN");
 
     const rounds = [...t.matchAll(/^scene=(\S+) dataset=(\S+) round=(\d+)([^\r\n]*)/gm)].map((m) => {
         const rest = m[4];
@@ -92,10 +94,23 @@ for (const { f } of files) {
     rows.push({
         f, arm, dev, scene, dataset: rounds[0]?.dataset ?? "?", n: rounds.length, okN: okR.length,
         fpsMed: med(fps), fpsMin: fps.length ? Math.min(...fps) : NaN, fpsMax: fps.length ? Math.max(...fps) : NaN,
+        // 均值口径（用户要求）：优先用记录里的 offscreen_fps_mean（引擎算的轮均值），
+        // 缺失时退回逐轮 fps 的算术均值；sd 为轮内标准差（n-1，单轮记 0）。
+        fpsMean: Number.isFinite(fpsMeanField)
+            ? fpsMeanField
+            : fps.length
+              ? fps.reduce((a, b) => a + b, 0) / fps.length
+              : NaN,
+        fpsSd: fps.length > 1
+            ? Math.sqrt(fps.reduce((a, b) => a + (b - fps.reduce((x, y) => x + y, 0) / fps.length) ** 2, 0) / (fps.length - 1))
+            : 0,
+        firstMean: okR.length ? okR.reduce((a, r) => a + (Number.isFinite(r.first) ? r.first : 0), 0) / okR.length : NaN,
+        fetchMean: okR.length ? okR.reduce((a, r) => a + (Number.isFinite(r.fetch) ? r.fetch : 0), 0) / okR.length : NaN,
         first: med(okR.map((r) => r.first)), fetch: med(okR.map((r) => r.fetch)),
         cpu: med(okR.map((r) => r.cpu)), ink: ink0, covered: rounds[0]?.covered,
         points: pts, bytes: rounds[0]?.bytes, tw, build, alignOk, sim3s, flags,
     });
+
     if (flags.length) problems.push({ f, arm, scene, flags });
 }
 
@@ -103,13 +118,46 @@ const F = (v, d = 1) => (Number.isFinite(v) ? v.toFixed(d) : "-");
 const out = [];
 out.push(`# 手机全数据集三臂测试 · 结果汇总（${prefix}*，共 ${rows.length} 条记录）`);
 out.push("");
-out.push("| 臂 | 场景 | 数据集 | 设备 | 轮 ok | FPS 中位 | FPS 极差 | 首帧中位 ms | 下载中位 ms | cpu_ms | ink% | points | bytes | TW | BUILD | 标记 |");
-out.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+out.push("| 臂 | 场景 | 数据集 | 设备 | 轮 ok | **FPS 均值** | FPS±SD(轮内) | FPS 中位 | FPS 极差 | 首帧均值 ms | 下载均值 ms | cpu_ms | ink% | points | bytes | TW | 标记 |");
+out.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
 for (const r of rows) {
     out.push(
-        `| ${r.arm} | ${r.scene} | ${r.dataset} | ${r.dev} | ${r.okN}/${r.n} | **${F(r.fpsMed)}** | ${F(r.fpsMin)}~${F(r.fpsMax)} | ${F(r.first, 0)} | ${F(r.fetch, 0)} | ${F(r.cpu, 2)} | ${F(r.ink)} | ${r.points} | ${(r.bytes / 1048576).toFixed(2)}MB | ${r.tw || "-"} | ${r.build ? r.build.slice(0, 19) : "-"} | ${r.flags.length ? "❌ " + r.flags.join("; ") : "✅"} |`,
+        `| ${r.arm} | ${r.scene} | ${r.dataset} | ${r.dev} | ${r.okN}/${r.n} | **${F(r.fpsMean)}** | ±${F(r.fpsSd, 2)} | ${F(r.fpsMed)} | ${F(r.fpsMin)}~${F(r.fpsMax)} | ${F(r.firstMean, 0)} | ${F(r.fetchMean, 0)} | ${F(r.cpu, 2)} | ${F(r.ink)} | ${r.points} | ${(r.bytes / 1048576).toFixed(2)}MB | ${r.tw || "-"} | ${r.flags.length ? "❌ " + r.flags.join("; ") : "✅"} |`,
     );
 }
+out.push("");
+
+// ---- 聚合（**均值口径**；只计入无 ❌ 的记录 ⇒ 5 条作废的 reduced 自动排除）----
+const groups = new Map();
+const push = (k, r) => {
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(r);
+};
+for (const r of rows) {
+    if (r.flags.length) continue;
+    push(`${r.arm}|${r.dataset}`, r);
+    push(`${r.arm}|ALL13`, r);
+}
+const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : NaN);
+const sdv = (a) => (a.length > 1 ? Math.sqrt(a.reduce((x, y) => x + (y - avg(a)) ** 2, 0) / (a.length - 1)) : 0);
+out.push("## 聚合（**均值口径**，只计入 ✅ 记录）");
+out.push("");
+out.push("| 臂 | 数据集 | 场景数 | **FPS 均值 ± SD** | 首帧均值 ms | 下载均值 ms | 体积均值 MB |");
+out.push("|---|---|---|---|---|---|---|");
+const order = ["本方法", "Flux(noge)", "reduced"];
+for (const arm of order) {
+    for (const ds of ["mip360", "tnt", "db", "ALL13"]) {
+        const rs = groups.get(`${arm}|${ds}`);
+        if (!rs || !rs.length) continue;
+        const label = ds === "ALL13" ? "**全部**" : ds;
+        out.push(
+            `| ${arm} | ${label} | ${rs.length} | **${F(avg(rs.map((r) => r.fpsMean)))} ± ${F(sdv(rs.map((r) => r.fpsMean)), 1)}** | ${F(avg(rs.map((r) => r.firstMean)), 0)} | ${F(avg(rs.map((r) => r.fetchMean)), 0)} | ${(avg(rs.map((r) => r.bytes)) / 1048576).toFixed(2)} |`,
+        );
+    }
+}
+out.push("");
+out.push("> 口径说明：每条的 FPS 取记录的 `offscreen_fps_mean`（引擎对该条 3 轮取的均值）；数据集一行为**该数据集各场景的均值**；");
+out.push("> SD = 跨场景标准差。中位数口径见上表 `FPS 中位` 列（论文若用均值，请以本表为准）。");
 out.push("");
 out.push(`## 问题清单（${problems.length} 条）`);
 if (!problems.length) out.push("- 无：全部记录通过 状态/窗口/输出/点数/包版本 判据");
