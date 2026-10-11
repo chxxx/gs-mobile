@@ -45,7 +45,10 @@ node tools\ch7_gate_records.mjs 30
 
 1. **服务在**：`curl -s -o nul -w "%{http_code}" http://127.0.0.1:5173/bench.html` 应为 **200**
    （不在 ⇒ `npx vite preview --config vite.site.config.js --port 5173 --strictPort`）。
-2. **隧道在**：隧道链接能打开首页；打不开 ⇒ 重启隧道并**把新域名告诉我**。
+2. **隧道在**：`curl -s -o nul -w "%{http_code}" <域名>/bench.html` 应为 **200**；`530` ⇒ 隧道刚起（等 30–60s）或进程已死；
+   打不开 ⇒ 重启隧道（**用 `Start-Process` 脱离控制台**，见 `ch7_handoff_20261011.md` §5）并**把新域名告诉我 / 重生成 10 条链接**。
+2b. **确认手机没在用旧缓存包**：链接打开后，结果页/记录里 `BUILD[…]` 应等于当前构建（当前为 `bench-vCAZkT37.js` / `benchFlux-BtxziXJB.js`）。
+   若显示旧哈希或页面行为陈旧 ⇒ 用**无痕窗口**打开，或强制刷新。**这是"修复未生效"最容易复发的入口。**
 3. **包是新的**：打开 `…/bench-flux.html` 查看源码里 `<script src="./assets/benchFlux-XXXX.js">` 的哈希，
    与 `site-dist/assets/` 下最新的一致（或与上次记录里的 `BUILD[...]` 对比）。
 4. **资产版本**（与 §4 期望值表核对一次）：`points` 应为 `truck 273169 / drjohnson 432000 / playroom 190000`。
