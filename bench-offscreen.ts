@@ -344,6 +344,38 @@ export async function calibrateOffscreenDriverFloor(
  *     但保证各 run 相互独立（下一 run 不会把上一 run 残留的 GPU 工作算进去）。
  */
 /**
+ * [GLHYGIENE 2026-10-10] 取"当前 GL 状态指纹"（**审计/自证用，不是性能指标**）。
+ *
+ * 为什么需要：两臂/多个 pass 若共享同一个 WebGL 上下文，**未被显式重置的状态**会互相污染；
+ * 而绝大多数污染**不像纯黑那样显眼**（blend 因子、colorMask、scissor、viewport 都是"画面看着还行、
+ * 数值已经被改"的类型）。把每轮**实际生效**的状态写进结果行（`GLS…`），任何隐式依赖都会在记录里显形。
+ *
+ * 只读 `getParameter`/`isEnabled`，无副作用；调用点在每轮输出检查时（帧末、计时区之外）。
+ * 审计矩阵与"哪些状态必须显式设置"见 `docs/ch7_gl_state_audit_20261010.md`。
+ */
+export function glStateFingerprint(gl: WebGLRenderingContext | WebGL2RenderingContext): string {
+    try {
+        const vp = gl.getParameter(gl.VIEWPORT) as Int32Array | number[];
+        const sc = gl.getParameter(gl.SCISSOR_BOX) as Int32Array | number[];
+        const cm = gl.getParameter(gl.COLOR_WRITEMASK) as boolean[];
+        const fbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+        return (
+            `vp=${vp[0]},${vp[1]},${vp[2]}x${vp[3]}` +
+            ` sc=${gl.isEnabled(gl.SCISSOR_TEST) ? 1 : 0}[${sc[0]},${sc[1]},${sc[2]}x${sc[3]}]` +
+            ` cm=${cm.map((b) => (b ? 1 : 0)).join("")}` +
+            ` dt=${gl.isEnabled(gl.DEPTH_TEST) ? 1 : 0}/dm=${gl.getParameter(gl.DEPTH_WRITEMASK) ? 1 : 0}` +
+            ` bl=${gl.isEnabled(gl.BLEND) ? 1 : 0}(${gl.getParameter(gl.BLEND_SRC_RGB)},${gl.getParameter(
+                gl.BLEND_DST_RGB,
+            )},eq${gl.getParameter(gl.BLEND_EQUATION_RGB)})` +
+            ` cf=${gl.isEnabled(gl.CULL_FACE) ? 1 : 0}` +
+            ` fbo=${fbo ? 1 : 0} tex2=${gl.getParameter(gl.TEXTURE_BINDING_2D) ? 1 : 0}`
+        );
+    } catch {
+        return "err";
+    }
+}
+
+/**
  * [TW 2026-10-10] `?twindow=frame|drain`：离屏 run 的**计时窗口端点**，并把口径写进结果（`offscreen_note` 的 `TW`）。
  *
  * - `drain`（历史缺省）：终点取在 run 末**排空之后**（`finish()+1×1 readPixels`）。`batch` 下这是**有意的**设计：

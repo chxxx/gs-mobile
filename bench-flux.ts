@@ -99,6 +99,7 @@ import {
     resolveOffscreenSyncMode,
     syncPolicyLabelWithNote,
     resolveTimingWindowFromUrl,
+    glStateFingerprint,
 } from "./bench-offscreen";
 import type { OffscreenGateSample, OffscreenProtocolResult } from "./bench-offscreen";
 import {
@@ -1071,6 +1072,9 @@ let lastReadSize = "";
 /** [SIDEFRAME 2026-10-10] 空帧/混合诊断（写进 `offscreen_note` 的 `NVP/NVPL/AM/AML`；缺省空串） */
 let lastProbeDiag = "";
 
+/** [GLHYGIENE 2026-10-10] 首个计帧帧后取的 GL 状态指纹（写进 `offscreen_note` 的 `GLS[…]`；缺省空串） */
+let lastGlFingerprint = "";
+
 /**
  * [OUTCHK 2026-10-10] `?preclear=1`：驱动在**每帧调 `frame()` 之前**把离屏目标清成 `clearColor(0,0,0,0)`。
  *
@@ -1215,6 +1219,15 @@ async function driveFluxOffscreenRuns(
                                 sideFramePx = null;
                             }
                         }
+                    }
+                    // [GLHYGIENE 2026-10-10] 首个计帧帧之后取一次**该臂实际生效**的 GL 状态指纹（只读，
+                    //   写进结果行 `GLS[…]`）。Flux 的 blend/depth 只在 init 设一次、clearColor 从不设 ⇒
+                    //   它完全依赖"外部不扰动"；把实际状态落到记录里，隐性污染才可能被事后检出。
+                    if (run >= 0 && frame === 0 && lastGlFingerprint === "") {
+                        const fgGl =
+                            (cw as unknown as { __FLUXGS_BENCH_GL__?: () => WebGL2RenderingContext | null })
+                                .__FLUXGS_BENCH_GL__?.() ?? null;
+                        if (fgGl) lastGlFingerprint = glStateFingerprint(fgGl);
                     }
                 } finally {
                     target.unbind();
@@ -1866,6 +1879,8 @@ function buildResultText(st: BenchState): string {
                 `RD${lastReadSize || "-"}` +
                 // [OUTCHK 2026-10-10] 空帧（NVP=0）与混合失效（AM≈255 且 ink=0）诊断，见 lastProbeDiag 注释
                 `${lastProbeDiag}` +
+                // [GLHYGIENE 2026-10-10] 该臂实际生效的 GL 状态指纹（见 glStateFingerprint 注释）
+                `GLS[${lastGlFingerprint || "na"}]` +
                 `WU${roundStats[0]?.offscreenWarmupMs ?? ""}` +
                 // 自然模式逐秒窗口 FPS（与本文臂同结构）
                 `NW${roundStats[0]?.offscreenNatWinN ?? 0}` +

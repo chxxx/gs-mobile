@@ -2859,6 +2859,14 @@ function setSplatTransformUniforms(
             gl.clearColor(0, 0, 0, 0);
             gl.clear(gl.COLOR_BUFFER_BIT);
 
+            // [GLHYGIENE 2026-10-10] 每帧**显式**声明本 pass 依赖的全部栅格化状态，不依赖"上一步/外部
+            //   设过"的隐式继承（系统性审计与矩阵见 `docs/ch7_gl_state_audit_20261010.md`）：
+            //     · SCISSOR 关闭：若被外部开启会直接裁掉画面（且**不报错**）；
+            //     · colorMask 全开：若被禁用则"画了但没写"，数值被污染却不显眼——正是最危险的一类；
+            //     · depthMask 保持写（本 pass 无深度附件且 DEPTH_TEST 关闭，仅去除隐式依赖）。
+            gl.disable(gl.SCISSOR_TEST);
+            gl.colorMask(true, true, true, true);
+            gl.depthMask(true);
             gl.disable(gl.DEPTH_TEST);
             gl.enable(gl.BLEND);
             gl.blendFuncSeparate(gl.ONE_MINUS_DST_ALPHA, gl.ONE, gl.ONE_MINUS_DST_ALPHA, gl.ONE);

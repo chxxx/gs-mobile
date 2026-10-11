@@ -75,6 +75,8 @@ import {
     runOffscreenProtocol,
     // [TW 2026-10-10] `?twindow=` 解析器（离屏计时窗口口径；见 bench-offscreen 里的说明）
     resolveTimingWindowFromUrl,
+    // [GLHYGIENE 2026-10-10] GL 状态指纹（审计/自证：把"实际生效"的状态写进结果行）
+    glStateFingerprint,
     syncPolicyLabelWithNote,
 } from "./bench-offscreen";
 import type { OffscreenGateSample, OffscreenProtocolResult } from "./bench-offscreen";
@@ -460,6 +462,13 @@ export class BenchCase {
             gl.clearColor(0, 0, 0, 1);
             gl.clear(gl.COLOR_BUFFER_BIT);
             gl.flush();
+            // [GLHYGIENE 2026-10-10] **必须恢复 clearColor**（与 `bench-flux.ts` 的修复对称）：
+            //   `clearColor` 是**全局** GL 状态。留成 (0,0,0,1) 时，任何"只 clear 不设色"的渲染路径
+            //   都会把目标清成 alpha=1 ⇒ 前到后混合 src 因子 (1−dstA) 变 0 ⇒ 绘制无输出（表现为纯黑）。
+            //   本文臂此前**没出事，只是因为它每帧自己设 (0,0,0,0)**（`RenderProgram.ts:2859`）——
+            //   那是隐式依赖，属同类风险；这里显式消除。
+            //   审计矩阵见 `docs/ch7_gl_state_audit_20261010.md`（L2）。
+            gl.clearColor(0, 0, 0, 0);
         } catch {
             /* 上下文丢失时忽略 */
         }
@@ -2130,6 +2139,11 @@ export async function measureOneRound(
                         `SUM${f1(sum)}RES${f1(elapsedTotal - sum)}` +
                         `SUM2${f1(sum2)}RES2${f1(elapsedTotal - sum2)}` +
                         `TK${offscreen.tickEvery}` +
+                        // [GLHYGIENE 2026-10-10] 本轮**实际生效**的 GL 状态指纹（只读 `getParameter`）：
+                        //   期望值 `sc=0`（scissor 关）、`cm=1111`（四通道全写）、`dt=0`（深度测试关）、
+                        //   `bl=1(770,1,eq32774)`（BLEND 开 + ONE_MINUS_DST_ALPHA/ONE + FUNC_ADD）、
+                        //   `cf=0`（不剔面）。任何"靠继承"的行为都会在这里显形 ⇒ 不再只靠"画面是否变黑"发现。
+                        `GLS[${this.renderer ? glStateFingerprint(this.renderer.gl as WebGL2RenderingContext) : "na"}]` +
                         // [CLR/BAND 2026-09-28] 纯 clear 探针（零 splat，**独立**测出"FBO 面积项"）
                         //   + 带标签（按"每帧排空"给本条件打档，事后可直接按带筛数据）。ours 阈值 45/35 ms/帧。
                         `${bandTag(
