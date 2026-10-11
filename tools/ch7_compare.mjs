@@ -18,12 +18,22 @@ for (const f of fs.readdirSync(dir).filter((x) => x.startsWith("full-") && x.end
     const dataset = (/^scene=\S+ dataset=(\S+)/m.exec(t) || [])[1] || "?";
     const fpsMeanRec = parseFloat((/offscreen_fps_mean=([0-9.]+)/.exec(t) || [])[1] || "NaN");
     const ok = !/ALIGNED-ASSET-MISSING/.test(t) && /GLS\[/.test(t) && (arm !== "red" || /aligned_pose_ok=1/.test(t));
-    const rounds = [...t.matchAll(/^scene=\S+ dataset=\S+ round=\d+[^\r\n]*?\bfps=([0-9.]+)/gm)].map((m) => +m[1]);
+    const roundRows = [...t.matchAll(/^scene=\S+ dataset=\S+ round=(\d+)([^\r\n]*)/gm)].map((m) => {
+        const get = (k) => {
+            const r = new RegExp(`(?:^|\\s)${k}=([^\\s]+)`).exec(m[2]);
+            return r ? parseFloat(r[1]) : NaN;
+        };
+        return { round: +m[1], fps: get("fps"), first: get("first_frame_ms"), fetch: get("fetch_ms") };
+    });
+    const rounds = roundRows.map((r) => r.fps).filter((v) => Number.isFinite(v));
     const ink = parseFloat((/ink_pct=([0-9.]+)/.exec(t.replace(/\n[\s\S]*?\n/, "")) || [])[1] || "NaN");
     const inkAny = parseFloat((/ink_pct=([0-9.]+)/.exec(t) || [])[1] || "NaN");
     const bytes = parseInt((/^scene=\S+[^\r\n]*?\bbytes=(\d+)/m.exec(t) || [])[1] || "0", 10);
     const pts = parseInt((/^scene=\S+[^\r\n]*?\bpoints=(\d+)/m.exec(t) || [])[1] || "0", 10);
-    recs.push({ f, arm, scene, sceneRaw, dataset, mean: fpsMeanRec, rounds, ink: Number.isFinite(ink) ? ink : inkAny, bytes, pts, ok });
+    recs.push({ f, arm, scene, sceneRaw, dataset, mean: fpsMeanRec, rounds, ink: Number.isFinite(ink) ? ink : inkAny, bytes, pts, ok,
+        // 新增维度：首帧 / 下载（各轮算术均值）
+        firstArr: roundRows.map((r) => r.first).filter((v) => Number.isFinite(v)),
+        fetchArr: roundRows.map((r) => r.fetch).filter((v) => Number.isFinite(v)) });
 }
 
 const valid = recs.filter((r) => r.ok && r.arm !== "?" && Number.isFinite(r.mean));
@@ -39,12 +49,18 @@ const F = (v, d = 1) => (Number.isFinite(v) ? v.toFixed(d) : "-");
 const stat = (rs) => {
     const means = rs.map((r) => r.mean);
     const rounds = rs.flatMap((r) => r.rounds);
+    const firsts = rs.map((r) => avg(r.firstArr));
+    const fetchs = rs.map((r) => avg(r.fetchArr));
     return {
         n: rs.length,
         mean: avg(means), sd: sd(means), med: med(means),
         bestScene: means.length ? Math.max(...means) : NaN,
         bestRound: rounds.length ? Math.max(...rounds) : NaN,
         worst: means.length ? Math.min(...means) : NaN,
+        // 新增：首帧 / 下载（场景级均值；越小越好）
+        firstMean: avg(firsts), firstMed: med(firsts), firstBest: firsts.length ? Math.min(...firsts) : NaN,
+        firstRound: rs.flatMap((r) => r.firstArr).length ? Math.min(...rs.flatMap((r) => r.firstArr)) : NaN,
+        fetchMean: avg(fetchs), fetchMed: med(fetchs), fetchBest: fetchs.length ? Math.min(...fetchs) : NaN,
     };
 };
 const pick = (arm, ds) => valid.filter((r) => r.arm === arm && (ds === "ALL13" || r.dataset === ds));
@@ -54,6 +70,7 @@ const RED_MIP = ["bicycle", "bonsai", "counter", "kitchen"];
 
 const out = [];
 const win = (a, b) => (a > b ? "**本方法**" : b > a ? "**Flux**" : "=");
+const winLow = (a, b) => (a < b ? "**本方法**" : b < a ? "**Flux**" : "=");
 out.push("# 三臂对比分析（Gen3 / Adreno 750，2026-10-11）");
 out.push("");
 out.push("> 口径：每条 FPS = `offscreen_fps_mean`（该条 3 轮均值）；**均值/中位数 = 跨场景**统计；");
@@ -72,6 +89,10 @@ for (const [ds, label] of [["mip360", "Mip360 (9 场景)"], ["tnt", "T&T (2)"], 
     out.push(`| ${label} | 最好(场景) | ${F(a.bestScene)} | ${F(b.bestScene)} | ${win(a.bestScene, b.bestScene)} |`);
     out.push(`| ${label} | 最好(单轮) | ${F(a.bestRound)} | ${F(b.bestRound)} | ${win(a.bestRound, b.bestRound)} |`);
     out.push(`| ${label} | 最差(场景) | ${F(a.worst)} | ${F(b.worst)} | ${win(a.worst, b.worst)} |`);
+    out.push(`| ${label} | **首帧均值 (ms)** ↓ | ${F(a.firstMean, 0)} | ${F(b.firstMean, 0)} | ${winLow(a.firstMean, b.firstMean)} |`);
+    out.push(`| ${label} | 首帧中位 (ms) ↓ | ${F(a.firstMed, 0)} | ${F(b.firstMed, 0)} | ${winLow(a.firstMed, b.firstMed)} |`);
+    out.push(`| ${label} | **下载均值 (ms)** ↓ | ${F(a.fetchMean, 0)} | ${F(b.fetchMean, 0)} | ${winLow(a.fetchMean, b.fetchMean)} |`);
+    out.push(`| ${label} | 下载中位 (ms) ↓ | ${F(a.fetchMed, 0)} | ${F(b.fetchMed, 0)} | ${winLow(a.fetchMed, b.fetchMed)} |`);
     out.push("");
 }
 out.push("## 表 2 · reduced-3DGS 五场景：逐场景三臂对照");
@@ -87,12 +108,30 @@ for (const sc of RED5) {
     );
 }
 out.push("");
+out.push("## 表 2b · reduced 五场景：**首帧 / 下载**逐场景三臂（越小越好）");
+out.push("");
+out.push("| 场景 | 首帧 本方法 | 首帧 Flux | 首帧 reduced | 下载 本方法 | 下载 Flux | 下载 reduced | reduced ink% |");
+out.push("|---|---|---|---|---|---|---|---|");
+for (const sc of RED5) {
+    const a = pickScenes("ours", [sc])[0];
+    const b = pickScenes("flux", [sc])[0];
+    const c = pickScenes("red", [sc])[0];
+    const f1 = (r) => F(avg(r?.firstArr ?? []), 0);
+    const f2 = (r) => F(avg(r?.fetchArr ?? []), 0);
+    out.push(`| ${sc} | ${f1(a)} | ${f1(b)} | ${f1(c)} | ${f2(a)} | ${f2(b)} | ${f2(c)} | ${F(c?.ink)} |`);
+}
+out.push("");
 out.push("## 表 3 · reduced 五场景子集：三臂聚合（同样只吃这 5 个场景，才可比）");
 out.push("");
 out.push("| 子集 | 统计量 | 本方法 | Flux-GS(noge) | reduced-3DGS | 谁更好 |");
 out.push("|---|---|---|---|---|---|");
 const best3 = (x, y, z) => {
     const m = Math.max(x, y, z);
+    return [x, y, z].filter((v) => v === m).map((v) => (v === x ? "**本方法**" : v === y ? "**Flux**" : "**reduced**")).join(" / ");
+};
+// 越小越好口径（首帧/下载/体积）
+const best3Low = (x, y, z) => {
+    const m = Math.min(x, y, z);
     return [x, y, z].filter((v) => v === m).map((v) => (v === x ? "**本方法**" : v === y ? "**Flux**" : "**reduced**")).join(" / ");
 };
 for (const [label, list] of [["Mip360 四场景（bicycle/bonsai/counter/kitchen）", RED_MIP], ["T&T 一场景（truck）", ["truck"]], ["全部五场景", RED5]]) {
@@ -103,6 +142,9 @@ for (const [label, list] of [["Mip360 四场景（bicycle/bonsai/counter/kitchen
     out.push(`| ${label} | 中位数 | ${F(A.med)} | ${F(B.med)} | ${F(C.med)} | ${best3(A.med, B.med, C.med)} |`);
     out.push(`| ${label} | 最好(场景) | ${F(A.bestScene)} | ${F(B.bestScene)} | ${F(C.bestScene)} | ${best3(A.bestScene, B.bestScene, C.bestScene)} |`);
     out.push(`| ${label} | 最好(单轮) | ${F(A.bestRound)} | ${F(B.bestRound)} | ${F(C.bestRound)} | ${best3(A.bestRound, B.bestRound, C.bestRound)} |`);
+    out.push(`| ${label} | **首帧均值 (ms)** ↓ | ${F(A.firstMean, 0)} | ${F(B.firstMean, 0)} | ${F(C.firstMean, 0)} | ${best3Low(A.firstMean, B.firstMean, C.firstMean)} |`);
+    out.push(`| ${label} | **下载均值 (ms)** ↓ | ${F(A.fetchMean, 0)} | ${F(B.fetchMean, 0)} | ${F(C.fetchMean, 0)} | ${best3Low(A.fetchMean, B.fetchMean, C.fetchMean)} |`);
+    out.push(`| ${label} | 体积均值 (MB) ↓ | ${F(avg(pickScenes("ours", list).map((r) => r.bytes)) / 1048576, 2)} | ${F(avg(pickScenes("flux", list).map((r) => r.bytes)) / 1048576, 2)} | ${F(avg(pickScenes("red", list).map((r) => r.bytes)) / 1048576, 2)} | ${best3Low(avg(pickScenes("ours", list).map((r) => r.bytes)), avg(pickScenes("flux", list).map((r) => r.bytes)), avg(pickScenes("red", list).map((r) => r.bytes)))} |`);
     out.push("");
 }
 out.push("### 覆盖度披露（必须写进表注）");
