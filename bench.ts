@@ -101,6 +101,8 @@ import {
     throughputPercentileRoundTags,
     frameDumpTags,
     armRoundTags,
+    // [PREFLIGHT 2026-10-10] 包版本自证（写进 `offscreen_note` 的 `BUILD[…]`）：证明这条数据是哪份代码产出的
+    buildTag,
 } from "./bench-shared";
 import type { BenchState, CasePhase, CaseToParentMessage, RoundResult, SceneMeta } from "./bench-shared";
 // 仅类型导入：view 模式的实现（含渲染器代码）由 main() 动态 import，bench 模式下不会被加载
@@ -455,6 +457,10 @@ function buildResultText(st: BenchState): string {
                         ? "frame"
                         : "drain"
                 }` +
+                // [PREFLIGHT 2026-10-10] **包版本自证**：本页主 bundle 的文件名（含构建哈希）。
+                //   动机：真机曾跑到**旧缓存包**却看不出（`u=`/`arm=` 只说明参数、不说明代码版本），
+                //   差点把"修复未生效"当结论。见到 `BUILD[bench-XXXX.js]` 就等于知道该轮跑的是哪份代码。
+                `BUILD[${buildTag()}]` +
                 // [LAB 2026-09-28] 与 flux 臂同结构的耗时分解（`|lab…`，见 bench-measure 的 offscreenLabNote）：
                 //   `mark()` 时间线在真机结果里默认不落盘 ⇒ 分解必须走这里才看得到
                 `${okRounds[0]?.offscreenLabNote ?? ""}`,

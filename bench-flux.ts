@@ -82,6 +82,8 @@ import {
     naturalSeconds,
     offscreenWarmupFrames,
     throughputDriver,
+    // [PREFLIGHT 2026-10-10] 包版本自证（写进 `offscreen_note` 的 `BUILD[…]`）
+    buildTag,
 } from "./bench-shared";
 import type {
     DriveThroughputStats,
@@ -1881,6 +1883,9 @@ function buildResultText(st: BenchState): string {
                 `${lastProbeDiag}` +
                 // [GLHYGIENE 2026-10-10] 该臂实际生效的 GL 状态指纹（见 glStateFingerprint 注释）
                 `GLS[${lastGlFingerprint || "na"}]` +
+                // [PREFLIGHT 2026-10-10] **包版本自证**（与本文臂同 tag）：本页主 bundle 的文件名含构建哈希 ⇒
+                //   可事后判定"这一轮跑的是不是修复后的包"，无需依赖记忆。
+                `BUILD[${buildTag()}]` +
                 `WU${roundStats[0]?.offscreenWarmupMs ?? ""}` +
                 // 自然模式逐秒窗口 FPS（与本文臂同结构）
                 `NW${roundStats[0]?.offscreenNatWinN ?? 0}` +

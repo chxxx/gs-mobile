@@ -281,7 +281,79 @@ export async function submitReport(reportUrl: string, text: string, token = ""):
     }
 }
 
-// ------------------------------------------------------------------ 测帧口径开关（与 Flux-GS 臂对齐）
+/* ------------------------------------------------------------------ [PREFLIGHT 2026-10-10] 运行环境自证
+   动机：**不要让"这轮数据无效"在几天后分析时才被发现**。以下两项都是"其它字段全正常、只有它能把无效轮抓出来"的类型。 */
+
+/**
+ * `BUILD[…]`：当前页面主 bundle 的文件名（含构建哈希）⇒ 记录里能**证明这条数据是哪份代码产出的**。
+ * 为什么必须有：2026-10-10 真机跑过一轮**旧缓存包**，差点把"修复未生效"当成新结论；
+ * 而 `u=`/`arm=` 只说明参数，不说明代码版本。
+ */
+export function buildTag(doc: Document = document): string {
+    try {
+        const srcs = Array.from(doc.querySelectorAll("script[src]")).map((e) => e.getAttribute("src") || "");
+        const hit = srcs.find((x) => /\/assets\/[A-Za-z0-9_.-]+-[A-Za-z0-9_-]{6,}\.js$/.test(x));
+        return hit ? hit.split("/").pop() || "unknown" : "unknown";
+    } catch {
+        return "na";
+    }
+}
+
+/**
+ * `VIS[…]`：测量期间页面是否被切走/锁屏（`document.hidden`）。
+ * 为什么必须有：手机端页面一旦不可见，rAF 与定时器会被**节流**；此时 `driver=raf`/`natural` 的读数无效，
+ * 而**画面内容、覆盖率、`ink_pct` 全都正常**——只有这一项能把它抓出来。
+ * 用法：每轮开始 `start()`、结束 `stop()`，把返回的 `hiddenCount/hiddenMs` 写进结果行。
+ */
+export function createVisibilityWatcher(doc: Document = document): {
+    start: () => void;
+    stop: () => { hiddenCount: number; hiddenMs: number };
+} {
+    let count = 0;
+    let hiddenSince = 0;
+    let totalHidden = 0;
+    let active = false;
+    const onChange = (): void => {
+        if (!active) return;
+        if (doc.hidden) {
+            if (hiddenSince === 0) {
+                hiddenSince = performance.now();
+                count++;
+            }
+        } else if (hiddenSince > 0) {
+            totalHidden += performance.now() - hiddenSince;
+            hiddenSince = 0;
+        }
+    };
+    return {
+        start: () => {
+            count = 0;
+            hiddenSince = 0;
+            totalHidden = 0;
+            active = true;
+            try {
+                doc.addEventListener("visibilitychange", onChange);
+            } catch {
+                /* ignore */
+            }
+        },
+        stop: () => {
+            try {
+                doc.removeEventListener("visibilitychange", onChange);
+            } catch {
+                /* ignore */
+            }
+            if (hiddenSince > 0) {
+                totalHidden += performance.now() - hiddenSince;
+                hiddenSince = 0;
+            }
+            active = false;
+            return { hiddenCount: count, hiddenMs: totalHidden };
+        },
+    };
+}
+
+
 /** 参考协议（Flux-GS 原协议）：`?proto=flux` → 焦距取它的 COLMAP 焦距、计帧前不预热。 */
 export const PROTO_FLUX = param("proto", "") === "flux";
 /**
