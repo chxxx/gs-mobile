@@ -2143,7 +2143,7 @@ export async function measureOneRound(
                         //   期望值 `sc=0`（scissor 关）、`cm=1111`（四通道全写）、`dt=0`（深度测试关）、
                         //   `bl=1(770,1,eq32774)`（BLEND 开 + ONE_MINUS_DST_ALPHA/ONE + FUNC_ADD）、
                         //   `cf=0`（不剔面）。任何"靠继承"的行为都会在这里显形 ⇒ 不再只靠"画面是否变黑"发现。
-                        `GLS[${this.renderer ? glStateFingerprint(this.renderer.gl as WebGL2RenderingContext) : "na"}]` +
+                        `GLS[${ctx.renderer ? glStateFingerprint(ctx.renderer.gl as WebGL2RenderingContext) : "na"}]` +
                         // [CLR/BAND 2026-09-28] 纯 clear 探针（零 splat，**独立**测出"FBO 面积项"）
                         //   + 带标签（按"每帧排空"给本条件打档，事后可直接按带筛数据）。ours 阈值 45/35 ms/帧。
                         `${bandTag(
