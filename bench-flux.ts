@@ -102,6 +102,7 @@ import {
     syncPolicyLabelWithNote,
     resolveTimingWindowFromUrl,
     glStateFingerprint,
+    glCompatProbe,
 } from "./bench-offscreen";
 import type { OffscreenGateSample, OffscreenProtocolResult } from "./bench-offscreen";
 import {
@@ -1076,6 +1077,8 @@ let lastProbeDiag = "";
 
 /** [GLHYGIENE 2026-10-10] 首个计帧帧后取的 GL 状态指纹（写进 `offscreen_note` 的 `GLS[…]`；缺省空串） */
 let lastGlFingerprint = "";
+/** [COMPAT 2026-10-13] 该臂的兼容性探针结果（GL 上限 + 测量后一次 getError），随 `GLS[…]` 一并落进结果行 */
+let lastCompatProbe = "";
 
 /**
  * [OUTCHK 2026-10-10] `?preclear=1`：驱动在**每帧调 `frame()` 之前**把离屏目标清成 `clearColor(0,0,0,0)`。
@@ -1230,6 +1233,7 @@ async function driveFluxOffscreenRuns(
                             (cw as unknown as { __FLUXGS_BENCH_GL__?: () => WebGL2RenderingContext | null })
                                 .__FLUXGS_BENCH_GL__?.() ?? null;
                         if (fgGl) lastGlFingerprint = glStateFingerprint(fgGl);
+                        if (fgGl && lastCompatProbe === "") lastCompatProbe = glCompatProbe(fgGl);
                     }
                 } finally {
                     target.unbind();
@@ -1883,6 +1887,8 @@ function buildResultText(st: BenchState): string {
                 `${lastProbeDiag}` +
                 // [GLHYGIENE 2026-10-10] 该臂实际生效的 GL 状态指纹（见 glStateFingerprint 注释）
                 `GLS[${lastGlFingerprint || "na"}]` +
+                // [COMPAT 2026-10-13] 兼容性探针（GL 上限 + 测量后一次 getError；见 glCompatProbe 注释）
+                `CAP[${lastCompatProbe || "na"}]` +
                 // [PREFLIGHT 2026-10-10] **包版本自证**（与本文臂同 tag）：本页主 bundle 的文件名含构建哈希 ⇒
                 //   可事后判定"这一轮跑的是不是修复后的包"，无需依赖记忆。
                 `BUILD[${buildTag()}]` +

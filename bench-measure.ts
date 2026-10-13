@@ -77,6 +77,7 @@ import {
     resolveTimingWindowFromUrl,
     // [GLHYGIENE 2026-10-10] GL 状态指纹（审计/自证：把"实际生效"的状态写进结果行）
     glStateFingerprint,
+    glCompatProbe,
     syncPolicyLabelWithNote,
 } from "./bench-offscreen";
 import type { OffscreenGateSample, OffscreenProtocolResult } from "./bench-offscreen";
@@ -2180,7 +2181,9 @@ export async function measureOneRound(
                                 clearProbeIterationsFromUrl(),
                                 clearProbeRepsFromUrl(),
                             ),
-                        )}`;
+                        )}` +
+                        // [COMPAT 2026-10-13] 兼容性探针（GL 上限 + 测量后一次 getError），见 glCompatProbe 注释
+                        `CAP[${glCompatProbe(ctx.renderer ? (ctx.renderer.gl as WebGL2RenderingContext) : null)}]`;
                 }
                 // GPU 计时口径（本环境唯一可信的口径）：主指标 = 1000 / GPU 中位毫秒
                 base.offscreenFpsSource = offscreen.fpsSource;

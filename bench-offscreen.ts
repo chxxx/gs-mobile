@@ -398,6 +398,38 @@ export function resolveTimingWindowFromUrl(search?: string): { afterDrain: boole
     return { afterDrain: true, label: "drain" };
 }
 
+/**
+ * [COMPAT 2026-10-13] **兼容性探针**（只读；**不插入每帧路径** ⇒ 不影响帧率与公平性）。
+ * 为什么需要：论文 §7.6.1 要写"本方法的整数纹理布局未触发设备上限，而对照方案的大尺寸浮点 SH 纹理
+ * 在同类机型上传失败"——这类结论必须由**设备实测上限 + GL 错误码**支撑，不能只写"没出问题"。
+ *  - GL 上限：`MAX_TEXTURE_SIZE` / `MAX_TEXTURE_IMAGE_UNITS` / `MAX_RENDERBUFFER_SIZE` / `MAX_3D_TEXTURE_SIZE` / `MAX_VERTEX_UNIFORM_VECTORS`
+ *  - `gl.getError()`：测量结束后读**一次**（最多清 8 个），把"整段测量期间是否发生过 GL 错误"落进结果行
+ *  - 上下文丢失 / GPU 计时扩展可用性：已由 `offscreen_gpu_diag` 的 `_ctxLost=` 与 `ext=` 覆盖，此处不重复
+ */
+export function glCompatProbe(gl: WebGL2RenderingContext | null | undefined): string {
+    if (!gl) return "na";
+    try {
+        const p = (k: number): string => {
+            const v = gl.getParameter(k) as unknown;
+            if (v === null || v === undefined) return "-";
+            return typeof v === "number" ? String(v) : String(v).slice(0, 20);
+        };
+        const errs: string[] = [];
+        for (let i = 0; i < 8; i++) {
+            const e = gl.getError();
+            if (e === gl.NO_ERROR) break;
+            errs.push(String(e));
+        }
+        return (
+            `tex2=${p(gl.MAX_TEXTURE_SIZE)}/u${p(gl.MAX_TEXTURE_IMAGE_UNITS)}` +
+            `/rb${p(gl.MAX_RENDERBUFFER_SIZE)}/t3d${p(gl.MAX_3D_TEXTURE_SIZE)}/vl${p(gl.MAX_VERTEX_UNIFORM_VECTORS)}` +
+            ` err=${errs.length ? errs.join("+") : 0}`
+        );
+    } catch (e) {
+        return `probe-fail:${String((e as Error)?.message ?? e).slice(0, 40)}`;
+    }
+}
+
 export async function runOffscreenProtocol(spec: {
     framesPerRun: number;
     numRuns: number;
