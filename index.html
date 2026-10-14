@@ -86,6 +86,32 @@
                 display: block;
             }
         </style>
+        <script>
+            // [2026-10-13] gh-pages 演示页默认使用"本方法部署臂"。
+            //   必须在**任何模块脚本之前**写入 URL：加载器与渲染器都在初始化时读 location.search，
+            //   若在模块里再 history.replaceState 已经太晚（loader 读不到 lr=1 会报"低秩载荷缺失"并作废本轮数据）。
+            //   默认 shcache=frag&lr=1&nocolortx=1；?arm=full 追加 notx=1（单对象场景才可用，多对象会被渲染器判定作废）；
+            //   ?arm=base 关闭全部；URL 里已显式给出任一开关时不覆盖。
+            (function () {
+                try {
+                    var q = new URLSearchParams(location.search);
+                    var keys = ["shcache", "lr", "notx", "nocolortx"];
+                    var has = keys.some(function (k) {
+                        return q.has(k);
+                    });
+                    var arm = (q.get("arm") || "deploy").toLowerCase();
+                    if (has || arm === "base" || arm === "off") return;
+                    var u = new URL(location.href);
+                    u.searchParams.set("shcache", "frag");
+                    u.searchParams.set("lr", "1");
+                    u.searchParams.set("nocolortx", "1");
+                    if (arm === "full") u.searchParams.set("notx", "1");
+                    history.replaceState(null, "", u.toString());
+                } catch (e) {
+                    /* 保持原行为 */
+                }
+            })();
+        </script>
     </head>
     <body>
         <div id="progress-container" hidden>

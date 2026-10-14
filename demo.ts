@@ -8,6 +8,10 @@ const progressContainer = document.getElementById("progress-container") as HTMLD
 const fpsCounter = document.getElementById("fps-counter") as HTMLDivElement;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
 const dropZone = document.getElementById("drop-zone") as HTMLDivElement;
+// [2026-10-13] "默认部署臂"的 URL 注入**已移到 index.html 的 <head> 内联脚本**：加载器/渲染器都在初始化时
+// 读 `location.search`，在模块里再 replaceState 已经太晚（loader 读不到 `lr=1` 会报"低秩载荷缺失"并作废本轮数据）。
+// 开关：默认 `shcache=frag&lr=1&nocolortx=1`；`?arm=full` 追加 `notx=1`（单对象场景才可用）；`?arm=base` 关闭。
+
 const sceneSelect = document.getElementById("scene-select") as HTMLSelectElement;
 
 // 注意：这里**不再**单独建探测上下文做"WebGL2 能力自检"。
@@ -433,6 +437,70 @@ function adjustPixelRatio() {
     console.log(`Render resolution: ${renderer.canvas.width} x ${renderer.canvas.height}`);
 }
 
+/**
+ * [2026-10-13] **演示页默认套用 Flux 默认视角**，使线上演示与 Flux-GS 取景一致。
+ *   数据源：`bench-flux-camera.json`（随站点一起发布）
+ *     · `focal_px` = 1159.588，`cameras[0].position/rotation` = Flux 原代码的 default_view（**13 场景共用**）
+ *     · 其 note 明确：position/rotation 与 gsplat.js 的 `CameraData.update` 同构，可直接套用
+ *   开关：`?cam=flux`（默认）/ `?cam=fluxcam:N`（它第 N 个硬编码镜头）/ `?cam=auto`（回退旧的自适应取景）
+ *   资产缺失或解析失败 ⇒ 静默保持原行为（不 alert，避免打扰演示）。
+ */
+async function applyFluxCameraDefault(): Promise<void> {
+    const q = new URLSearchParams(location.search);
+    const mode = (q.get("cam") || "flux").toLowerCase();
+    if (mode === "auto" || mode === "off" || mode === "ours") return;
+    const want = /^fluxcam:(\d+)$/.exec(mode);
+    try {
+        const res = await fetch("./bench-flux-camera.json");
+        if (!res.ok) return;
+        const asset = (await res.json()) as {
+            focal_px?: number;
+            refWidth?: number;
+            cameras?: { id?: number; width?: number; position?: number[]; quaternion?: number[] }[];
+            default_view?: { position?: number[]; quaternion?: number[]; view_matrix?: number[] };
+        };
+        const cams = asset.cameras ?? [];
+        // 【关键】默认视角要用资产里的 `default_view`（Flux 未交互时的原始视角，13 场景共用）；
+        // `cameras[N]` 是"第 N 个硬编码镜头"，**不是**默认视角。
+        const entry = want ? cams[Number(want[1])] : asset.default_view ?? cams[0];
+        if (!entry?.position || entry.position.length < 3) return;
+
+        // 焦距按画布宽等比缩放：资产焦距是在参照分辨率(width=1959)下的像素焦距，
+        // 画布更宽时若沿用同一像素值会"变大"（FOV 变小）⇒ 这里保持 fx/width 不变才叫取景一致。
+        const refW = asset.refWidth ?? cams.find((c) => typeof c?.width === "number")?.width ?? 1959;
+        const canvasW = renderer.canvas.width || refW;
+        const focal = Number.isFinite(asset.focal_px) && (asset.focal_px as number) > 0 ? (asset.focal_px as number) : camera.data.fx;
+        const fx = focal * (canvasW / refW);
+        camera.data.fx = fx;
+        camera.data.fy = fx;
+
+        const p = entry.position;
+        camera.position = new SPLAT.Vector3(p[0], p[1], p[2]);
+        // 【关键】资产里的 `rotation` 是 3x3 矩阵（9 个数），**四元数在 `quaternion` 字段**（[x,y,z,w]）。
+        const qd = entry.quaternion;
+        if (qd && qd.length === 4) {
+            camera.rotation = new SPLAT.Quaternion(qd[0], qd[1], qd[2], qd[3]);
+        }
+        camera.update();
+
+        // 【关键】OrbitControls 每帧都会 `lookAt(target)` ⇒ 不设 target 的话朝向会立刻被改回旧值。
+        // Flux 的 default_view 看向**原点**（用它的 view_matrix 反解目标点 ≈ (0,0,0)：p + Rᵗ·t ≈ 0），
+        // 所以把 target 放到原点：既保住朝向，也让后续拖拽/阻尼从正确状态开始。
+        // `?cam=nolookat` 跳过这一步（只保留纯四元数朝向），用于 A/B 对比。
+        if (mode !== "nolookat" && controls) {
+            const oc = controls as unknown as { target: SPLAT.Vector3 };
+            oc.target = new SPLAT.Vector3(0, 0, 0);
+            controls.update();
+        }
+        console.info(
+            `[cam] 已套用 Flux ${want ? `镜头#${want[1]}` : "default_view"}：pos=(${p.map((v) => v.toFixed(3)).join(", ")}) ` +
+                `fx=${fx.toFixed(1)}（画布宽 ${canvasW} / 参照 ${refW}）`,
+        );
+    } catch (e) {
+        console.warn("[cam] Flux 默认视角套用失败（保持原行为）", e);
+    }
+}
+
 async function loadFromUrl(url: string) {
     resetScene();
     showProgress();
@@ -445,6 +513,7 @@ async function loadFromUrl(url: string) {
         });
         adjustPixelRatio();
         applySceneTweaks();
+        await applyFluxCameraDefault();
     } catch (err) {
         console.error("Failed to load scene:", err);
         alert(`Failed to load scene: ${url}`);
@@ -466,6 +535,7 @@ async function loadFile(file: File) {
 
     adjustPixelRatio();
     applySceneTweaks();
+    await applyFluxCameraDefault();
     hideProgress();
     dropZone.style.display = "none";
     sceneSelect.value = "";
