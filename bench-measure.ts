@@ -52,7 +52,6 @@ import {
     offscreenRunCount,
     offscreenSyncMode,
     offscreenTickEvery,
-    isNaturalMode,
     isWallClockBudgetMode,
     naturalSeconds,
 } from "./bench-shared";
@@ -118,8 +117,12 @@ interface SpinState {
 
 /** 机位指纹数值比较（见调用处注释：页面内部是 float32，逐位字符串比较可能在正确机位下也判 0）。 */
 function poseKeyClose(a: string, b: string, tol = 1e-5): boolean {
-    const A = String(a ?? "").split(",").map(Number);
-    const B = String(b ?? "").split(",").map(Number);
+    const A = String(a ?? "")
+        .split(",")
+        .map(Number);
+    const B = String(b ?? "")
+        .split(",")
+        .map(Number);
     if (A.length !== B.length || A.length === 0) return false;
     for (let i = 0; i < A.length; i++) {
         if (!Number.isFinite(A[i]) || !Number.isFinite(B[i])) return false;
@@ -596,13 +599,17 @@ export class BenchCase {
             //   本文臂的驱动跑在 iframe（bench-case.html）里，优先取**父页**的 search，同源失败再退回自身。
             timingEndAfterDrain:
                 gate?.mode === "batch" &&
-                resolveTimingWindowFromUrl((() => {
-                    try {
-                        return window.parent && window.parent !== window ? window.parent.location.search : location.search;
-                    } catch {
-                        return location.search;
-                    }
-                })()).afterDrain,
+                resolveTimingWindowFromUrl(
+                    (() => {
+                        try {
+                            return window.parent && window.parent !== window
+                                ? window.parent.location.search
+                                : location.search;
+                        } catch {
+                            return location.search;
+                        }
+                    })(),
+                ).afterDrain,
             // 驱动降频：手机逐帧让出 ≈ 43ms/帧（会盖住 GPU 真实吞吐），缺省每 16 帧让出一次
             tickEveryFrames: offscreenTickEvery(),
             // 自然模式：驱动取自 URL（自然模式链接给 `driver=raf` = vsync 边界），并按 30 秒墙钟跑满
@@ -756,8 +763,7 @@ export class BenchCase {
         if (!s) return;
         const deg = spinYawDegAt(s.spec, index);
         // [ROLL 2026-09-29] `roll` 档：位置不动、姿态绕**自身视线轴**转（画面整体旋转，视野内点集不变）
-        const pose =
-            s.spec.mode === "roll" ? spinRollPose(s.p0, s.q0, deg) : spinPose(s.p0, s.q0, deg, s.pivot);
+        const pose = s.spec.mode === "roll" ? spinRollPose(s.p0, s.q0, deg) : spinPose(s.p0, s.q0, deg, s.pivot);
         this.camera.position = new SPLAT.Vector3(pose.position[0], pose.position[1], pose.position[2]);
         this.camera.rotation = new SPLAT.Quaternion(
             pose.quaternion[0],
@@ -2138,10 +2144,7 @@ export async function measureOneRound(
                     const split = ctx.offscreenEndRunSplit();
                     const elapsedTotal = offscreen.runs.reduce((a, r) => a + r.elapsedMs, 0);
                     const sum =
-                        offscreen.tickMsTotal +
-                        offscreen.frameMsTotal +
-                        offscreen.gapMsTotal +
-                        offscreen.endRunMsTotal;
+                        offscreen.tickMsTotal + offscreen.frameMsTotal + offscreen.gapMsTotal + offscreen.endRunMsTotal;
                     // 去重口径：`tick` 让出发生在**帧间**，其耗时既记进 `T` 也落在 `G` 的区间里 ⇒
                     // 真正的窗口组成是 `EL ≈ F + (G−T) + E`；`SUM2/RES2` 就是这个去重后的对账对。
                     const sum2 =

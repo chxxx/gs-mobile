@@ -77,7 +77,6 @@ import {
     offscreenRunCount,
     offscreenSyncMode,
     offscreenTickEvery,
-    isNaturalMode,
     isWallClockBudgetMode,
     naturalSeconds,
     offscreenWarmupFrames,
@@ -1017,10 +1016,7 @@ function injEnsureProgram(g: WebGL2RenderingContext): void {
     const vs = g.createShader(g.VERTEX_SHADER);
     const fs = g.createShader(g.FRAGMENT_SHADER);
     if (!vs || !fs) return;
-    g.shaderSource(
-        vs,
-        "attribute vec4 a; void main(){ gl_Position = vec4(a.x*1e-30, a.y*1e-30, 2.0, 1.0); }",
-    );
+    g.shaderSource(vs, "attribute vec4 a; void main(){ gl_Position = vec4(a.x*1e-30, a.y*1e-30, 2.0, 1.0); }");
     g.shaderSource(fs, "precision lowp float; void main(){ gl_FragColor = vec4(0.0); }");
     g.compileShader(vs);
     g.compileShader(fs);
@@ -1035,7 +1031,6 @@ function injEnsureProgram(g: WebGL2RenderingContext): void {
 
 /** 结果行里的注入标记（MB/帧；0 = 关闭）——供事后按"是否植入"筛数据。 */
 const injTag = (injBytes / 1048576).toFixed(1);
-
 
 /** [LAB 2026-09-28] 本臂耗时分解累加器（父页内直接可读；写进结果行的 `offscreen_note=|lab...` 段） */
 const fluxLab = {
@@ -1179,8 +1174,9 @@ async function driveFluxOffscreenRuns(
                 //   见 PRECLEAR_REQUESTED 注释（用于区分"画了但被 alpha 吃掉"与"没画到这块 FBO"）。
                 if (PRECLEAR_REQUESTED) {
                     const pcGl =
-                        (cw as unknown as { __FLUXGS_BENCH_GL__?: () => WebGL2RenderingContext | null })
-                            .__FLUXGS_BENCH_GL__?.() ?? null;
+                        (
+                            cw as unknown as { __FLUXGS_BENCH_GL__?: () => WebGL2RenderingContext | null }
+                        ).__FLUXGS_BENCH_GL__?.() ?? null;
                     if (pcGl) {
                         pcGl.clearColor(0, 0, 0, 0);
                         pcGl.clear(pcGl.COLOR_BUFFER_BIT);
@@ -1212,8 +1208,9 @@ async function driveFluxOffscreenRuns(
                     //   `gl.finish()` 只补一次同步，抓完即止 —— 抓帧发生在**第一个计帧帧之后**，不影响 fps 口径。
                     if (sideFrameWant && sideFramePx === null && run >= 0 && frame === 0) {
                         const capGl =
-                            (cw as unknown as { __FLUXGS_BENCH_GL__?: () => WebGL2RenderingContext | null })
-                                .__FLUXGS_BENCH_GL__?.() ?? null;
+                            (
+                                cw as unknown as { __FLUXGS_BENCH_GL__?: () => WebGL2RenderingContext | null }
+                            ).__FLUXGS_BENCH_GL__?.() ?? null;
                         if (capGl) {
                             try {
                                 capGl.finish();
@@ -1230,8 +1227,9 @@ async function driveFluxOffscreenRuns(
                     //   它完全依赖"外部不扰动"；把实际状态落到记录里，隐性污染才可能被事后检出。
                     if (run >= 0 && frame === 0 && lastGlFingerprint === "") {
                         const fgGl =
-                            (cw as unknown as { __FLUXGS_BENCH_GL__?: () => WebGL2RenderingContext | null })
-                                .__FLUXGS_BENCH_GL__?.() ?? null;
+                            (
+                                cw as unknown as { __FLUXGS_BENCH_GL__?: () => WebGL2RenderingContext | null }
+                            ).__FLUXGS_BENCH_GL__?.() ?? null;
                         if (fgGl) lastGlFingerprint = glStateFingerprint(fgGl);
                         if (fgGl && lastCompatProbe === "") lastCompatProbe = glCompatProbe(fgGl);
                     }
