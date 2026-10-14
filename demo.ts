@@ -503,6 +503,7 @@ async function applyFluxCameraDefault(): Promise<void> {
 
 async function loadFromUrl(url: string) {
     resetScene();
+    stopLoop(); // [2026-10-13] 加载期间停帧（见 startLoop 注释）
     showProgress();
     firstFrameStart = performance.now();
     firstFrameLogged = false;
@@ -514,6 +515,8 @@ async function loadFromUrl(url: string) {
         adjustPixelRatio();
         applySceneTweaks();
         await applyFluxCameraDefault();
+        logLowRankSelfCheck();
+        startLoop(); // [2026-10-13] 数据齐了才开始渲染（否则 ?lr=1 会每帧抛错、全黑）
     } catch (err) {
         console.error("Failed to load scene:", err);
         alert(`Failed to load scene: ${url}`);
@@ -525,6 +528,7 @@ async function loadFromUrl(url: string) {
 
 async function loadFile(file: File) {
     resetScene();
+    stopLoop(); // [2026-10-13] 加载期间停帧（见 startLoop 注释）
     showProgress();
     firstFrameStart = performance.now();
     firstFrameLogged = false;
@@ -536,6 +540,8 @@ async function loadFile(file: File) {
     adjustPixelRatio();
     applySceneTweaks();
     await applyFluxCameraDefault();
+    logLowRankSelfCheck();
+    startLoop(); // [2026-10-13] 数据齐了才开始渲染（否则 ?lr=1 会每帧抛错、全黑）
     hideProgress();
     dropZone.style.display = "none";
     sceneSelect.value = "";
@@ -648,12 +654,51 @@ dropZone.addEventListener("click", () => {
     fileInput.click();
 });
 
+/**
+ * [2026-10-13] RAF 循环开关 —— 与 `bench-view.ts:129-138` 同一修复：
+ *   `?shcache/lr/notx/nocolortx` 这些臂开关由**渲染程序自己读页面 URL** 决定，而低秩载荷（lrRank）
+ *   与逐点变换表（transformsHeight）是在 PLY **流式解码过程中**才逐步挂到 Splat 上的。
+ *   若此时已有 RAF 在 `renderer.render()`：第一帧就会在"数据没齐"的状态下建 RenderData
+ *     · `?lr=1` ⇒ `sphericalHarmonics.lowRank` 缺失 ⇒ **每帧抛错、画面持续全黑**；
+ *     · `?notx=1` ⇒ 运行期自证 `transformsHeight === 1` 判成 0 ⇒ 永久 `notx-rejected`。
+ *   所以：**加载完成后再起循环**；切换场景前先停帧（见 loadFromUrl / loadFile）。
+ */
+let loopRunning = false;
+let frameRef: ((now: number) => void) | null = null;
+
+function startLoop(): void {
+    if (loopRunning) return;
+    loopRunning = true;
+    if (frameRef) requestAnimationFrame(frameRef);
+}
+
+function stopLoop(): void {
+    loopRunning = false;
+}
+
+/** [2026-10-13] `?lr=1` 载荷自证：加载完成后确认低秩载荷确实挂上了（缺了就会全黑，见 startLoop 注释）。 */
+function logLowRankSelfCheck(): void {
+    if (!new URLSearchParams(location.search).has("lr")) return;
+    const splat = scene.objects.find((o) => o instanceof SPLAT.Splat) as SPLAT.Splat | undefined;
+    const lowRank = (splat?.data as unknown as { sphericalHarmonics?: { lowRank?: unknown } } | undefined)
+        ?.sphericalHarmonics?.lowRank;
+    if (lowRank) {
+        console.info("[lr] 载荷自证：sphericalHarmonics.lowRank 存在 ✓");
+    } else {
+        console.warn(
+            "[lr] 载荷自证：sphericalHarmonics.lowRank **缺失** ⇒ 请去掉 lr=1（用 ?arm=base），否则每帧抛错、画面全黑",
+        );
+    }
+}
+
 function main() {
     const handleResize = () => {
         renderer.resize();
     };
 
     const frame = (now: number) => {
+        // [2026-10-13] 循环被停（加载中）时直接退出：不在"数据没齐"时建 RenderData（见 startLoop 注释）。
+        if (!loopRunning) return;
         const nowMs = now || performance.now();
 
         const frameMs = lastFrameAt > 0 ? nowMs - lastFrameAt : 0;
@@ -704,7 +749,11 @@ function main() {
     handleResize();
     window.addEventListener("resize", handleResize);
     void populateSceneSelector();
-    requestAnimationFrame(frame);
+    // [2026-10-13] **不再在这里无条件起 RAF**：数据没齐就渲染会让 `?lr=1` 每帧抛错、画面全黑
+    //   （与 bench-view.ts 同一修复）。循环改由加载完成后 `startLoop()` 启动；
+    //   `?scene=` 直达与拖拽文件两条路径都会在 load* 末尾调用它。
+    frameRef = frame;
+    if (loopRunning) requestAnimationFrame(frame);
 }
 
 function setBenchmarkResolution(width: number, height: number) {
