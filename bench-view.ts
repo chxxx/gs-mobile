@@ -296,11 +296,22 @@ export class BenchView {
     private _d0 = 0;
     private _minD = 0.1;
     private _maxD = 100;
+    /** [FIX 2026-10-13] 捏合手势起点：距离 + 当时的推拉位移。
+     *  旧实现是"每个 pointermove 事件加一步 `_d0*(1-scale)`" ⇒ 缩放量随**事件频率/手势速度**变化
+     *  （iPad 事件频率高 ⇒ 过灵敏/发飘），且步长恒为 `_d0` ⇒ **近处每格变形远大于远处**（手感不均匀）。
+     *  现在改为"**手势起点绝对映射**"：总缩放只由起止指距决定，与事件数无关；反向捏合可原路回去。 */
+    private _pinchStartDist = 0;
+    private _dollyStartOffset = 0;
 
     private _onPointerDown = (e: PointerEvent): void => {
         this._orbitEnabled = true;
         this._pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-        if (this._pointers.size === 2) this._pinchDist = this._pointerDistance();
+        if (this._pointers.size === 2) {
+            this._pinchDist = this._pointerDistance();
+            // [FIX 2026-10-13] 记下手势起点（绝对映射用）
+            this._pinchStartDist = this._pinchDist;
+            this._dollyStartOffset = this._dollyOffset;
+        }
         try {
             this._dom.canvas.setPointerCapture(e.pointerId);
         } catch {
@@ -314,7 +325,8 @@ export class BenchView {
         this._pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
         if (this._pointers.size >= 2) {
             const d = this._pointerDistance();
-            if (this._pinchDist > 0 && d > 0) this._dollyByRatio(this._pinchDist / d);
+            // [FIX 2026-10-13] 用**手势起点**的指距比（绝对映射），而不是上一事件的增量
+            if (this._pinchStartDist > 0 && d > 0) this._dollyByAbsolute(this._pinchStartDist / d);
             this._pinchDist = d;
             return;
         }
@@ -370,16 +382,58 @@ export class BenchView {
      *   且始终从当前位置**增量**移动 ⇒ 一定能原路回到论文机位。
      */
     private _dollyByRatio(ratio: number): void {
-        const cam = this._ctx.camera;
         if (!(this._d0 > 0) || !(ratio > 0)) return;
         const speed = Number(param("zoom")) > 0 ? Number(param("zoom")) : 1;
         const inv = param("zoominv") === "1" ? -1 : 1;
         const scale = Math.pow(ratio, speed * inv); // <1 = 靠近
-        const step = this._d0 * (1 - scale);
         const prev = this._dollyOffset;
-        this._dollyOffset = Math.max(-0.85 * this._d0, Math.min(3 * this._d0, prev + step));
-        const applied = this._dollyOffset - prev;
-        const axis = this._viewAxis();
+        const target = Math.max(-0.85 * this._d0, Math.min(3 * this._d0, prev + this._d0 * (1 - scale)));
+        this._dollyStartOffset = target; // 滚轮是离散事件 ⇒ 每次都把"手势起点"推进到新目标
+        this._dollyTo(target);
+    }
+
+    /**
+     * [FIX 2026-10-13] **手势起点绝对映射**（捏合走这条）：`ratioFromStart` = 起点指距 / 当前指距
+     *   （张开 ⇒ <1 ⇒ 靠近），总位移只取决于手势起止，**与 pointermove 事件数/频率无关**；
+     *   反向捏合按同一条曲线回到起点 ⇒ 手感稳定、可复现。
+     */
+    private _dollyByAbsolute(ratioFromStart: number): void {
+        if (!(this._d0 > 0) || !(ratioFromStart > 0)) return;
+        const speed = Number(param("zoom")) > 0 ? Number(param("zoom")) : 1;
+        const inv = param("zoominv") === "1" ? -1 : 1;
+        const s = Math.pow(ratioFromStart, speed * inv);
+        const target = Math.max(
+            -0.85 * this._d0,
+            Math.min(3 * this._d0, this._dollyStartOffset + this._d0 * (1 - s)),
+        );
+        this._dollyTo(target);
+    }
+
+    /** 把推拉位移**平滑**逼近 target（一次事件只走 45%，手指抖动不会直接传到画面）并应用差额。 */
+    private _dollyTo(target: number): void {
+        const cam = this._ctx.camera;
+        const prev = this._dollyOffset;
+        const next = prev + (target - prev) * 0.45;
+        const lo = -0.85 * this._d0;
+        const hi = 3 * this._d0;
+        const clamped = Math.max(lo, Math.min(hi, next));
+        const applied = clamped - prev;
+        if (applied === 0) return;
+        this._dollyOffset = clamped;
+        // [FIX 2026-10-13] **方向确定性修正**：`_viewAxis()` 的符号原先靠"投影面积实测锚定"，
+        //   在 reduced-3DGS 的不同世界尺度/Sim3 对齐下会锚反 ⇒ 表现就是"捏合方向反了"（用户实测。
+        //   历史上修过一次，换臂后又复现，正是因为依赖了那个探针）。
+        //   现在改为**几何确定**：`applied > 0` 一律表示"朝模型中心平移" = 靠近 = 画面变大，
+        //   与臂/场景/尺度无关；用户偏好仍可用 `?zoominv=1` 反转。
+        let axis = this._viewAxis();
+        const pv = this._pivot;
+        if (pv) {
+            const d =
+                axis[0] * (pv[0] - cam.position.x) +
+                axis[1] * (pv[1] - cam.position.y) +
+                axis[2] * (pv[2] - cam.position.z);
+            if (d < 0) axis = [-axis[0], -axis[1], -axis[2]];
+        }
         cam.position = new SPLAT.Vector3(
             cam.position.x + axis[0] * applied,
             cam.position.y + axis[1] * applied,
@@ -822,6 +876,136 @@ export class BenchView {
                         }),
                     );
                 };
+
+/* ==========================================================================
+ * [COMPAT 2026-10-13] 兼容性自证面板 + 自动回传（**不碰渲染路径**，只读探针）
+ *
+ * 为什么：真机上截图不便、控制台也看不到 ⇒ 兼容性必须在**页面上就地给出可复制的文字**，
+ *   并且**自动回传到服务端**（`/__ch7/report?name=compat-view&token=<rtok>`），这样"为什么不兼容"
+ *   有现场证据（UA / GPU / WebGL2 / 纹理上限 / 上下文丢失次数 / GL 错误码 / 是否出画面 / FPS）。
+ * 用法：`bench.html?mode=view&scene=<id>&…&rtok=<口令>` ⇒ 左下角出现文本框（长按全选复制即可发我），
+ *   同时每 6s 自动回传一次（失败静默，不影响渲染）。
+ * 注意：本块在 `mode=view` 下才会被加载（bench.ts 只在该模式动态 import 本模块）。
+ * ========================================================================== */
+(function ch7CompatPanel(): void {
+    try {
+        if (typeof document === "undefined" || typeof location === "undefined") return;
+        const Q = new URLSearchParams(location.search);
+        const TOK = Q.get("rtok") || "ch7-2026-phase4";
+        const NAME = Q.get("compatname") || "compat-view";
+        let ctxLost = 0;
+        const jsErrors: string[] = [];
+        let frames = 0;
+        let fps = 0;
+
+        // 上下文丢失/JS 异常：用 capture + window 级监听，避免依赖具体 canvas 实例
+        document.addEventListener("webglcontextlost", () => { ctxLost++; }, true);
+        window.addEventListener("error", (e) => { jsErrors.push(String((e as ErrorEvent)?.message || e).slice(0, 120)); });
+        window.addEventListener("unhandledrejection", (e) => {
+            const r = e as PromiseRejectionEvent;
+            jsErrors.push(("reject: " + String(r.reason)).slice(0, 120));
+        });
+
+        const canvas = (): HTMLCanvasElement | null => document.querySelector("canvas");
+        const gl2 = (): WebGL2RenderingContext | null => {
+            const c = canvas();
+            if (!c) return null;
+            try { return c.getContext("webgl2") as WebGL2RenderingContext | null; } catch { return null; }
+        };
+        const caps = (gl: WebGL2RenderingContext | null): string => {
+            if (!gl) return "no-gl";
+            try {
+                const er: string[] = [];
+                for (let i = 0; i < 6; i++) { const e = gl.getError(); if (e === gl.NO_ERROR) break; er.push(String(e)); }
+                return `tex2=${gl.getParameter(gl.MAX_TEXTURE_SIZE)}/u${gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS)}` +
+                    `/rb${gl.getParameter(gl.MAX_RENDERBUFFER_SIZE)}/t3d${gl.getParameter(gl.MAX_3D_TEXTURE_SIZE)}` +
+                    `/vl${gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS)} err=${er.length ? er.join("+") : 0}`;
+            } catch { return "caps-fail"; }
+        };
+        const extList = (gl: WebGL2RenderingContext | null): string => {
+            if (!gl) return "-";
+            const want = ["EXT_disjoint_timer_query_webgl2", "EXT_color_buffer_float", "OES_texture_float_linear", "WEBGL_debug_renderer_info"];
+            return want.map((k) => `${k.replace(/^(EXT|OES|WEBGL)_/, "")}=${gl.getExtension(k) ? 1 : 0}`).join(",");
+        };
+        const gpuName = (gl: WebGL2RenderingContext | null): string => {
+            if (!gl) return "-";
+            try {
+                const d = gl.getExtension("WEBGL_debug_renderer_info");
+                return String(d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER) || "");
+            } catch { return "-"; }
+        };
+
+        const panel = document.createElement("textarea");
+        panel.readOnly = true;
+        panel.setAttribute("style",
+            "position:fixed;left:6px;bottom:6px;width:min(96vw,720px);height:150px;z-index:2147483647;" +
+            "font:11px/1.35 ui-monospace,Menlo,Consolas,monospace;background:rgba(0,0,0,.82);color:#b9f;" +
+            "border:1px solid #555;border-radius:6px;padding:6px;-webkit-user-select:text;user-select:text;");
+        document.body.appendChild(panel);
+        // [COMPAT 2026-10-13] 一键复制按钮（iPad 上 clipboard API 可能被拒 ⇒ 自动退回选中 + execCommand）
+        const btn = document.createElement("button");
+        btn.textContent = "复制诊断";
+        btn.setAttribute("style",
+            "position:fixed;left:6px;bottom:162px;z-index:2147483647;font:12px/1.2 system-ui;padding:6px 10px;" +
+            "border-radius:6px;border:1px solid #777;background:#111;color:#cfc;");
+        btn.onclick = () => {
+            try { panel.select(); panel.setSelectionRange(0, panel.value.length); } catch { /* ignore */ }
+            try {
+                if (navigator.clipboard?.writeText) { void navigator.clipboard.writeText(panel.value); }
+                else { document.execCommand("copy"); }
+            } catch { try { document.execCommand("copy"); } catch { /* ignore */ } }
+            btn.textContent = "已复制✓";
+            setTimeout(() => { btn.textContent = "复制诊断"; }, 1500);
+        };
+        document.body.appendChild(btn);
+
+        const build = (): string => {
+            const gl = gl2();
+            const n = gpuName(gl);
+            const verdict = ctxLost > 0 ? "CONTEXT-LOST" : !gl ? "NO-WEBGL2" : fps > 0 ? `RENDERING(fps=${fps.toFixed(0)})` : "LOADING";
+            return [
+                `[CH7-COMPAT]`,
+                `scene=${Q.get("scene") || "-"} profile=${Q.get("profile") || "-"} pose_src=${Q.get("pose_src") || "-"}`,
+                `verdict=${verdict}`,
+                `webgl2=${gl ? 1 : 0} ctxlost=${ctxLost}`,
+                `gpu=${n}`,
+                `caps=${caps(gl)}`,
+                `ext=${extList(gl)}`,
+                `canvas=${canvas() ? `${canvas()!.width}x${canvas()!.height}` : "-"}`,
+                `fps=${fps.toFixed(1)}`,
+                `ua=${navigator.userAgent}`,
+                jsErrors.length ? `jserr=${jsErrors.slice(-3).join(" | ")}` : `jserr=-`,
+                `[END]`,
+            ].join("\n");
+        };
+
+        // 每秒估一次 FPS（rAF 计数；纯读，不影响渲染）
+        let lastT = performance.now();
+        const tick = (): void => {
+            frames++;
+            const now = performance.now();
+            if (now - lastT >= 1000) { fps = (frames * 1000) / (now - lastT); frames = 0; lastT = now; }
+            requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+
+        let lastPost = 0;
+        setInterval(() => {
+            const text = build();
+            if (panel.value !== text) panel.value = text;
+            const now = performance.now();
+            if (now - lastPost < 6000) return;
+            lastPost = now;
+            try {
+                void fetch(`${location.origin}/__ch7/report?name=${encodeURIComponent(NAME)}&token=${encodeURIComponent(TOK)}`, {
+                    method: "POST",
+                    body: `[RESULT]\nengine=gsplat\nmode=view-compat\n${text}\n[END]\n`,
+                }).catch(() => {});
+            } catch { /* 静默：回传失败不影响兼容性测试 */ }
+        }, 1500);
+    } catch { /* 诊断块自身绝不能影响渲染 */ }
+})();
+
                 fireId(1, "pointerdown", 300, 300);
                 for (let i = 1; i <= 8; i++) fireId(1, "pointermove", 300 + i * 15, 300);
                 fireId(1, "pointerup", 420, 300);
