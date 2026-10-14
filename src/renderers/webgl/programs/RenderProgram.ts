@@ -170,7 +170,7 @@ const LR_ENABLED: boolean = (() => {
     }
 })();
 /** rank 纹理宽度常量（与 loader 的 `LR_RANK_TEX_WIDTH` 同值；纹理按 2048 宽上传）。 */
-const LR_RANK_WIDTH = 2048;
+const _LR_RANK_WIDTH = 2048;
 const SHCACHE_ENABLED: boolean = SHCACHE_FRAG_REQUESTED && typeof WebGL2RenderingContext !== "undefined";
 
 // =====================================================================================
