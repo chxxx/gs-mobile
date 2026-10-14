@@ -581,17 +581,13 @@ export function formatClearProbeTags(samples: ClearProbeSample[] | null): string
     for (const [key, g] of groups) {
         base.push(`${key}:${med(g.perMpx).toFixed(3)}`);
         if (g.perMpx.length > 1) {
-            spread.push(`${key}:${Math.min(...g.perMpx).toFixed(3)}-${Math.max(...g.perMpx).toFixed(3)}|n=${g.perMpx.length}`);
+            spread.push(
+                `${key}:${Math.min(...g.perMpx).toFixed(3)}-${Math.max(...g.perMpx).toFixed(3)}|n=${g.perMpx.length}`,
+            );
         }
         rbMed.push(med(g.rb).toFixed(0));
     }
-    return (
-        "CLR" +
-        base.join(",") +
-        (spread.length > 0 ? "CLRrep" + spread.join(",") : "") +
-        "CLRrb" +
-        rbMed.join(",")
-    );
+    return "CLR" + base.join(",") + (spread.length > 0 ? "CLRrep" + spread.join(",") : "") + "CLRrb" + rbMed.join(",");
 }
 
 /**

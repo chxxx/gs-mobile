@@ -353,7 +353,6 @@ export function createVisibilityWatcher(doc: Document = document): {
     };
 }
 
-
 /** 参考协议（Flux-GS 原协议）：`?proto=flux` → 焦距取它的 COLMAP 焦距、计帧前不预热。 */
 export const PROTO_FLUX = param("proto", "") === "flux";
 /**

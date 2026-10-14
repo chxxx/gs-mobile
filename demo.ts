@@ -425,11 +425,17 @@ function resolutionPolicyPixelRatio(vertexCount: number): { pixelRatio: number; 
     }
 
     if (vertexCount > threshold) {
-        return { pixelRatio: 1, reason: `splat-count policy (?nthresh=${threshold}): ${vertexCount} > ${threshold} -> 1x CSS` };
+        return {
+            pixelRatio: 1,
+            reason: `splat-count policy (?nthresh=${threshold}): ${vertexCount} > ${threshold} -> 1x CSS`,
+        };
     }
     return {
         pixelRatio: window.devicePixelRatio || 1,
-        reason: threshold === Infinity ? "default: physical DPR (splat-count policy OFF)" : `splat-count policy: ${vertexCount} <= ${threshold} -> physical DPR`,
+        reason:
+            threshold === Infinity
+                ? "default: physical DPR (splat-count policy OFF)"
+                : `splat-count policy: ${vertexCount} <= ${threshold} -> physical DPR`,
     };
 }
 
@@ -467,14 +473,17 @@ async function applyFluxCameraDefault(): Promise<void> {
         const cams = asset.cameras ?? [];
         // 【关键】默认视角要用资产里的 `default_view`（Flux 未交互时的原始视角，13 场景共用）；
         // `cameras[N]` 是"第 N 个硬编码镜头"，**不是**默认视角。
-        const entry = want ? cams[Number(want[1])] : asset.default_view ?? cams[0];
+        const entry = want ? cams[Number(want[1])] : (asset.default_view ?? cams[0]);
         if (!entry?.position || entry.position.length < 3) return;
 
         // 焦距按画布宽等比缩放：资产焦距是在参照分辨率(width=1959)下的像素焦距，
         // 画布更宽时若沿用同一像素值会"变大"（FOV 变小）⇒ 这里保持 fx/width 不变才叫取景一致。
         const refW = asset.refWidth ?? cams.find((c) => typeof c?.width === "number")?.width ?? 1959;
         const canvasW = renderer.canvas.width || refW;
-        const focal = Number.isFinite(asset.focal_px) && (asset.focal_px as number) > 0 ? (asset.focal_px as number) : camera.data.fx;
+        const focal =
+            Number.isFinite(asset.focal_px) && (asset.focal_px as number) > 0
+                ? (asset.focal_px as number)
+                : camera.data.fx;
         const fx = focal * (canvasW / refW);
         camera.data.fx = fx;
         camera.data.fy = fx;
@@ -763,7 +772,9 @@ function logLoadDiag(label: string): void {
         if (!loopRunning) {
             console.warn("[diag] 1s 后：循环仍处于**停止**状态 ⇒ 不会再有新帧（这就是全黑的直接原因）");
         } else if (delta === 0) {
-            console.warn("[diag] 1s 后：循环在跑但**没有新帧** ⇒ renderer.render 内抛异常（多半是 lr/notx 开关与载荷不匹配）");
+            console.warn(
+                "[diag] 1s 后：循环在跑但**没有新帧** ⇒ renderer.render 内抛异常（多半是 lr/notx 开关与载荷不匹配）",
+            );
         } else {
             console.info(`[diag] 1s 后：帧数 +${delta}（循环正常）⇒ 若画面仍黑，问题在渲染内容/相机而不在循环`);
         }

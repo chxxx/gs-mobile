@@ -657,8 +657,7 @@ describe("离屏协议 · 同步策略回落链（真机回归）", () => {
 
     it("GPU 计时器：只有旧名可用时也能启用（并记录实际扩展名）", () => {
         const gl = {
-            getExtension: (name: string) =>
-                name === "EXT_disjoint_timer_query" ? { TIME_ELAPSED_EXT: 0x88bf } : null,
+            getExtension: (name: string) => (name === "EXT_disjoint_timer_query" ? { TIME_ELAPSED_EXT: 0x88bf } : null),
         } as unknown as GlTimerQueryApi;
         const timer = new OffscreenGpuTimer(gl);
         expect(timer.supported).toBe(true);

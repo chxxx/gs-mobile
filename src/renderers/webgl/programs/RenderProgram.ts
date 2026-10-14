@@ -423,10 +423,8 @@ const PREP_MRT: boolean = (() => {
  * 编译期判据：`prep` 复用方案 B 的生产遍资源与 SH 文本 ⇒ **必须以 `?shcache=frag` 为前提**。
  * 满足前提才建资源/注入 define；不满足时自证失败（`arm=…+prep-requires-shcache`）。
  */
-const PREP_ENABLED: boolean =
-    PREP_REQUESTED && SHCACHE_FRAG_REQUESTED && typeof WebGL2RenderingContext !== "undefined";
+const PREP_ENABLED: boolean = PREP_REQUESTED && SHCACHE_FRAG_REQUESTED && typeof WebGL2RenderingContext !== "undefined";
 const PREP_SLOT: boolean = PREP_ENABLED && PREP_SLOT_REQUESTED;
-
 
 /**
  * 从顶点着色器模板里**原样切出**一段：保证方案 B 与 BASE 的 SH 逻辑**逐字相同**（不靠"看起来一样"判断正确）。
@@ -476,7 +474,9 @@ function buildShCacheFragmentSourceForArm(): string {
     // LR_RANK_MAX = 7（该数据集 rank；loader 对不足的槽位补 0 ⇒ 定长循环不引入误差）
     // LR_REST = 45（每行基的列数 = 15 个 rest 系数 × 3 通道）
     // LR_UBO_VEC4 = ⌈7×45/4⌉ = 79 个 vec4 = 1,264 B
-    const defines = armDefines.concat(["#define LR_RANK_MAX 7", "#define LR_REST 45", "#define LR_UBO_VEC4 79"]).join("\n");
+    const defines = armDefines
+        .concat(["#define LR_RANK_MAX 7", "#define LR_REST 45", "#define LR_UBO_VEC4 79"])
+        .join("\n");
     return src.replace("#version 300 es", "#version 300 es\n" + defines);
 }
 
@@ -525,9 +525,15 @@ uniform highp sampler2D u_sortedIdx;
 layout(location = 0) out uvec4 outT0;
 layout(location = 1) out vec4 outT1;`;
     if (outMode === "t0") {
-        outDecl = outDecl.replace("layout(location = 0) out uvec4 outT0;\nlayout(location = 1) out vec4 outT1;", "layout(location = 0) out uvec4 outT0;\nvec4 outT1;");
+        outDecl = outDecl.replace(
+            "layout(location = 0) out uvec4 outT0;\nlayout(location = 1) out vec4 outT1;",
+            "layout(location = 0) out uvec4 outT0;\nvec4 outT1;",
+        );
     } else if (outMode === "t1") {
-        outDecl = outDecl.replace("layout(location = 0) out uvec4 outT0;\nlayout(location = 1) out vec4 outT1;", "uvec4 outT0;\nlayout(location = 0) out vec4 outT1;");
+        outDecl = outDecl.replace(
+            "layout(location = 0) out uvec4 outT0;\nlayout(location = 1) out vec4 outT1;",
+            "uvec4 outT0;\nlayout(location = 0) out vec4 outT1;",
+        );
     }
     let src = base.replace("out vec4 fragColor;", outDecl);
 
@@ -627,7 +633,6 @@ ${sentinel}`,
 
     return withArmDefines(src, PREP_SLOT ? ["#define PREP_SLOT 1"] : []);
 }
-
 
 /**
  * [阶段1 2026-09-30] 低秩臂注入的 GLSL：rank 纹理取样 + 共享基累加（`Y_k` 与 `evalSHRGB` 逐行同源）。
@@ -1786,8 +1791,7 @@ class RenderProgram extends ShaderProgram {
             // [阶段1 2026-09-30] 低秩臂单独标注（`lr` / `lr-frozen`）⇒ 报告里 `arm=` 能自证是低秩路径
             else if (LR_ENABLED) arm = SHCACHE_FREEZE ? "lr-frozen" : "lr";
             else arm = SHCACHE_FREEZE ? "frozen" : "frag";
-        }
-        else if (SHPASS_PARAM === "consume") arm = tfActive ? "tf_consume" : "tf_consume-failed";
+        } else if (SHPASS_PARAM === "consume") arm = tfActive ? "tf_consume" : "tf_consume-failed";
         else if (SHPASS_PARAM === "produce") arm = tfActive ? "tf_produce" : "tf_produce-failed";
         else if (SHPASS_PARAM === "pre") arm = tfActive ? "tf_full" : "tf_full-failed";
         if (this._noshRequested) arm += "+nosh";
@@ -1899,10 +1903,10 @@ class RenderProgram extends ShaderProgram {
         let u_projection: WebGLUniformLocation;
         let u_viewport: WebGLUniformLocation;
         let u_focal: WebGLUniformLocation;
-// [阶段3 2026-10-02] prep 主 pass 的三个 uniform（缺省路径下着色器里不存在 ⇒ 位置为 null ⇒ 写入 no-op）
-let u_prepT0: WebGLUniformLocation | null = null;
-let u_prepT1: WebGLUniformLocation | null = null;
-let u_prepWidth: WebGLUniformLocation | null = null;
+        // [阶段3 2026-10-02] prep 主 pass 的三个 uniform（缺省路径下着色器里不存在 ⇒ 位置为 null ⇒ 写入 no-op）
+        let u_prepT0: WebGLUniformLocation | null = null;
+        let u_prepT1: WebGLUniformLocation | null = null;
+        let u_prepWidth: WebGLUniformLocation | null = null;
         let u_view: WebGLUniformLocation;
         let u_texture: WebGLUniformLocation;
         let u_transforms: WebGLUniformLocation;
@@ -1910,27 +1914,27 @@ let u_prepWidth: WebGLUniformLocation | null = null;
         let u_colorTransforms: WebGLUniformLocation;
         let u_colorTransformIndices: WebGLUniformLocation;
         let u_colorTransformEnabled: WebGLUniformLocation;
-// [阶段2 O1 notx 2026-10-01] 单对象统一变换（`?notx=1`）：缺省路径下这两个 uniform **不存在**
-//   ⇒ `getUniformLocation` 返回 null ⇒ 写 null 位置是合法的 no-op（与既有 uniform 同一模式）。
-let u_splatTransform: WebGLUniformLocation | null = null;
-let u_splatSelected: WebGLUniformLocation | null = null;
+        // [阶段2 O1 notx 2026-10-01] 单对象统一变换（`?notx=1`）：缺省路径下这两个 uniform **不存在**
+        //   ⇒ `getUniformLocation` 返回 null ⇒ 写 null 位置是合法的 no-op（与既有 uniform 同一模式）。
+        let u_splatTransform: WebGLUniformLocation | null = null;
+        let u_splatSelected: WebGLUniformLocation | null = null;
 
-/**
- * [阶段2 O1 notx 2026-10-01] 把"单对象统一变换"写进**当前已绑定**的程序。
- *   ⚠️ 必须是模块级函数而非类方法：`gl` 是本文件**构造函数里的局部量**（`const gl = renderer.gl`），
- *      类方法看不到它（实测 `TS2304: Cannot find name 'gl'`）。
- *   为什么必须"写进当前 program"：uniform 是**逐 program** 的状态 ⇒ 主 pass / 生产遍 / TF 遍各写一次。
- */
-function setSplatTransformUniforms(
-    glCtx: WebGL2RenderingContext,
-    locM: WebGLUniformLocation | null,
-    locSel: WebGLUniformLocation | null,
-    transforms: Float32Array | null,
-): void {
-    if (!transforms || transforms.length < 17) return;
-    glCtx.uniformMatrix4fv(locM, false, transforms.subarray(0, 16));
-    glCtx.uniform1f(locSel, transforms[16]);
-}
+        /**
+         * [阶段2 O1 notx 2026-10-01] 把"单对象统一变换"写进**当前已绑定**的程序。
+         *   ⚠️ 必须是模块级函数而非类方法：`gl` 是本文件**构造函数里的局部量**（`const gl = renderer.gl`），
+         *      类方法看不到它（实测 `TS2304: Cannot find name 'gl'`）。
+         *   为什么必须"写进当前 program"：uniform 是**逐 program** 的状态 ⇒ 主 pass / 生产遍 / TF 遍各写一次。
+         */
+        function setSplatTransformUniforms(
+            glCtx: WebGL2RenderingContext,
+            locM: WebGLUniformLocation | null,
+            locSel: WebGLUniformLocation | null,
+            transforms: Float32Array | null,
+        ): void {
+            if (!transforms || transforms.length < 17) return;
+            glCtx.uniformMatrix4fv(locM, false, transforms.subarray(0, 16));
+            glCtx.uniform1f(locSel, transforms[16]);
+        }
         let u_maxSHDegree: WebGLUniformLocation;
         let u_shFixedCoord: WebGLUniformLocation;
 
@@ -2397,7 +2401,6 @@ function setSplatTransformUniforms(
                         `[prep=1] 预处理 pass 就绪（slot=${PREP_SLOT ? 1 : 0} mrt=${PREP_MRT ? 1 : 0} lr=${LR_ENABLED ? 1 : 0}）`,
                     );
                 }
-
 
                 // ---- [阶段1 2026-09-30] `lr=1`：低秩臂的资源（rank 纹理 + 共享基 UBO）----
                 if (LR_ENABLED) {
@@ -3183,15 +3186,15 @@ function setSplatTransformUniforms(
                     gl.uniform1i(this._shCacheU.u_maxSHDegree ?? null, this._maxSHDegree);
                     gl.uniform1i(this._shCacheU.u_shFixedCoord ?? null, this._shFixedCoordProbe ? 1 : 0);
                     gl.uniform1i(this._shCacheU.u_colorTransformEnabled ?? null, this._noctRequested ? 0 : 1);
-            // [阶段2 O1 notx] 生产遍同样需要 M（SH 的视角方向 = M·p − camPos，见文件头 notx 说明）
-            if (NOTX_ENABLED && this._notxRuntimeOk) {
-                setSplatTransformUniforms(
-                    gl,
-                    (this._shCacheU.u_splatTransform ?? null) as WebGLUniformLocation | null,
-                    (this._shCacheU.u_splatSelected ?? null) as WebGLUniformLocation | null,
-                    this.renderData ? this.renderData.transforms : null,
-                );
-            }
+                    // [阶段2 O1 notx] 生产遍同样需要 M（SH 的视角方向 = M·p − camPos，见文件头 notx 说明）
+                    if (NOTX_ENABLED && this._notxRuntimeOk) {
+                        setSplatTransformUniforms(
+                            gl,
+                            (this._shCacheU.u_splatTransform ?? null) as WebGLUniformLocation | null,
+                            (this._shCacheU.u_splatSelected ?? null) as WebGLUniformLocation | null,
+                            this.renderData ? this.renderData.transforms : null,
+                        );
+                    }
                     // [SHCACHE 方案 B 修复 2026-09-30] `u_bandIndex` 必须与主 pass **同一来源**
                     //   （主 pass 在 `uploadSphericalHarmonics()` 里用 `sh.bandsIndices`）。
                     //   此前这里漏设 ⇒ 默认 (0,0,0) 使 band 分支误判为"有分层"（`u_bandIndex[0] >= 0` 为真）
@@ -3210,7 +3213,9 @@ function setSplatTransformUniforms(
                             );
                         }
                         if (lr.rank > 7) {
-                            throw new Error(`[lr=1] rank=${lr.rank} > LR_RANK_MAX=7：着色器按 7 编译，需提升常量后重编`);
+                            throw new Error(
+                                `[lr=1] rank=${lr.rank} > LR_RANK_MAX=7：着色器按 7 编译，需提升常量后重编`,
+                            );
                         }
                         if (this._lrRankW !== lr.width || this._lrRankH !== lr.height) {
                             this._lrRankW = lr.width;
@@ -3321,15 +3326,15 @@ function setSplatTransformUniforms(
                 gl.uniform1i(this._tfU.u_maxSHDegree ?? null, this._maxSHDegree);
                 gl.uniform1i(this._tfU.u_shFixedCoord ?? null, this._shFixedCoordProbe ? 1 : 0);
                 gl.uniform1i(this._tfU.u_colorTransformEnabled ?? null, this._noctRequested ? 0 : 1);
-            // [阶段2 O1 notx] TF 第一遍同样需要 M（与主 pass 逐行等价 ⇒ 判据一致）
-            if (NOTX_ENABLED && this._notxRuntimeOk) {
-                setSplatTransformUniforms(
-                    gl,
-                    (this._tfU.u_splatTransform ?? null) as WebGLUniformLocation | null,
-                    (this._tfU.u_splatSelected ?? null) as WebGLUniformLocation | null,
-                    this.renderData ? this.renderData.transforms : null,
-                );
-            }
+                // [阶段2 O1 notx] TF 第一遍同样需要 M（与主 pass 逐行等价 ⇒ 判据一致）
+                if (NOTX_ENABLED && this._notxRuntimeOk) {
+                    setSplatTransformUniforms(
+                        gl,
+                        (this._tfU.u_splatTransform ?? null) as WebGLUniformLocation | null,
+                        (this._tfU.u_splatSelected ?? null) as WebGLUniformLocation | null,
+                        this.renderData ? this.renderData.transforms : null,
+                    );
+                }
 
                 gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, this._tf);
                 gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, this._tfBuffer);

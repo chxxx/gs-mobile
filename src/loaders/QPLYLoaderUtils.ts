@@ -875,9 +875,7 @@ function mergeLowRankChunks(
     // [阶段1] 每点 **2 个纹素**（8×uint）：纹素 0 = r 个 rank 系数、纹素 1 = DC 的 3 个 half。
     //   高度 = ⌈2N/2048⌉、扁平偏移 = 8·idx ⇒ 与着色器 `((idx & 0x3ff) << 1)` 的寻址一致。
     const rankHeight = Math.ceil((2 * vertexCount) / LR_RANK_TEX_WIDTH);
-    const lrRank: Uint32Array | null = wantLowRank
-        ? new Uint32Array(8 * LR_RANK_TEX_WIDTH * rankHeight)
-        : null;
+    const lrRank: Uint32Array | null = wantLowRank ? new Uint32Array(8 * LR_RANK_TEX_WIDTH * rankHeight) : null;
 
     for (const result of results) {
         splatBytes.set(new Uint8Array(result.splat), result.start * SplatData.RowLength);

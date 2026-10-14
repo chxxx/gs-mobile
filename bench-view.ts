@@ -402,10 +402,7 @@ export class BenchView {
         const speed = Number(param("zoom")) > 0 ? Number(param("zoom")) : 1;
         const inv = param("zoominv") === "1" ? -1 : 1;
         const s = Math.pow(ratioFromStart, speed * inv);
-        const target = Math.max(
-            -0.85 * this._d0,
-            Math.min(3 * this._d0, this._dollyStartOffset + this._d0 * (1 - s)),
-        );
+        const target = Math.max(-0.85 * this._d0, Math.min(3 * this._d0, this._dollyStartOffset + this._d0 * (1 - s)));
         this._dollyTo(target);
     }
 
@@ -558,17 +555,16 @@ export class BenchView {
         const c = this._ctx.ensureControls();
         // 注意：`CameraData.update()` 每次都**新建** Matrix4 ⇒ 必须每回重新读 buffer，不能缓存引用
         // （第一版就踩了这个坑：两份快照其实指向同一块旧矩阵 ⇒ 自证恒真 ⇒ 放反了也判"通过"）。
-        const snap = (): number[] => Array.from(cam.data.viewMatrix.buffer as unknown as ArrayLike<number>).slice(0, 12);
+        const snap = (): number[] =>
+            Array.from(cam.data.viewMatrix.buffer as unknown as ArrayLike<number>).slice(0, 12);
         const dot = (a: number[], o: number, b: number[], o2: number): number =>
             a[o] * b[o2] + a[o + 1] * b[o2 + 1] + a[o + 2] * b[o2 + 2];
         // 视线是否被破坏：比较 view 矩阵的 x/y 行（若只是把 roll 归零，两行几乎不变；被翻转则会变号）
-        const preserved = (m: number[]): boolean => dot(before, 0, m, 0) > 0.9 && dot(before, 4, m, 4) > 0.9;
+        const _preserved = (m: number[]): boolean => dot(before, 0, m, 0) > 0.9 && dot(before, 4, m, 4) > 0.9;
         const before = snap();
         const v: [number, number, number] = [before[8], before[9], before[10]];
         const p = this._pivot;
-        const d = p
-            ? Math.hypot(p[0] - cam.position.x, p[1] - cam.position.y, p[2] - cam.position.z)
-            : 5;
+        const d = p ? Math.hypot(p[0] - cam.position.x, p[1] - cam.position.y, p[2] - cam.position.z) : 5;
         const home: [number, number, number] = [cam.position.x, cam.position.y, cam.position.z];
         // [2026-10-07] 两个候选方向（相机前后各放一个轴心）各试一次，用**语义判据**择优：
         //   不能用"view 矩阵行向量点积"——不同实现的欧拉约定不同，会误判（真机表现：两个候选都不通过
@@ -576,14 +572,14 @@ export class BenchView {
         //   （"还看不看得到模型"，与朝向约定无关）：取看得更多的那个。
         //   另外必须**迭代到收敛**再判：控制器有 `dampening`，单次 `update()` 只走 10%。
         const beforeInside = this._ctx.visibilityProbe().insidePct;
-        const toward: [number, number, number] = p
-            ? [p[0] - home[0], p[1] - home[1], p[2] - home[2]]
-            : [0, 0, 0];
+        const toward: [number, number, number] = p ? [p[0] - home[0], p[1] - home[1], p[2] - home[2]] : [0, 0, 0];
         const facing = v[0] * toward[0] + v[1] * toward[1] + v[2] * toward[2] >= 0;
         let bestSign = facing ? 1 : -1;
         let bestInside = -1;
         for (const s of [1, -1]) {
-            c.setCameraTarget(new SPLAT.Vector3(home[0] + s * v[0] * d, home[1] + s * v[1] * d, home[2] + s * v[2] * d));
+            c.setCameraTarget(
+                new SPLAT.Vector3(home[0] + s * v[0] * d, home[1] + s * v[1] * d, home[2] + s * v[2] * d),
+            );
             for (let i = 0; i < 200; i++) c.update();
             cam.update();
             const inside = this._ctx.visibilityProbe().insidePct;
@@ -601,7 +597,11 @@ export class BenchView {
             return;
         }
         c.setCameraTarget(
-            new SPLAT.Vector3(home[0] + bestSign * v[0] * d, home[1] + bestSign * v[1] * d, home[2] + bestSign * v[2] * d),
+            new SPLAT.Vector3(
+                home[0] + bestSign * v[0] * d,
+                home[1] + bestSign * v[1] * d,
+                home[2] + bestSign * v[2] * d,
+            ),
         );
         for (let i = 0; i < 200; i++) c.update();
         cam.update();
@@ -709,10 +709,7 @@ export class BenchView {
         const cssW = Math.max(1, this._dom.canvas.clientWidth);
         const cssH = Math.max(1, this._dom.canvas.clientHeight);
         const want = Number(param("dpr")) > 0 ? Number(param("dpr")) : window.devicePixelRatio || 1;
-        this._dprApplied = Math.max(
-            1,
-            Math.min(want, maxDim / cssW, maxDim / cssH, Math.sqrt(4.2e6 / (cssW * cssH))),
-        );
+        this._dprApplied = Math.max(1, Math.min(want, maxDim / cssW, maxDim / cssH, Math.sqrt(4.2e6 / (cssW * cssH))));
         renderer.setPixelRatio(this._dprApplied);
         renderer.resize();
     }
@@ -877,134 +874,203 @@ export class BenchView {
                     );
                 };
 
-/* ==========================================================================
- * [COMPAT 2026-10-13] 兼容性自证面板 + 自动回传（**不碰渲染路径**，只读探针）
- *
- * 为什么：真机上截图不便、控制台也看不到 ⇒ 兼容性必须在**页面上就地给出可复制的文字**，
- *   并且**自动回传到服务端**（`/__ch7/report?name=compat-view&token=<rtok>`），这样"为什么不兼容"
- *   有现场证据（UA / GPU / WebGL2 / 纹理上限 / 上下文丢失次数 / GL 错误码 / 是否出画面 / FPS）。
- * 用法：`bench.html?mode=view&scene=<id>&…&rtok=<口令>` ⇒ 左下角出现文本框（长按全选复制即可发我），
- *   同时每 6s 自动回传一次（失败静默，不影响渲染）。
- * 注意：本块在 `mode=view` 下才会被加载（bench.ts 只在该模式动态 import 本模块）。
- * ========================================================================== */
-(function ch7CompatPanel(): void {
-    try {
-        if (typeof document === "undefined" || typeof location === "undefined") return;
-        const Q = new URLSearchParams(location.search);
-        const TOK = Q.get("rtok") || "ch7-2026-phase4";
-        const NAME = Q.get("compatname") || "compat-view";
-        let ctxLost = 0;
-        const jsErrors: string[] = [];
-        let frames = 0;
-        let fps = 0;
+                /* ==========================================================================
+                 * [COMPAT 2026-10-13] 兼容性自证面板 + 自动回传（**不碰渲染路径**，只读探针）
+                 *
+                 * 为什么：真机上截图不便、控制台也看不到 ⇒ 兼容性必须在**页面上就地给出可复制的文字**，
+                 *   并且**自动回传到服务端**（`/__ch7/report?name=compat-view&token=<rtok>`），这样"为什么不兼容"
+                 *   有现场证据（UA / GPU / WebGL2 / 纹理上限 / 上下文丢失次数 / GL 错误码 / 是否出画面 / FPS）。
+                 * 用法：`bench.html?mode=view&scene=<id>&…&rtok=<口令>` ⇒ 左下角出现文本框（长按全选复制即可发我），
+                 *   同时每 6s 自动回传一次（失败静默，不影响渲染）。
+                 * 注意：本块在 `mode=view` 下才会被加载（bench.ts 只在该模式动态 import 本模块）。
+                 * ========================================================================== */
+                (function ch7CompatPanel(): void {
+                    try {
+                        if (typeof document === "undefined" || typeof location === "undefined") return;
+                        const Q = new URLSearchParams(location.search);
+                        const TOK = Q.get("rtok") || "ch7-2026-phase4";
+                        const NAME = Q.get("compatname") || "compat-view";
+                        let ctxLost = 0;
+                        const jsErrors: string[] = [];
+                        let frames = 0;
+                        let fps = 0;
 
-        // 上下文丢失/JS 异常：用 capture + window 级监听，避免依赖具体 canvas 实例
-        document.addEventListener("webglcontextlost", () => { ctxLost++; }, true);
-        window.addEventListener("error", (e) => { jsErrors.push(String((e as ErrorEvent)?.message || e).slice(0, 120)); });
-        window.addEventListener("unhandledrejection", (e) => {
-            const r = e as PromiseRejectionEvent;
-            jsErrors.push(("reject: " + String(r.reason)).slice(0, 120));
-        });
+                        // 上下文丢失/JS 异常：用 capture + window 级监听，避免依赖具体 canvas 实例
+                        document.addEventListener(
+                            "webglcontextlost",
+                            () => {
+                                ctxLost++;
+                            },
+                            true,
+                        );
+                        window.addEventListener("error", (e) => {
+                            jsErrors.push(String((e as ErrorEvent)?.message || e).slice(0, 120));
+                        });
+                        window.addEventListener("unhandledrejection", (e) => {
+                            const r = e as PromiseRejectionEvent;
+                            jsErrors.push(("reject: " + String(r.reason)).slice(0, 120));
+                        });
 
-        const canvas = (): HTMLCanvasElement | null => document.querySelector("canvas");
-        const gl2 = (): WebGL2RenderingContext | null => {
-            const c = canvas();
-            if (!c) return null;
-            try { return c.getContext("webgl2") as WebGL2RenderingContext | null; } catch { return null; }
-        };
-        const caps = (gl: WebGL2RenderingContext | null): string => {
-            if (!gl) return "no-gl";
-            try {
-                const er: string[] = [];
-                for (let i = 0; i < 6; i++) { const e = gl.getError(); if (e === gl.NO_ERROR) break; er.push(String(e)); }
-                return `tex2=${gl.getParameter(gl.MAX_TEXTURE_SIZE)}/u${gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS)}` +
-                    `/rb${gl.getParameter(gl.MAX_RENDERBUFFER_SIZE)}/t3d${gl.getParameter(gl.MAX_3D_TEXTURE_SIZE)}` +
-                    `/vl${gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS)} err=${er.length ? er.join("+") : 0}`;
-            } catch { return "caps-fail"; }
-        };
-        const extList = (gl: WebGL2RenderingContext | null): string => {
-            if (!gl) return "-";
-            const want = ["EXT_disjoint_timer_query_webgl2", "EXT_color_buffer_float", "OES_texture_float_linear", "WEBGL_debug_renderer_info"];
-            return want.map((k) => `${k.replace(/^(EXT|OES|WEBGL)_/, "")}=${gl.getExtension(k) ? 1 : 0}`).join(",");
-        };
-        const gpuName = (gl: WebGL2RenderingContext | null): string => {
-            if (!gl) return "-";
-            try {
-                const d = gl.getExtension("WEBGL_debug_renderer_info");
-                return String(d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER) || "");
-            } catch { return "-"; }
-        };
+                        const canvas = (): HTMLCanvasElement | null => document.querySelector("canvas");
+                        const gl2 = (): WebGL2RenderingContext | null => {
+                            const c = canvas();
+                            if (!c) return null;
+                            try {
+                                return c.getContext("webgl2") as WebGL2RenderingContext | null;
+                            } catch {
+                                return null;
+                            }
+                        };
+                        const caps = (gl: WebGL2RenderingContext | null): string => {
+                            if (!gl) return "no-gl";
+                            try {
+                                const er: string[] = [];
+                                for (let i = 0; i < 6; i++) {
+                                    const e = gl.getError();
+                                    if (e === gl.NO_ERROR) break;
+                                    er.push(String(e));
+                                }
+                                return (
+                                    `tex2=${gl.getParameter(gl.MAX_TEXTURE_SIZE)}/u${gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS)}` +
+                                    `/rb${gl.getParameter(gl.MAX_RENDERBUFFER_SIZE)}/t3d${gl.getParameter(gl.MAX_3D_TEXTURE_SIZE)}` +
+                                    `/vl${gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS)} err=${er.length ? er.join("+") : 0}`
+                                );
+                            } catch {
+                                return "caps-fail";
+                            }
+                        };
+                        const extList = (gl: WebGL2RenderingContext | null): string => {
+                            if (!gl) return "-";
+                            const want = [
+                                "EXT_disjoint_timer_query_webgl2",
+                                "EXT_color_buffer_float",
+                                "OES_texture_float_linear",
+                                "WEBGL_debug_renderer_info",
+                            ];
+                            return want
+                                .map((k) => `${k.replace(/^(EXT|OES|WEBGL)_/, "")}=${gl.getExtension(k) ? 1 : 0}`)
+                                .join(",");
+                        };
+                        const gpuName = (gl: WebGL2RenderingContext | null): string => {
+                            if (!gl) return "-";
+                            try {
+                                const d = gl.getExtension("WEBGL_debug_renderer_info");
+                                return String(
+                                    d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER) || "",
+                                );
+                            } catch {
+                                return "-";
+                            }
+                        };
 
-        const panel = document.createElement("textarea");
-        panel.readOnly = true;
-        panel.setAttribute("style",
-            "position:fixed;left:6px;bottom:6px;width:min(96vw,720px);height:150px;z-index:2147483647;" +
-            "font:11px/1.35 ui-monospace,Menlo,Consolas,monospace;background:rgba(0,0,0,.82);color:#b9f;" +
-            "border:1px solid #555;border-radius:6px;padding:6px;-webkit-user-select:text;user-select:text;");
-        document.body.appendChild(panel);
-        // [COMPAT 2026-10-13] 一键复制按钮（iPad 上 clipboard API 可能被拒 ⇒ 自动退回选中 + execCommand）
-        const btn = document.createElement("button");
-        btn.textContent = "复制诊断";
-        btn.setAttribute("style",
-            "position:fixed;left:6px;bottom:162px;z-index:2147483647;font:12px/1.2 system-ui;padding:6px 10px;" +
-            "border-radius:6px;border:1px solid #777;background:#111;color:#cfc;");
-        btn.onclick = () => {
-            try { panel.select(); panel.setSelectionRange(0, panel.value.length); } catch { /* ignore */ }
-            try {
-                if (navigator.clipboard?.writeText) { void navigator.clipboard.writeText(panel.value); }
-                else { document.execCommand("copy"); }
-            } catch { try { document.execCommand("copy"); } catch { /* ignore */ } }
-            btn.textContent = "已复制✓";
-            setTimeout(() => { btn.textContent = "复制诊断"; }, 1500);
-        };
-        document.body.appendChild(btn);
+                        const panel = document.createElement("textarea");
+                        panel.readOnly = true;
+                        panel.setAttribute(
+                            "style",
+                            "position:fixed;left:6px;bottom:6px;width:min(96vw,720px);height:150px;z-index:2147483647;" +
+                                "font:11px/1.35 ui-monospace,Menlo,Consolas,monospace;background:rgba(0,0,0,.82);color:#b9f;" +
+                                "border:1px solid #555;border-radius:6px;padding:6px;-webkit-user-select:text;user-select:text;",
+                        );
+                        document.body.appendChild(panel);
+                        // [COMPAT 2026-10-13] 一键复制按钮（iPad 上 clipboard API 可能被拒 ⇒ 自动退回选中 + execCommand）
+                        const btn = document.createElement("button");
+                        btn.textContent = "复制诊断";
+                        btn.setAttribute(
+                            "style",
+                            "position:fixed;left:6px;bottom:162px;z-index:2147483647;font:12px/1.2 system-ui;padding:6px 10px;" +
+                                "border-radius:6px;border:1px solid #777;background:#111;color:#cfc;",
+                        );
+                        btn.onclick = () => {
+                            try {
+                                panel.select();
+                                panel.setSelectionRange(0, panel.value.length);
+                            } catch {
+                                /* ignore */
+                            }
+                            try {
+                                if (navigator.clipboard?.writeText) {
+                                    void navigator.clipboard.writeText(panel.value);
+                                } else {
+                                    document.execCommand("copy");
+                                }
+                            } catch {
+                                try {
+                                    document.execCommand("copy");
+                                } catch {
+                                    /* ignore */
+                                }
+                            }
+                            btn.textContent = "已复制✓";
+                            setTimeout(() => {
+                                btn.textContent = "复制诊断";
+                            }, 1500);
+                        };
+                        document.body.appendChild(btn);
 
-        const build = (): string => {
-            const gl = gl2();
-            const n = gpuName(gl);
-            const verdict = ctxLost > 0 ? "CONTEXT-LOST" : !gl ? "NO-WEBGL2" : fps > 0 ? `RENDERING(fps=${fps.toFixed(0)})` : "LOADING";
-            return [
-                `[CH7-COMPAT]`,
-                `scene=${Q.get("scene") || "-"} profile=${Q.get("profile") || "-"} pose_src=${Q.get("pose_src") || "-"}`,
-                `verdict=${verdict}`,
-                `webgl2=${gl ? 1 : 0} ctxlost=${ctxLost}`,
-                `gpu=${n}`,
-                `caps=${caps(gl)}`,
-                `ext=${extList(gl)}`,
-                `canvas=${canvas() ? `${canvas()!.width}x${canvas()!.height}` : "-"}`,
-                `fps=${fps.toFixed(1)}`,
-                `ua=${navigator.userAgent}`,
-                jsErrors.length ? `jserr=${jsErrors.slice(-3).join(" | ")}` : `jserr=-`,
-                `[END]`,
-            ].join("\n");
-        };
+                        const build = (): string => {
+                            const gl = gl2();
+                            const n = gpuName(gl);
+                            const verdict =
+                                ctxLost > 0
+                                    ? "CONTEXT-LOST"
+                                    : !gl
+                                      ? "NO-WEBGL2"
+                                      : fps > 0
+                                        ? `RENDERING(fps=${fps.toFixed(0)})`
+                                        : "LOADING";
+                            return [
+                                `[CH7-COMPAT]`,
+                                `scene=${Q.get("scene") || "-"} profile=${Q.get("profile") || "-"} pose_src=${Q.get("pose_src") || "-"}`,
+                                `verdict=${verdict}`,
+                                `webgl2=${gl ? 1 : 0} ctxlost=${ctxLost}`,
+                                `gpu=${n}`,
+                                `caps=${caps(gl)}`,
+                                `ext=${extList(gl)}`,
+                                `canvas=${canvas() ? `${canvas()!.width}x${canvas()!.height}` : "-"}`,
+                                `fps=${fps.toFixed(1)}`,
+                                `ua=${navigator.userAgent}`,
+                                jsErrors.length ? `jserr=${jsErrors.slice(-3).join(" | ")}` : `jserr=-`,
+                                `[END]`,
+                            ].join("\n");
+                        };
 
-        // 每秒估一次 FPS（rAF 计数；纯读，不影响渲染）
-        let lastT = performance.now();
-        const tick = (): void => {
-            frames++;
-            const now = performance.now();
-            if (now - lastT >= 1000) { fps = (frames * 1000) / (now - lastT); frames = 0; lastT = now; }
-            requestAnimationFrame(tick);
-        };
-        requestAnimationFrame(tick);
+                        // 每秒估一次 FPS（rAF 计数；纯读，不影响渲染）
+                        let lastT = performance.now();
+                        const tick = (): void => {
+                            frames++;
+                            const now = performance.now();
+                            if (now - lastT >= 1000) {
+                                fps = (frames * 1000) / (now - lastT);
+                                frames = 0;
+                                lastT = now;
+                            }
+                            requestAnimationFrame(tick);
+                        };
+                        requestAnimationFrame(tick);
 
-        let lastPost = 0;
-        setInterval(() => {
-            const text = build();
-            if (panel.value !== text) panel.value = text;
-            const now = performance.now();
-            if (now - lastPost < 6000) return;
-            lastPost = now;
-            try {
-                void fetch(`${location.origin}/__ch7/report?name=${encodeURIComponent(NAME)}&token=${encodeURIComponent(TOK)}`, {
-                    method: "POST",
-                    body: `[RESULT]\nengine=gsplat\nmode=view-compat\n${text}\n[END]\n`,
-                }).catch(() => {});
-            } catch { /* 静默：回传失败不影响兼容性测试 */ }
-        }, 1500);
-    } catch { /* 诊断块自身绝不能影响渲染 */ }
-})();
+                        let lastPost = 0;
+                        setInterval(() => {
+                            const text = build();
+                            if (panel.value !== text) panel.value = text;
+                            const now = performance.now();
+                            if (now - lastPost < 6000) return;
+                            lastPost = now;
+                            try {
+                                void fetch(
+                                    `${location.origin}/__ch7/report?name=${encodeURIComponent(NAME)}&token=${encodeURIComponent(TOK)}`,
+                                    {
+                                        method: "POST",
+                                        body: `[RESULT]\nengine=gsplat\nmode=view-compat\n${text}\n[END]\n`,
+                                    },
+                                ).catch(() => {});
+                            } catch {
+                                /* 静默：回传失败不影响兼容性测试 */
+                            }
+                        }, 1500);
+                    } catch {
+                        /* 诊断块自身绝不能影响渲染 */
+                    }
+                })();
 
                 fireId(1, "pointerdown", 300, 300);
                 for (let i = 1; i <= 8; i++) fireId(1, "pointermove", 300 + i * 15, 300);

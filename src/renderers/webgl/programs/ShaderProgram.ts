@@ -59,7 +59,9 @@ abstract class ShaderProgram {
                 experimental = false;
             }
             if (experimental) {
-                throw new Error(`[shfmt=f16] shader ${stage} failed :: ${(log ?? "").replace(/\s+/g, " ").slice(0, 400)}`);
+                throw new Error(
+                    `[shfmt=f16] shader ${stage} failed :: ${(log ?? "").replace(/\s+/g, " ").slice(0, 400)}`,
+                );
             }
         };
 
