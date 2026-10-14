@@ -1,14 +1,55 @@
 [
     {
+        "name": "Bicycle (r7 QPLY)",
+        "file": "scenes/point_cloud_quantised_half_r7-bicycle.ply"
+    },
+    {
+        "name": "Bonsai (r7 QPLY)",
+        "file": "scenes/point_cloud_quantised_half_r7-bonsai.ply"
+    },
+    {
+        "name": "Counter (r7 QPLY)",
+        "file": "scenes/point_cloud_quantised_half_r7-counter.ply"
+    },
+    {
         "name": "DrJohnson (r7 QPLY)",
         "file": "scenes/point_cloud_quantised_half_r7-drjohnson.ply"
+    },
+    {
+        "name": "Flowers (r7 QPLY)",
+        "file": "scenes/point_cloud_quantised_half_r7-flowers.ply"
     },
     {
         "name": "Garden (r7 QPLY)",
         "file": "scenes/point_cloud_quantised_half_r7-garden.ply"
     },
     {
+        "name": "Kitchen (r7 QPLY)",
+        "file": "scenes/point_cloud_quantised_half_r7-kitchen.ply"
+    },
+    {
+        "name": "Playroom (r7 QPLY)",
+        "file": "scenes/point_cloud_quantised_half_r7-playroom.ply"
+    },
+    {
+        "name": "Room (r7 QPLY)",
+        "file": "scenes/point_cloud_quantised_half_r7-room.ply"
+    },
+    {
+        "name": "Stump (r7 QPLY)",
+        "file": "scenes/point_cloud_quantised_half_r7-stump.ply"
+    },
+    {
+        "name": "Train (r7 QPLY)",
+        "file": "scenes/point_cloud_quantised_half_r7-train.ply"
+    },
+    {
+        "name": "Treehill (r7 QPLY)",
+        "file": "scenes/point_cloud_quantised_half_r7-treehill.ply"
+    },
+    {
         "name": "Truck (r7 QPLY)",
         "file": "scenes/point_cloud_quantised_half_r7-truck.ply"
     }
 ]
+
