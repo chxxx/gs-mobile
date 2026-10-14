@@ -374,7 +374,12 @@ function flushPerfSummary() {
 }
 
 function resetScene() {
-    scene.reset();
+    // [2026-10-13] 与 `bench-measure.ts:1715` 同款：reset 中途抛错时不要让后续加载踩在半清空的状态上。
+    try {
+        scene.reset();
+    } catch (err) {
+        console.warn("[reset] scene.reset() 抛错（已忽略并继续）", err);
+    }
     firstFrameStart = null;
     firstFrameLogged = false;
 }
@@ -515,14 +520,17 @@ async function loadFromUrl(url: string) {
         adjustPixelRatio();
         applySceneTweaks();
         await applyFluxCameraDefault();
-        logLowRankSelfCheck();
-        startLoop(); // [2026-10-13] 数据齐了才开始渲染（否则 ?lr=1 会每帧抛错、全黑）
     } catch (err) {
         console.error("Failed to load scene:", err);
-        alert(`Failed to load scene: ${url}`);
+        // [2026-10-13] 不再用阻塞式 `alert`：它会把页面留在"停帧 + 黑屏"状态且手机端难取证。
+        flashLoadError(`加载失败：${url}\n${err instanceof Error ? err.message : String(err)}`);
     } finally {
+        // [2026-10-13] **成败都必须恢复渲染**：循环若停在"加载中"，页面就永久黑屏（切场景失败时最容易踩到）。
         hideProgress();
         dropZone.style.display = "none";
+        logLowRankSelfCheck();
+        startLoop();
+        logLoadDiag(url);
     }
 }
 
@@ -533,15 +541,24 @@ async function loadFile(file: File) {
     firstFrameStart = performance.now();
     firstFrameLogged = false;
 
-    await SPLAT.PLYLoader.LoadFromFileAsync(file, scene, (progress) => {
-        progressIndicator.value = progress * 100;
-    });
+    try {
+        await SPLAT.PLYLoader.LoadFromFileAsync(file, scene, (progress) => {
+            progressIndicator.value = progress * 100;
+        });
+    } catch (err) {
+        console.error("Failed to load file:", err);
+        flashLoadError(`加载失败：${file.name}\n${err instanceof Error ? err.message : String(err)}`);
+        hideProgress();
+        startLoop(); // [2026-10-13] 失败也别把渲染循环停死（否则表现为永久黑屏）
+        return;
+    }
 
     adjustPixelRatio();
     applySceneTweaks();
     await applyFluxCameraDefault();
     logLowRankSelfCheck();
     startLoop(); // [2026-10-13] 数据齐了才开始渲染（否则 ?lr=1 会每帧抛错、全黑）
+    logLoadDiag(file.name);
     hideProgress();
     dropZone.style.display = "none";
     sceneSelect.value = "";
@@ -620,6 +637,17 @@ sceneSelect.addEventListener("change", (e) => {
     const target = e.target as HTMLSelectElement;
     const url = target.value;
     if (url) {
+        // [2026-10-13] 默认**整页重载切场景**：就地切换依赖"旧场景状态被彻底清干净"，一旦有残留就整屏黑
+        //   （用户实测：首个场景正常、切到别的场景全黑）。页面本来就支持 `?scene=` 直达，重载后机位、
+        //   臂开关、像素比、RAF 门控都会按同一份逻辑重新套一遍 ⇒ 结果与首次进入完全一致、可复现。
+        //   `?switch=inline` 保留原来的就地切换（配合 `[diag]` 一行诊断定位残留状态用）。
+        if (new URLSearchParams(location.search).get("switch") !== "inline") {
+            const u = new URL(location.href);
+            u.searchParams.set("scene", url);
+            console.info(`[scene] 整页重载切换 ⇒ ${u.toString()}`);
+            location.href = u.toString();
+            return;
+        }
         void loadFromUrl(url);
     }
 });
@@ -691,6 +719,57 @@ function logLowRankSelfCheck(): void {
     }
 }
 
+/** [2026-10-13] 非阻塞错误横幅。替代 `alert`：阻塞弹窗会把页面留在"停帧 + 黑屏"状态，手机端还会吞掉控制台信息。 */
+function flashLoadError(msg: string): void {
+    let el = document.getElementById("load-error-banner");
+    if (!el) {
+        el = document.createElement("div");
+        el.id = "load-error-banner";
+        el.style.cssText =
+            "position:fixed;left:12px;bottom:12px;max-width:72vw;padding:10px 14px;border-radius:6px;" +
+            "background:rgba(127,29,29,.92);color:#fff;font:13px/1.5 ui-monospace,monospace;z-index:20;white-space:pre-wrap";
+        document.body.appendChild(el);
+    }
+    el.textContent = msg;
+}
+
+/**
+ * 累计已渲染帧数（**单调递增**，`logLoadDiag` 用它判断"循环到底有没有在出帧"）。
+ * 注意：与上面 FPS 用的 `frameCount`（每秒清零）不是一回事，故另起名字。
+ */
+let renderedFrameTotal = 0;
+
+/**
+ * [2026-10-13] 每次加载结束后打一行**切场景诊断**，并在 1 秒后再判一次，用于定位"首个场景正常、切到别的场景全黑"：
+ *   · `objects>1` ⇒ 上一个场景没被清掉（旧 Splat 残留会让渲染器带上旧状态）；
+ *   · `lowRank=✗` 且 URL 带 `lr=1` ⇒ 载荷没挂上（渲染器每帧抛错 ⇒ 全黑）；
+ *   · 1s 后帧数不增 ⇒ `renderer.render` 里在抛异常；`loop=false` ⇒ 循环根本没恢复。
+ */
+function logLoadDiag(label: string): void {
+    const splats = scene.objects.filter((o) => o instanceof SPLAT.Splat) as SPLAT.Splat[];
+    const splat = splats[0];
+    const lowRank = (splat?.data as unknown as { sphericalHarmonics?: { lowRank?: unknown } } | undefined)
+        ?.sphericalHarmonics?.lowRank;
+    const frames0 = renderedFrameTotal;
+    console.info(
+        `[diag] ${label}: objects=${scene.objects.length}(splat=${splats.length}) vertex=${splat?.data?.vertexCount ?? 0} ` +
+            `lowRank=${lowRank ? "✓" : "✗"} loop=${loopRunning} frames=${frames0}`,
+    );
+    if (scene.objects.length > 1) {
+        console.warn("[diag] scene 里对象数 > 1 ⇒ 上一个场景有残留（切场景的 reset 没清干净）");
+    }
+    window.setTimeout(() => {
+        const delta = renderedFrameTotal - frames0;
+        if (!loopRunning) {
+            console.warn("[diag] 1s 后：循环仍处于**停止**状态 ⇒ 不会再有新帧（这就是全黑的直接原因）");
+        } else if (delta === 0) {
+            console.warn("[diag] 1s 后：循环在跑但**没有新帧** ⇒ renderer.render 内抛异常（多半是 lr/notx 开关与载荷不匹配）");
+        } else {
+            console.info(`[diag] 1s 后：帧数 +${delta}（循环正常）⇒ 若画面仍黑，问题在渲染内容/相机而不在循环`);
+        }
+    }, 1000);
+}
+
 function main() {
     const handleResize = () => {
         renderer.resize();
@@ -699,6 +778,7 @@ function main() {
     const frame = (now: number) => {
         // [2026-10-13] 循环被停（加载中）时直接退出：不在"数据没齐"时建 RenderData（见 startLoop 注释）。
         if (!loopRunning) return;
+        renderedFrameTotal++;
         const nowMs = now || performance.now();
 
         const frameMs = lastFrameAt > 0 ? nowMs - lastFrameAt : 0;
