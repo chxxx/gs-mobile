@@ -26,7 +26,7 @@ interface FluxCameraFile {
     default_view: FluxPose;
 }
 
-const FILE = fileURLToPath(new URL("../../bench-flux-camera.json", import.meta.url));
+const FILE = fileURLToPath(new URL("../../bench/data/bench-flux-camera.json", import.meta.url));
 const flux = JSON.parse(readFileSync(FILE, "utf-8")) as FluxCameraFile;
 
 /** 视图矩阵前 3 行 = 相机基（世界→相机）；比较前归一化，避免把"非正交"的模长差算成角度差。 */

@@ -10,7 +10,7 @@
 只要三档下方法排序不变，FPS 结论就不依赖某一具体机位。
 
 用法：
-    python rendering/tools/make_bench_cameras.py            # 用 rendering/bench-scenes.json 的全部场景
+    python rendering/tools/make_bench_cameras.py            # 用 rendering/bench/data/bench-scenes.json 的全部场景
     python rendering/tools/make_bench_cameras.py --q 0.5    # 更紧的分位（默认 0.5%~99.5%）
 """
 import argparse
@@ -103,8 +103,8 @@ def main():
     args = parser.parse_args()
 
     root = args.root
-    manifest = args.manifest or os.path.join(root, "bench-scenes.json")
-    out_path = args.out or os.path.join(root, "bench-cameras.json")
+    manifest = args.manifest or os.path.join(root, "bench", "data", "bench-scenes.json")
+    out_path = args.out or os.path.join(root, "bench", "data", "bench-cameras.json")
     scenes = json.load(io.open(manifest, encoding="utf-8"))["scenes"]
 
     # 焦距与 bennch 页保持一致（Flux-GS 的 COLMAP 焦距），取景距离按它换算

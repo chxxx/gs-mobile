@@ -9,7 +9,7 @@
 
 用法：
     python rendering/tools/make_bench_camviews.py
-    python rendering/tools/make_bench_camviews.py --raw-dir <dir> --out rendering/bench-camviews.json
+    python rendering/tools/make_bench_camviews.py --raw-dir <dir> --out rendering/bench/data/bench-camviews.json
 """
 import argparse
 import glob
@@ -72,7 +72,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("files", nargs="*")
     parser.add_argument("--raw-dir", default=os.path.join(root, "thesis", "data", "ch7_measurements", "raw"))
-    parser.add_argument("--out", default=os.path.join(root, "rendering", "bench-camviews.json"))
+    parser.add_argument("--out", default=os.path.join(root, "rendering", "bench", "data", "bench-camviews.json"))
     args = parser.parse_args()
 
     paths = args.files or sorted(glob.glob(os.path.join(args.raw_dir, "*.txt")))

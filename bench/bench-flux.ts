@@ -449,7 +449,7 @@ let camViews: Record<string, number[]> = {};
 
 async function loadCamViews(): Promise<void> {
     try {
-        const res = await fetch("./bench-camviews.json");
+        const res = await fetch("./bench/data/bench-camviews.json");
         if (!res.ok) return;
         const json = (await res.json()) as { views?: Record<string, number[]> };
         camViews = json.views ?? {};
@@ -461,7 +461,7 @@ async function loadCamViews(): Promise<void> {
 /** pose=aligned 用：由 align_flux_positions.py 生成的"本文机位→其坐标系"注入表。 */
 async function loadInjectedViews(): Promise<Record<string, number[]>> {
     try {
-        const res = await fetch("./bench-camviews-flux.json");
+        const res = await fetch("./bench/data/bench-camviews-flux.json");
         if (!res.ok) return {};
         const json = (await res.json()) as { views?: Record<string, number[]> };
         return json.views ?? {};

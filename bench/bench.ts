@@ -1401,7 +1401,7 @@ async function main(): Promise<void> {
         manifest = await loadManifest();
     } catch {
         stDevice.textContent = "清单加载失败";
-        welcome.textContent = "bench-scenes.json 未能加载，请检查部署是否完整。";
+        welcome.textContent = "bench/data/bench-scenes.json 未能加载，请检查部署是否完整。";
         return;
     }
     populateSceneSelect();
