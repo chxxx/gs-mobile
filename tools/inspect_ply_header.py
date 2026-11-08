@@ -2,7 +2,7 @@
 """批量核对 3DGS/QPLY/reduced-3DGS 量化 PLY 的头部与点数/体积，用于第 7 章资产登记与口径校验。
 
 用法（仓库根目录）：
-    python gsplat.js/tools/inspect_ply_header.py gsplat.js/reduced-3dgs gsplat.js/scenes
+    python rendering/tools/inspect_ply_header.py rendering/reduced-3dgs rendering/scenes
 
 输出：每个文件一行 CSV：
     file,format,bytes,mb,vertex_total,groups,codebook_props,has_basis
@@ -98,5 +98,5 @@ def main(dirs):
 
 
 if __name__ == "__main__":
-    args = sys.argv[1:] or ["gsplat.js/reduced-3dgs", "gsplat.js/scenes"]
+    args = sys.argv[1:] or ["rendering/reduced-3dgs", "rendering/scenes"]
     main(args)

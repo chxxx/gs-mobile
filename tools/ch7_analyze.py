@@ -29,7 +29,7 @@ except Exception:
     pass
 
 GS = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-RAW = os.path.join(os.path.dirname(GS), "thesis_project", "data", "ch7_measurements", "raw")
+RAW = os.path.join(os.path.dirname(GS), "thesis", "data", "ch7_measurements", "raw")
 SCENES = ["garden", "bicycle", "flowers", "stump", "treehill", "room", "counter", "kitchen",
           "bonsai", "truck", "train", "drjohnson", "playroom"]
 REQUIRED_ROUND = ["scene", "dataset", "round", "ok", "points", "bytes", "fetch_ms", "parse_ms",
@@ -157,7 +157,7 @@ def cmd_validate(rows, args):
                              "（**不得**默认归因于网络口径）" % (scene, arm, fa, fb, d * 100, AB_FPS_TOL * 100))
     L = ["# 阶段3 · 字段完整性与真实性校验", "",
          "输入：%s" % ("**模拟数据（MOCK，仅验证脚本可用）**" if args.mock
-                    else "`thesis_project/data/ch7_measurements/raw/**` 真机回传记录"),
+                    else "`thesis/data/ch7_measurements/raw/**` 真机回传记录"),
          "逐轮行数 = **%d**" % len(rows), "",
          "| 检查项 | 结论 |", "|---|---|",
          "| 臂身份可识别（只认 arm=/sw_effective=） | %s |" % ("见问题清单" if problems else "✅ 全部可识别"),

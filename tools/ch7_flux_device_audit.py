@@ -20,7 +20,7 @@ except Exception:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GS = os.path.abspath(os.path.join(HERE, ".."))
-RAW = os.path.join(os.path.dirname(GS), "thesis_project", "data", "ch7_measurements", "raw")
+RAW = os.path.join(os.path.dirname(GS), "thesis", "data", "ch7_measurements", "raw")
 REAL = ("Snapdragon", "Adreno", "Mali", "Dimensity", "Apple", "PowerVR", "Immortalis")
 
 
@@ -94,7 +94,7 @@ def main():
     n_real = sum(1 for r in rows if dev(r))
     miss = [k for k in ("url", "model_base", "net", "network", "cache", "cached", "throttle") if k not in ms and k not in ("",)]
     lines = ["# 已有 Flux 记录 · 首帧/加载字段只读核对（v2，按臂标识判定）", "",
-             "> 只读：**未新增任何测量**，数值全部来自 `thesis_project/data/ch7_measurements/raw/**` 已有记录。",
+             "> 只读：**未新增任何测量**，数值全部来自 `thesis/data/ch7_measurements/raw/**` 已有记录。",
              "> 臂判定只看 `u=`/逐轮 `arm=`/`engine=` 是否含 `flux`（v1 的全文匹配被 `pose_src=flux` 污染，作废）。", "",
              "命中 Flux 记录文件 = **%d**，逐轮行 = **%d**（真机 %d 行 / 桌面 %d 行）。"
              % (len(files), len(rows), n_real, len(rows) - n_real), "",

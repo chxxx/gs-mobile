@@ -7,7 +7,7 @@
   (b) 随机/其他环境因素（与会话无关地跳变），
 需要把**所有**真机结果按时间排成一条线，并给出每条的"每帧排空代理"。
 
-数据来源：真机回传结果原文（默认 `thesis_project/data/ch7_measurements/raw`）。
+数据来源：真机回传结果原文（默认 `thesis/data/ch7_measurements/raw`）。
 每条结果里可用的排空代理（优先级从高到低）：
   1. `|lab…ER<ms>…SMP<n>` ⇒ `ER / SMP`（新构建，最准：run 末排空的均摊）
   2. `offscreen_fence_wait_ms / (frames_per_run × runs)` ⇒ 门的自记账均摊
@@ -35,7 +35,7 @@ for _s in (sys.stdout, sys.stderr):
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 GS_REPO = os.path.dirname(TOOLS_DIR)
 PROJECT_ROOT = os.path.dirname(GS_REPO)
-RAW_DEFAULT = os.path.join(PROJECT_ROOT, "thesis_project", "data", "ch7_measurements", "raw")
+RAW_DEFAULT = os.path.join(PROJECT_ROOT, "thesis", "data", "ch7_measurements", "raw")
 
 
 def grab(text, pat, dflt=""):

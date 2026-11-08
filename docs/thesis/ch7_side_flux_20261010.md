@@ -122,9 +122,9 @@ https://parking-rna-cute-craig.trycloudflare.com/bench-flux.html?mode=bench&res_
 出图（记录落盘后）：
 
 ```cmd
-cd /d D:\study\project\Plasticity-Pruning-GS\gsplat.js\_tmp_ch7probe
-node decode_fd.mjs ..\..\thesis_project\data\ch7_measurements\raw\sideflux_<ts>_1-ours.txt out\sfx_ours_truck.png
-node decode_fd.mjs ..\..\thesis_project\data\ch7_measurements\raw\sideflux_<ts>_2-flux.txt out\sfx_flux_truck.png
+cd /d D:\study\project\Plasticity-Pruning-GS\rendering\_tmp_ch7probe
+node decode_fd.mjs ..\..\thesis\data\ch7_measurements\raw\sideflux_<ts>_1-ours.txt out\sfx_ours_truck.png
+node decode_fd.mjs ..\..\thesis\data\ch7_measurements\raw\sideflux_<ts>_2-flux.txt out\sfx_flux_truck.png
 node sfx_diag.mjs out\sfx_ours_truck.png out\sfx_flux_truck.png
 node compose_side.mjs out\sfx_ours_truck.png out\sfx_flux_truck.png out\side_truck_ours_vs_flux.png truck 100.0 100.0 <oursFps> <fluxFps> 9481 --ours-label="本文臂（部署配置）" --other-label="Flux-GS 官方实现（+noge）" --other-short="Flux-GS"
 ```

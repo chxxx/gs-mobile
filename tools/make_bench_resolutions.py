@@ -7,8 +7,8 @@
 本脚本与 `bench-resolutions.json` 不再参与正式测帧。
 
 用法：
-    python gsplat.js/tools/make_bench_resolutions.py            # 读 thesis_project/data/ch7_measurements/raw/*.txt
-    python gsplat.js/tools/make_bench_resolutions.py --raw-dir <dir> --out gsplat.js/bench-resolutions.json
+    python rendering/tools/make_bench_resolutions.py            # 读 thesis/data/ch7_measurements/raw/*.txt
+    python rendering/tools/make_bench_resolutions.py --raw-dir <dir> --out rendering/bench-resolutions.json
 """
 import argparse
 import glob
@@ -66,8 +66,8 @@ def main():
     root = repo_root()
     parser = argparse.ArgumentParser()
     parser.add_argument("files", nargs="*")
-    parser.add_argument("--raw-dir", default=os.path.join(root, "thesis_project", "data", "ch7_measurements", "raw"))
-    parser.add_argument("--out", default=os.path.join(root, "gsplat.js", "bench-resolutions.json"))
+    parser.add_argument("--raw-dir", default=os.path.join(root, "thesis", "data", "ch7_measurements", "raw"))
+    parser.add_argument("--out", default=os.path.join(root, "rendering", "bench-resolutions.json"))
     args = parser.parse_args()
 
     paths = args.files or sorted(glob.glob(os.path.join(args.raw_dir, "*.txt")))

@@ -10,7 +10,7 @@
   重心差 < 0.15（≈屏宽 7.5%）、展布比 0.6~1.6、包围框 IoU > 0.6 → 视为同一取景。
 
 用法：
-    python gsplat.js/tools/check_alignment_quality.py --flux-dir D:\\study\\tmp\\fluxxyz
+    python rendering/tools/check_alignment_quality.py --flux-dir D:\\study\\tmp\\fluxxyz
 """
 import argparse
 import io

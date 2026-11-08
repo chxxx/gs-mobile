@@ -40,9 +40,9 @@
 
 | 项 | 做法 / 输入 |
 | --- | --- |
-| **† 复核** T&T 的 Flux 点数 | 用仓库根 `mpeg-pcc-tmc13` 解码 `gsplat.js/flux-gs-project-gh-pages/scene/{train,truck}.json` 的 `xyz` 字段（TMC3/GPCC），读解码 PLY 头的 `element vertex N`，与 287,304 / 273,169 对比 |
+| **† 复核** T&T 的 Flux 点数 | 用仓库根 `mpeg-pcc-tmc13` 解码 `rendering/flux-gs-project-gh-pages/scene/{train,truck}.json` 的 `xyz` 字段（TMC3/GPCC），读解码 PLY 头的 `element vertex N`，与 287,304 / 273,169 对比 |
 | 统计检验 | 用 `_tmp_ch7probe/latest_ab.csv`（含逐轮 `fps_all`）：13 场景配对 Wilcoxon 符号秩 + 95% CI + Cohen's d |
-| 真机画质闸门 | `thesis_project/data/ch7_measurements/raw/g3png_{f,b}_*.txt`（320×213 无损 PNG）→ PSNR/SSIM/最大差 |
+| 真机画质闸门 | `thesis/data/ch7_measurements/raw/g3png_{f,b}_*.txt`（320×213 无损 PNG）→ PSNR/SSIM/最大差 |
 | 表格导出 | 7-A/7-H 三表 → LaTeX / Word |
 | 附录可补 | 论文 Table 4/5（超参分析）、Table 9（逐场景训练时间）、Fig. 9（用户研究 60% 偏好） |
 
@@ -57,7 +57,7 @@
 | `tools/ch7_analyze.py`、`tools/ch7_stage0_normalize.py`、`tools/ch7_c_links_final.py` | 第 7 章数据分析/归一化/链接生成脚本 | ✅ |
 | `flux-baseline-scenes-official.json` | Flux 基线官方场景清单 | ✅ |
 | `_tmp_ch7probe/`（10 个产物 + 2 脚本） | 论文摘录（`fp_*.txt`）、抽取结果（`latest_ab.csv` 等）、可复现脚本 | gitignored，本机保留 |
-| `thesis_project/data/ch7_measurements/**` | **原始手机记录**（`helper01c*` / `helper01f*`）、`out/` 汇总 | 根仓库 gitignored，**证据请勿删** |
+| `thesis/data/ch7_measurements/**` | **原始手机记录**（`helper01c*` / `helper01f*`）、`out/` 汇总 | 根仓库 gitignored，**证据请勿删** |
 
 ## 7. 复现命令
 

@@ -71,7 +71,7 @@ __PERF__.captureFrame("cap256")
 
 ```cmd
 cd C:\Users\<你的用户名>\Downloads
-python D:\study\project\gsplat.js\tools\compare_images.py
+python D:\study\project\rendering\tools\compare_images.py
 ```
 
 预期输出形如：

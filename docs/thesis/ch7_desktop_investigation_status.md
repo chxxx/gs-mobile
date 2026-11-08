@@ -43,13 +43,13 @@
 
 | 类别 | 位置 |
 |---|---|
-| 结果数据 | `thesis_project/data/ch7_measurements/raw/`（+ `raw/paper_protocol/` 存档副本） |
-| 分析工具 | `gsplat.js/tools/ch7_*.py`（`ch7_band_timeline.py`、`ch7_clearprobe_fit.py`、`ch7_anchor_report.py`、`ch7_paper_protocol_run.py` …） |
-| 协议/文档 | `gsplat.js/docs/ch7_external_protocol_validation.md`（§8.10.4–§8.10.16）、`docs/ch7_offscreen_paper_protocol.md` |
-| 链接清单（可复跑） | `gsplat.js/_cfgscan2_links.txt`、`_foot_sweep_links.txt`、`_cull_res_links.txt`、`_clr_links.txt`、`_clr_rep_links.txt`、`_dvfs_links.txt`、`_pair_links.txt` |
-| **本轮临时文件** | `gsplat.js/_tmp_scratch/20260929_desktop/`（297 件：本轮所有诊断脚本/日志） |
-| 更早临时文件 | `gsplat.js/_tmp_scratch/older/` |
-| **保留（工具链引用，勿动）** | `gsplat.js/_tmp_ch7probe/`（`cdp.mjs` 等被 `tools/ch7_paper_protocol_run.py` 调用） |
+| 结果数据 | `thesis/data/ch7_measurements/raw/`（+ `raw/paper_protocol/` 存档副本） |
+| 分析工具 | `rendering/tools/ch7_*.py`（`ch7_band_timeline.py`、`ch7_clearprobe_fit.py`、`ch7_anchor_report.py`、`ch7_paper_protocol_run.py` …） |
+| 协议/文档 | `rendering/docs/ch7_external_protocol_validation.md`（§8.10.4–§8.10.16）、`docs/ch7_offscreen_paper_protocol.md` |
+| 链接清单（可复跑） | `rendering/_cfgscan2_links.txt`、`_foot_sweep_links.txt`、`_cull_res_links.txt`、`_clr_links.txt`、`_clr_rep_links.txt`、`_dvfs_links.txt`、`_pair_links.txt` |
+| **本轮临时文件** | `rendering/_tmp_scratch/20260929_desktop/`（297 件：本轮所有诊断脚本/日志） |
+| 更早临时文件 | `rendering/_tmp_scratch/older/` |
+| **保留（工具链引用，勿动）** | `rendering/_tmp_ch7probe/`（`cdp.mjs` 等被 `tools/ch7_paper_protocol_run.py` 调用） |
 
 ## 6. 代码改动清单（本轮，均通过 `tsc` / `vitest` / `vite build`）
 
@@ -773,7 +773,7 @@ Mismatch between texture format and sampler type (signed/unsigned/float/shadow).
 
 **由数据可算（事实）**：
 > ⚠ **【2026-10-04 撤销】"TF 生产一遍 ≈ 30.5 ms/帧"不再作为数据引用。** 它是**推导值**（`PRODUCE_ONLY` 帧时 52.9 ms − `BASE` 帧时 22.4 ms）。两条臂的原始记录确实存在
-> （`thesis_project/data/ch7_measurements/raw/stage0_20260930_190730.txt`，该文件同时含 `PRODUCE_ONLY/TF_FULL/CONSUME_ONLY`），但 ①"生产一遍 = 两者差值"是**推断**而非测量；
+> （`thesis/data/ch7_measurements/raw/stage0_20260930_190730.txt`，该文件同时含 `PRODUCE_ONLY/TF_FULL/CONSUME_ONLY`），但 ①"生产一遍 = 两者差值"是**推断**而非测量；
 > ②同页可加性检验给出 −6% 不符 ⇒ 该推断不成立。后续文档/论文只可引用**臂级帧时**（该批 BASE 22.4 ms / CONSUME_ONLY 10.5 ms），不得引用 30.5 ms。
 1. ~~**TF 生产一遍 ≈ 30.5 ms/帧**（52.9 − 22.4）~~ **⚠ 已撤销（见上方横幅）**，即"单独一遍即超过整帧 BASE（每点 ≈ 50 ns）"同样不予采用；
 2. **消费侧 ≈ 免费**（10.5 ms，比 BASE 少 12 ms，正是 SH 块被移除的量）；

@@ -7,7 +7,7 @@
 
 ## 表 1 · 协议 A：统一像素协议（`driver=timer`、无预热、`res_mode=forced` 1600×1063）
 
-> 来源：`thesis_project/data/ch7_measurements/out/aggregated.json`（既有产物）。
+> 来源：`thesis/data/ch7_measurements/out/aggregated.json`（既有产物）。
 > ⚠ 本文臂在该表内 **`fps_capped=true`**（帧率贴到驱动节奏上限）⇒ 按原表规则**不能用于算两臂倍数**。
 
 | 数据集 | 方法 | 场景数 | FPS↑ | First Frame↓(ms) | Storage↓(MB) |

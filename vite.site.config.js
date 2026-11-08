@@ -35,7 +35,7 @@ export default defineConfig(() => ({
         // 为什么构建产物也要有：手机经隧道访问时，跑 dev server（未打包、每轮重拉几百个模块）
         // 会让"一个场景一轮"拖到几分钟；改用构建产物（整站 10 文件 0.42MB）后固定开销降一个数量级。
         ch7ReportPlugin({
-            rawDir: resolvePath(dirname, "../thesis_project/data/ch7_measurements/raw"),
+            rawDir: resolvePath(dirname, "../thesis/data/ch7_measurements/raw"),
             token: process.env.CH7_REPORT_TOKEN || "ch7-2026-phase4",
             // [SIDEFRAME 2026-10-10] 与 dev server（vite.config.js, 64 MiB）对齐：`?framedump=1` 的
             //   1600×1063 无损 PNG base64 约 2–4 MB，4 MiB 上限会 413 拒收（既有事故记录）。

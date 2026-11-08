@@ -30,7 +30,7 @@
 **资产核对（每次重测前跑一次）**：
 
 ```cmd
-python gsplat.js\tools\inspect_ply_header.py gsplat.js\reduced-3dgs gsplat.js\scenes
+python rendering\tools\inspect_ply_header.py rendering\reduced-3dgs rendering\scenes
 ```
 
 ## 3. 互联网（部署站点）实测要怎么准备
@@ -54,7 +54,7 @@ python gsplat.js\tools\inspect_ply_header.py gsplat.js\reduced-3dgs gsplat.js\sc
 cd /d D:\study\project\Plasticity-Pruning-GS
 
 :: 1) 拉取 reduced-3DGS 资产（已存在且体积相符会自动跳过）
-python gsplat.js\tools\fetch_reduced3dgs_assets.py
+python rendering\tools\fetch_reduced3dgs_assets.py
 ::    只核对不下载：  ... --check
 ::    只拉部分场景：  ... --scenes bicycle,truck
 ::    顺手回写清单：  ... --update-manifest
@@ -95,7 +95,7 @@ npm run site:preview
 | `bench-camviews-flux.json` | `tools/align_flux_positions.py` | 把本文机位换算到 Flux 坐标系（**已废弃**：两套模型本来同坐标系） |
 | `bench-flux-camera-aligned.json` | `tools/align_flux_positions.py` | 把 Flux 相机对齐到本文坐标系（**已废弃**） |
 | `bench-resolutions.json` | `tools/make_bench_resolutions.py` | 逐场景原生分辨率表；**已废弃**（主表改用统一像素协议），仅作历史记录 |
-| `../thesis_project/data/ch7_measurements/**` | 结果卡片复制 + `tools/ch7_baseline_report.py` | 原始结果与报表（在论文仓库侧，已被主仓库 `.gitignore` 忽略） |
+| `../thesis/data/ch7_measurements/**` | 结果卡片复制 + `tools/ch7_baseline_report.py` | 原始结果与报表（在论文仓库侧，已被主仓库 `.gitignore` 忽略） |
 
 ### 3.1 协议输入资产（**已入库**：随提交分发，勿删）
 

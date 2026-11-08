@@ -8,15 +8,15 @@
     3) `server.allowedHosts` 已放行 `.trycloudflare.com`，隧道域名可直接访问。
 
   用法：
-    powershell -ExecutionPolicy Bypass -File gsplat.js\tools\ch7_serve.ps1 `
+    powershell -ExecutionPolicy Bypass -File rendering\tools\ch7_serve.ps1 `
         -Group main -Platform gen2-xweb -Name helper01 -Subset mip360
 
   ⚠ 隧道地址（https://xxxx.trycloudflare.com）**每次重启都会变**（quick tunnel 无账号、无固定域名）。
     重启后必须重新把链接发给所有协助测试者；旧链接立即失效。
 
   产物（不进 git）：
-    thesis_project/data/ch7_measurements/raw/_tunnel/tunnel.json  隧道状态（url/token/时间/锚定 commit）
-    gsplat.js/_tmp_ch7probe/out/tunnel_url.txt                    最近一次抓到的 URL
+    thesis/data/ch7_measurements/raw/_tunnel/tunnel.json  隧道状态（url/token/时间/锚定 commit）
+    rendering/_tmp_ch7probe/out/tunnel_url.txt                    最近一次抓到的 URL
 #>
 [CmdletBinding()]
 param(
@@ -42,7 +42,7 @@ try { $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::
 $GS = Split-Path $PSScriptRoot -Parent                      # ...\gsplat.js
 $ROOT = Split-Path $GS -Parent                              # ...\Plasticity-Pruning-GS
 $OUT = Join-Path $GS '_tmp_ch7probe\out'
-$TUN_DIR = Join-Path $ROOT 'thesis_project\data\ch7_measurements\raw\_tunnel'
+$TUN_DIR = Join-Path $ROOT 'thesis\data\ch7_measurements\raw\_tunnel'
 New-Item -ItemType Directory -Force -Path $OUT, $TUN_DIR | Out-Null
 if (-not $Token) { $Token = 'ch7-2026-phase4' }              # 与 vite.config.js 缺省值一致
 
@@ -83,7 +83,7 @@ if ($Stop) {
     }
     else { Log "端口 $Port 上没有监听进程（dev server 本来就没在跑）" }
     Log '服务已停。⚠ 对外发过的链接全部失效——记得告知协助者"本轮结束"。'
-    Log '要看结果：python gsplat.js\tools\ch7_batch.py status'
+    Log '要看结果：python rendering\tools\ch7_batch.py status'
     exit 0
 }
 
@@ -150,7 +150,7 @@ if (-not $NoTunnel) {
         $cmd = Get-Command cloudflared.exe -ErrorAction SilentlyContinue
         if ($cmd) { $exe = $cmd.Source }
         else {
-            Log '✗ 找不到 cloudflared.exe。期望 gsplat.js\_tmp_ch7probe\bin\cloudflared.exe 或已入 PATH。'
+            Log '✗ 找不到 cloudflared.exe。期望 rendering\_tmp_ch7probe\bin\cloudflared.exe 或已入 PATH。'
             Log '  安装：winget install --id Cloudflare.cloudflared （或下载单文件 exe 放到上述路径）'
             exit 2
         }

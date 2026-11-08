@@ -10,8 +10,8 @@
 | playroom | 7,688,586 B / MD5 `5FF62D1C…` | **4,568,586 B / MD5 `0BE17E5B…`** | **尺寸变小**（点数 190,000，旧副本约 32 万点） |
 
 - 源文件：`D:\study\output\benchmark_deep_blending_ours\{drjohnson,playroom}\point_cloud\iteration_30000\point_cloud_quantised_half_r7.ply`
-- 目标：`gsplat.js/scenes/point_cloud_quantised_half_r7-{drjohnson,playroom}.ply`（**已复制并校验 MD5 一致**）
-- 旧副本备份：`gsplat.js/_tmp_ch7probe/_backup_ply/`（本地，不入库）
+- 目标：`rendering/scenes/point_cloud_quantised_half_r7-{drjohnson,playroom}.ply`（**已复制并校验 MD5 一致**）
+- 旧副本备份：`rendering/_tmp_ch7probe/_backup_ply/`（本地，不入库）
 - 格式自检：`element vertex 432000 / 190000`，属性为 `short xyz + uchar f_dc_0..2 + f_rank_0..6 + opacity/scale/rot`，
   另有 `element codebook_centers 256` 与 `element sh_basis 7` ⇒ **与本渲染器的 `r7 QPLY` 读取路径一致**，无需改代码。
 - 场景清单/相机：`bench-scenes.json` 已有 `drjohnson`（`points:432000`）与 `playroom`（`db`）；`bench-cameras.json` 两场景均有条目 ⇒ 手机端 `cam=flux` 对位可用，**无需新增配置**。

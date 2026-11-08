@@ -32,7 +32,7 @@ param(
 $ErrorActionPreference = 'Continue'
 try { $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
 $root = Split-Path -Parent $PSScriptRoot                      # = gsplat.js
-$RAW = Join-Path (Split-Path $root -Parent) 'thesis_project\data\ch7_measurements\raw'
+$RAW = Join-Path (Split-Path $root -Parent) 'thesis\data\ch7_measurements\raw'
 $OUT = Join-Path $root '_tmp_ch7probe\out'
 New-Item -ItemType Directory -Force -Path $OUT | Out-Null
 $log = Join-Path $OUT 'b_layer.txt'

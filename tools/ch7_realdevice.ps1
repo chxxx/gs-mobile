@@ -19,7 +19,7 @@ ch7_realdevice.ps1 —— 一条命令搞定真机采数链路：确认 dev serv
       # 强制重启隧道/服务（隧道地址会变，旧链接立刻失效）
 
 产出：屏幕打印 4 条链接 + 写入 _links_all.txt + 复制进剪贴板 + 打印发给测试者的话术。
-回传落盘：thesis_project/data/ch7_measurements/raw/<name>_<时间戳>.txt（`/__ch7/report`，dev 与 preview 同一实现）
+回传落盘：thesis/data/ch7_measurements/raw/<name>_<时间戳>.txt（`/__ch7/report`，dev 与 preview 同一实现）
 换协议/换轮次：改 _links_all.txt 里对应那条链接的参数即可（协议参数全部显式写在 URL 里）。
 #>
 param(
@@ -225,8 +225,8 @@ Say "  打不开就是隧道在重启或网络挡了，告诉我，我重发。"
 Say ""
 Say "[4/5] 盯进度：  python tools\ch7_batch.py status"
 Say "[5/5] 收数出表："
-Say "  copy ..\thesis_project\data\ch7_measurements\raw\${Name}_*.txt ..\thesis_project\data\ch7_measurements\raw\paper_protocol_mobile\"
-Say "  python tools\ch7_paper_protocol_report.py --raw-dir ..\thesis_project\data\ch7_measurements\raw\paper_protocol_mobile --out-dir ..\thesis_project\data\ch7_measurements\paper_protocol\mobile"
+Say "  copy ..\thesis\data\ch7_measurements\raw\${Name}_*.txt ..\thesis\data\ch7_measurements\raw\paper_protocol_mobile\"
+Say "  python tools\ch7_paper_protocol_report.py --raw-dir ..\thesis\data\ch7_measurements\raw\paper_protocol_mobile --out-dir ..\thesis\data\ch7_measurements\paper_protocol\mobile"
 Say ""
 Say "提示：先只发 ①④ 两条做手机连通性验收（更省时间）；验收通过再发全部 4 条。"
 Say "     只想快速验收链路：  -Rounds 1 -Subset garden"

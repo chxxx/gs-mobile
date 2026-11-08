@@ -20,14 +20,14 @@ const throttleSpeedMbps = process.env.THROTTLE_SPEED ? parseFloat(process.env.TH
  * （见 bench.ts / bench-flux.ts 里 submitReport 的失败分支）。
  *
  * 协议：POST /__ch7/report?name=<测试者标识>&token=<回传口令>，请求体 = 页面的 [RESULT]…[END] 纯文本，
- * 原样落盘到 thesis_project/data/ch7_measurements/raw/<name>_YYYYMMDD_HHmmss.txt
+ * 原样落盘到 thesis/data/ch7_measurements/raw/<name>_YYYYMMDD_HHmmss.txt
  *   - `token` 必须等于 CH7_REPORT_TOKEN（不回显收到的值）；缺失/不符 → 403、不写盘；
  *   - name 只保留 [A-Za-z0-9._-]，去掉前导 '.'，避免路径穿越；
  *   - 时间戳到秒 + 重名自动加序号：多个测试者（或同名测试者重复交）不会互相覆盖；
  *   - **先写 `<目标名>.txt.part` 再 rename**：报表脚本扫 raw/ 时永远不会读到"写了一半"的文件
  *     （`.part` 不匹配 `*.txt`，即使脚本正在扫描也只是看不到这个尚未完成的文件）。
  */
-const CH7_RAW_DIR = resolve(__dirname, '../thesis_project/data/ch7_measurements/raw');
+const CH7_RAW_DIR = resolve(__dirname, '../thesis/data/ch7_measurements/raw');
 /**
  * 单次回传体上限。历史值是 4 MiB，理由是"结果文本正常只有几十 KB"——但那条假设在
  * `?framedump=1`（取图口径）下**不成立**：每场景每轮会内嵌一张整幅无损 PNG data URL
@@ -73,7 +73,7 @@ function ch7ReportPlugin() {
  *   - 同时落盘到 raw/_probe/ply_requests.log，方便真机测试失败后离线回溯（stdout 会随终端滚掉）。
  * 只在 `npm run dev` 下存在；不影响 build 产物，也不改变任何请求行为（仅挂 res 事件）。
  */
-const CH7_PLY_LOG = resolve(__dirname, '../thesis_project/data/ch7_measurements/raw/_probe/ply_requests.log');
+const CH7_PLY_LOG = resolve(__dirname, '../thesis/data/ch7_measurements/raw/_probe/ply_requests.log');
 function ch7PlyLogPlugin() {
   return {
     name: 'configure-ch7-ply-log',

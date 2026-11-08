@@ -1,6 +1,6 @@
 # 第 7 章 · 下阶段方案输入（F0 收口总结）
 
-> 生成：2026-10-03。数据源：`thesis_project/data/ch7_measurements/raw/*.txt`（自动生成总表
+> 生成：2026-10-03。数据源：`thesis/data/ch7_measurements/raw/*.txt`（自动生成总表
 > `_tmp_ch7probe/out/f0_table.md`、`out/f0_analysis.md`、`out/fps_hist.csv`）。
 > 本文件只做"证据 → 机制 → 方案候选"的转换，供下一阶段设计使用。
 

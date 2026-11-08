@@ -29,7 +29,7 @@ for _s in (sys.stdout, sys.stderr):
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 GS_REPO = os.path.dirname(TOOLS_DIR)
 PROJECT_ROOT = os.path.dirname(GS_REPO)
-RAW_DEFAULT = os.path.join(PROJECT_ROOT, "thesis_project", "data", "ch7_measurements", "raw")
+RAW_DEFAULT = os.path.join(PROJECT_ROOT, "thesis", "data", "ch7_measurements", "raw")
 
 TAG = re.compile(r"CLR((?:\d+x\d+:[0-9.]+,?){1,})CLRrb")
 

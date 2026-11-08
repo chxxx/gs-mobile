@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
-const dir = path.resolve(here, "../../thesis_project/data/ch7_measurements/raw");
+const dir = path.resolve(here, "../../thesis/data/ch7_measurements/raw");
 
 const recs = [];
 for (const f of fs.readdirSync(dir).filter((x) => x.startsWith("full-") && x.endsWith(".txt")).sort()) {

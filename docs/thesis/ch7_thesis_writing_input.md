@@ -3,7 +3,7 @@
 
 # 第 7 章定稿输入报告（论文写作提示词 + 定稿数据）
 
-> 用途：把本文件作为**输入**喂给撰写/改稿流程，用于把 `thesis_project/thesis.md` 的第 7 章（及摘要、1.4、7.11、8.3）**改到与最终实测数据一致**。
+> 用途：把本文件作为**输入**喂给撰写/改稿流程，用于把 `thesis/thesis.md` 的第 7 章（及摘要、1.4、7.11、8.3）**改到与最终实测数据一致**。
 > 生成：2026-10-07。全部数字已逐格溯源（见 §6 证据链）。
 
 ---
@@ -171,13 +171,13 @@
 ## 5. 写作提示词（可直接复制给撰写模型）
 
 ```
-【角色】你是本论文的作者，任务是把 thesis_project/thesis.md 的第 7 章（以及摘要、1.4、7.11、8.3）
+【角色】你是本论文的作者，任务是把 thesis/thesis.md 的第 7 章（以及摘要、1.4、7.11、8.3）
 改到与"最终实测数据"完全一致。不要新增实测，不要编造数字，不要改方法章（第 3~6 章）。
 
 【输入】
-1) thesis_project/thesis.md（现有正文）
-2) gsplat.js/docs/ch7_thesis_writing_input.md（本文件：修改清单 + 定稿数据 + 表注模板）
-3) gsplat.js/docs/ch7_paper_tables.md（表 7-A~7-H 及逐格溯源）
+1) thesis/thesis.md（现有正文）
+2) rendering/docs/ch7_thesis_writing_input.md（本文件：修改清单 + 定稿数据 + 表注模板）
+3) rendering/docs/ch7_paper_tables.md（表 7-A~7-H 及逐格溯源）
 
 【硬约束】
 - 体积一律 bytes÷10^6、两位小数，表注写明进制；禁止 MiB 与 MB 混用。
@@ -214,11 +214,11 @@ T7 8.3 局限：补三条——① 论文未披露分辨率导致的不可比边
 
 | 内容 | 位置 |
 |---|---|
-| 原始手机记录（两臂） | `thesis_project/data/ch7_measurements/raw/helper01{c1,c2b,c3b,f1,f2b,f3b,f2,f3,f3b,...}*.txt` |
-| 论文摘录（Table 1/2/3、C.4 的 6/7/8/9、§5.1 协议原文） | `gsplat.js/_tmp_ch7probe/{fp_t1.txt, fp_t2.txt, fp_res.txt, fp_perscene.txt}` |
+| 原始手机记录（两臂） | `thesis/data/ch7_measurements/raw/helper01{c1,c2b,c3b,f1,f2b,f3b,f2,f3,f3b,...}*.txt` |
+| 论文摘录（Table 1/2/3、C.4 的 6/7/8/9、§5.1 协议原文） | `rendering/_tmp_ch7probe/{fp_t1.txt, fp_t2.txt, fp_res.txt, fp_perscene.txt}` |
 | 抽取结果（逐场景点数/字节/FPS/首帧） | `_tmp_ch7probe/{latest_ab.csv, phone_by_scene.csv, flux_npts.txt}` |
 | 可复现脚本 | `_tmp_ch7probe/{extract_latest.mjs, extract_phone.mjs}` |
-| 表格与溯源 | `gsplat.js/docs/{ch7_paper_tables.md, ch7_gen3_data_summary.md, ch7_dataset_averages.md, ch7_session_summary.md}` |
+| 表格与溯源 | `rendering/docs/{ch7_paper_tables.md, ch7_gen3_data_summary.md, ch7_dataset_averages.md, ch7_session_summary.md}` |
 
 **仍缺（不影响定稿，需在局限中声明）**
 

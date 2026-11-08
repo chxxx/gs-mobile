@@ -11,7 +11,7 @@
 
 
 
-> 原始记录：`thesis_project/data/ch7_measurements/raw/helper01e{1,2,3}_20261008_*.txt`
+> 原始记录：`thesis/data/ch7_measurements/raw/helper01e{1,2,3}_20261008_*.txt`
 > 协议：`benchmode=offscreen-paper-match`、`res=1600x1063&res_mode=forced&dpr=1`、`frames=20/run`、
 > `warmup=20`、`runs=5`、`fences=3`、`sync=gputimer`、`rounds=3`、`cold=1`；全部 `ok=3/3`。
 
@@ -78,7 +78,7 @@
 | ⑤ | 天玑 9400 · 13 场景（替换本批 ③） | `helper01g3-d9400-xweb-main` |
 | ⑥ | 骁龙 8 Gen 3 · reduced-3DGS 5 场景（与 ② 的 base 结果对照） | `helper01g2-gen3-xweb-reduced3dgs` |
 
-完整 URL 见 `gsplat.js/_tmp_ch7probe/out/LINKS_ALL.txt`。
+完整 URL 见 `rendering/_tmp_ch7probe/out/LINKS_ALL.txt`。
 
 ## 6. ⚠ 公平性核对：② 的 reduced-3DGS 对照**不可用于比较**（2026-10-08 追加）
 
@@ -109,7 +109,7 @@ fx=1159.588、stage=fit1、fade=none、spin=0、cold=1、rounds=3、同设备同
 以及 **reduced 资产是在本文渲染器内渲染**（其 WebGL 实现未接入）⇒ 只能表述为"同渲染器、跨模型/跨格式对照"，
 不可表述为"reduced-3DGS 系统的帧率"。另：两臂均为 base 配置，非本文部署配置。
 
-修正链接（⑦⑧⑨，两臂都 `cam=auto`）另见 `gsplat.js/_tmp_ch7probe/out/LINKS_ALL.txt`。
+修正链接（⑦⑧⑨，两臂都 `cam=auto`）另见 `rendering/_tmp_ch7probe/out/LINKS_ALL.txt`。
 
 ## 7. 配置口径定案：两臂都用**本文部署开关**（2026-10-08 追加，修正 §6 的 ⑦/⑧）
 
@@ -120,7 +120,7 @@ fx=1159.588、stage=fit1、fade=none、spin=0、cold=1、rounds=3、同设备同
 `shcache=frag`（SHCACHE 方案 B：SH 求值移入全屏片元遍 + 颜色缓存纹理）、`lr=1`（低秩渲染期路径）；
 四者均带**运行期自证**（不成立则显式失败、该轮作废，不允许静默错标）。
 
-**定案口径**（最终以 `gsplat.js/_tmp_ch7probe/out/LINKS_FINAL.md` 为准，v2）：
+**定案口径**（最终以 `rendering/_tmp_ch7probe/out/LINKS_FINAL.md` 为准，v2）：
 **原则 = 每臂各跑自己实现的路径。**
 本文臂 = 部署配置（`shcache=frag&lr=1&notx=1&nocolortx=1`，与表 7-2/7-8 同口径）；
 reduced-3DGS 臂 = **基线路径（四个开关全关，即 `arm=base`）**。
@@ -228,7 +228,7 @@ reduced-3DGS 臂 = **基线路径（四个开关全关，即 `arm=base`）**。
 | `raw/fd_ours_*`、`fd_spin*`（本机 auto 取图） | 画幅公平性核验 | **作废**（改用 §8.4 的 flux 对照） |
 | 本文件 §6「用 `covered%` 做可比性核对」 | 判据 | **失效**：clipped 的场景反而报 `covered=100%`（见 §8.2 表） |
 
-✔ 已 grep 核对：`thesis_project` 的表与 `docs/ch7_paper_tables.md` 均**未引用**这些记录。
+✔ 已 grep 核对：`thesis` 的表与 `docs/ch7_paper_tables.md` 均**未引用**这些记录。
 
 ### 8.7 顺带纠正："base 比部署臂快"同样是这批坏数据的产物
 
@@ -296,7 +296,7 @@ Flux-GS 官方渲染器用 `znear=0.2 / zfar=200`（`flux-gs-project-gh-pages/re
 
 本机隧道与 dev server 会随终端关闭而消失（quick tunnel 地址每次重启都会变）。现成脚本：
 
-- `gsplat.js\_tmp_ch7probe\ch7_boot3.cmd` → 起 `npm run dev -- --host` + `cloudflared tunnel --url http://localhost:5173`，
+- `rendering\_tmp_ch7probe\ch7_boot3.cmd` → 起 `npm run dev -- --host` + `cloudflared tunnel --url http://localhost:5173`，
   抓取新地址写 `out\_cf_url.txt`、自测 `/bench.html`+两个清单+reduced PLY、
   **并按当前地址生成完整 B 组链接** `out\LINKS_B_GEN2_D9400.md`，最后进入 keep-alive 保活。
 - 触发方式（脱离终端，避免被回收）：`schtasks /run /tn ch7boot3`（任务已注册）。
@@ -314,7 +314,7 @@ reduced「画得更少」⇒ 它的 fps 带正偏。**同一相机数值 ≠ 相
 
 **做法（任务书预定的回退路径）**：仓库内**不存在**训练相机文件（`cameras.json` / `images.txt` / `transforms.json`
 全盘搜索为空）⇒ 用两侧**高斯中心点云**做配准，求出 `x_reduced = ψ(x_ours)`，再把**本文臂 flux 相机**搬进 reduced 坐标系；
-本文臂机位一字未动。生成器 `gsplat.js/_tmp_ch7probe/sim3.mjs` → 资产 `gsplat.js/bench-aligned-poses.json`（站点根目录），
+本文臂机位一字未动。生成器 `rendering/_tmp_ch7probe/sim3.mjs` → 资产 `rendering/bench-aligned-poses.json`（站点根目录），
 残差报告 `_tmp_ch7probe/out/sim3_report.txt`。
 
 踩到的五个坑（代码里都有注释，避免下次重犯）：

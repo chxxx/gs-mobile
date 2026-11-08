@@ -1,6 +1,6 @@
 # Flux-GS 官方 WebGL 渲染器：颜色是否每帧随视角求值（只读核查）
 
-> 核查时间：2026-10-01。核查对象：`gsplat.js/flux-gs-project-gh-pages/render_shared/main.js`
+> 核查时间：2026-10-01。核查对象：`rendering/flux-gs-project-gh-pages/render_shared/main.js`
 > （108,022 B；`render_<scene>/main.js` 仅 **62 B** 的引导文件 ⇒ 13 个场景页共用同一份渲染器）。
 > 方法：只读源码，未改任何路径。所有行号均为该文件内行号。
 

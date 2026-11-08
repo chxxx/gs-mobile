@@ -2743,7 +2743,7 @@ export function restartPageUrl(withDocRetry: boolean): string {
  * 改成"先把整个文档换成中转页（本页文档连同它的上下文一起被销毁）→ 在中转页里停 delay 毫秒
  * （此期间渲染进程里零上下文）→ 再进下一项"，就把"销毁旧上下文"和"创建新上下文"确定性地分开了。
  * （2026-09-13 的那次修复走的就是这条：`renderer.dispose()` → 中转页 → 回测帧页。
- *   见 thesis_project/第七章对比方法实测方案_reduced-3DGS与Flux-GS.md「轮间释放两臂同构」。）
+ *   见 thesis/第七章对比方法实测方案_reduced-3DGS与Flux-GS.md「轮间释放两臂同构」。）
  *
  * `?hop=0` 关掉中转页（退回旧的"本页 sleep 后直接 `location.replace`"口径，仅用于 A/B 对照）；
  * `?hopms=N` 改停留时长（默认 1500，上限 5000，`0` 等价于关闭）。

@@ -32,7 +32,7 @@
  * 外部测试者（自动回传，2026-09-17 追加）：与 bench.html 同构 ——
  *   `&report=<url>&rtok=<口令>` → 测完自动把 [RESULT] 文本 POST 到 `<url>?token=<口令>`，
  *   测试者只需"打开链接 → 等 → 关页面"；接收端 = vite dev server 的 /__ch7/report 中间件
- *   （见 vite.config.js），落盘到 thesis_project/data/ch7_measurements/raw/。
+ *   （见 vite.config.js），落盘到 thesis/data/ch7_measurements/raw/。
  */
 import { guessChip as guessChipFrom } from "./bench-chip";
 import {

@@ -4,10 +4,10 @@
 两个子命令：
 
   # 1) 生成/刷新资产登记（协议 §4.3）。会同时写工作副本与入库镜像（docs/ 下）
-  python gsplat.js/tools/ch7_verify.py manifest
+  python rendering/tools/ch7_verify.py manifest
 
   # 2) 校验原始数据是否齐全、字段是否完整、资产是否对得上（协议 §4.2 / §6）
-  python gsplat.js/tools/ch7_verify.py verify --write-index
+  python rendering/tools/ch7_verify.py verify --write-index
 
 期望文件数（协议 §4.2，核心合计 393）：
   main：13 场景 × 5 平台 × 3 轮 = 195（gen2 双内核各一组：gen2-xweb / gen2-chrome）
@@ -178,7 +178,7 @@ def cmd_verify(args):
     lookup = C.read_manifest(args.manifest)
     if not lookup:
         print("✗ 资产登记为空或不存在：%s" % args.manifest)
-        print("  先跑：python gsplat.js/tools/ch7_verify.py manifest")
+        print("  先跑：python rendering/tools/ch7_verify.py manifest")
         return 2
     groups = [g for g in args.groups.split(",") if g]
     platforms = [p for p in args.platforms.split(",") if p]

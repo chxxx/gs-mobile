@@ -3,7 +3,7 @@
 
 # 已有 Flux 记录 · 首帧/加载字段只读核对（v2，按臂标识判定）
 
-> 只读：**未新增任何测量**，数值全部来自 `thesis_project/data/ch7_measurements/raw/**` 已有记录。
+> 只读：**未新增任何测量**，数值全部来自 `thesis/data/ch7_measurements/raw/**` 已有记录。
 > 臂判定只看 `u=`/逐轮 `arm=`/`engine=` 是否含 `flux`（v1 的全文匹配被 `pose_src=flux` 污染，作废）。
 
 命中 Flux 记录文件 = **107**，逐轮行 = **311**（真机 208 行 / 桌面 103 行）。

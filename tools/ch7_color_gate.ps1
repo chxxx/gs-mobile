@@ -7,7 +7,7 @@
 #   `res=320x213`（0.068 MP）⇒ 单臂 body 仅 0.26 MB，两臂都能落盘；而"全幅、逐像素、无损"
 #   这三条性质一个不少（SH 数学与分辨率无关，闸门结论不受影响）。
 #   注：canvas 尺寸**等于**标称 `res`（`dpr=1&res_mode=forced`；此前"canvas 是 res 的 2.5 倍"的说法已作废）。
-#   产出：`thesis_project/data/ch7_measurements/raw/colorgate_*.txt`（两份），解析交给 Python。
+#   产出：`thesis/data/ch7_measurements/raw/colorgate_*.txt`（两份），解析交给 Python。
 param([string[]]$Cases = @("base", "frag"), [int]$SleepSec = 45)
 # [O1 2026-10-02] 参数化 case 列表（缺省 = base,frag ⇒ 原行为逐字不变）：
 #   powershell -Command "& 'tools\ch7_color_gate.ps1' -Cases base,frag,fragntx,fragboth"

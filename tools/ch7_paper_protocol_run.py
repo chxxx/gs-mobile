@@ -13,7 +13,7 @@
     python tools/ch7_paper_protocol_run.py --yes --scenes garden --arms ours --modes offscreen-paper-match
     python tools/ch7_paper_protocol_run.py --yes --rounds 3     # 正式采集轮次（协议要求 3 轮）
 
-产物：`thesis_project/data/ch7_measurements/raw/paper_protocol/<arm>_<mode>_<ts>.txt`（结果文本原文），
+产物：`thesis/data/ch7_measurements/raw/paper_protocol/<arm>_<mode>_<ts>.txt`（结果文本原文），
 随后跑 `python tools/ch7_paper_protocol_report.py --raw-dir .../raw/paper_protocol` 出对比表。
 """
 
@@ -35,7 +35,7 @@ TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 GS_REPO = os.path.dirname(TOOLS_DIR)
 PROJECT_ROOT = os.path.dirname(GS_REPO)
 CDP_DRIVER = os.path.join(GS_REPO, "_tmp_ch7probe", "cdp.mjs")
-RAW_DIR = os.path.join(PROJECT_ROOT, "thesis_project", "data", "ch7_measurements", "raw", "paper_protocol")
+RAW_DIR = os.path.join(PROJECT_ROOT, "thesis", "data", "ch7_measurements", "raw", "paper_protocol")
 TMP_DIR = os.path.join(GS_REPO, "_tmp_ch7probe", "out", "paper_protocol")
 
 MODE_ONSCREEN = "onscreen-realworld"
@@ -414,7 +414,7 @@ def main():
         print("已落盘 %d 份结果文本：%s" % (len(made), RAW_DIR))
         print("出对比表：")
         print("  python tools/ch7_paper_protocol_report.py --raw-dir \"%s\" --out-dir \"%s\""
-              % (RAW_DIR, os.path.join(PROJECT_ROOT, "thesis_project", "data", "ch7_measurements",
+              % (RAW_DIR, os.path.join(PROJECT_ROOT, "thesis", "data", "ch7_measurements",
                                        "paper_protocol")))
     return 0
 

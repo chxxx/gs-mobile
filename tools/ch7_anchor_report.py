@@ -31,7 +31,7 @@ for _s in (sys.stdout, sys.stderr):
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 GS_REPO = os.path.dirname(TOOLS_DIR)
 PROJECT_ROOT = os.path.dirname(GS_REPO)
-RAW_DEFAULT = os.path.join(PROJECT_ROOT, "thesis_project", "data", "ch7_measurements", "raw", "paper_protocol")
+RAW_DEFAULT = os.path.join(PROJECT_ROOT, "thesis", "data", "ch7_measurements", "raw", "paper_protocol")
 
 RATIO_TOLERANCE = 0.30   # 两锚点倍数相差 < 30% ⇒ 分辨率不是主导因素（用户给定口径）
 PAPER_ALIGNED_POLICIES = ("batch_submit_drain_at_run_end",)

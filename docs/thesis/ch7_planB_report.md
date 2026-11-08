@@ -52,7 +52,7 @@
 
 误差分布（均值 0.058 级、68160 像素里仅 1 个 >4 级、无 >8 级）正是 **RGBA16F 半精度量化**的签名；
 若是索引/阶数/截断写错，必出现结构化大面积差异 ⇒ **判定：颜色正确，闸门关闭**。
-产物：`gsplat.js/_tmp_ch7probe/out/cg_base.png` / `cg_frag.png`（可人眼看）。
+产物：`rendering/_tmp_ch7probe/out/cg_base.png` / `cg_frag.png`（可人眼看）。
 
 ## 4. 机制账本（可写进论文的关键数字）
 
@@ -109,7 +109,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\ch7_color_gate.ps1
 python tools\ch7_color_gate_compare.py
 ```
 
-- 原始报告：`thesis_project/data/ch7_measurements/raw/fr_*.txt`（真机）、`colorgate_*.txt`（颜色闸门）。
+- 原始报告：`thesis/data/ch7_measurements/raw/fr_*.txt`（真机）、`colorgate_*.txt`（颜色闸门）。
 - 结论文档：`docs/ch7_desktop_investigation_status.md` §30（4 个缺陷 + `covered` 漏洞）、§31（真机表 + 机制）、
   §32（颜色闸门 + spin=0.2 + 回传链路两缺陷）。
 - 实现：`src/renderers/webgl/programs/RenderProgram.ts`（`SHCACHE_*`、`buildShCacheFragmentSource`、

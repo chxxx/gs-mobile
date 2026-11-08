@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""按 URL 拉取 reduced-3DGS 量化模型到 `gsplat.js/reduced-3dgs/`（这些 .ply 不入库）。
+"""按 URL 拉取 reduced-3DGS 量化模型到 `rendering/reduced-3dgs/`（这些 .ply 不入库）。
 
-链接表：`gsplat.js/reduced-3dgs-urls.json`（可编辑）
+链接表：`rendering/reduced-3dgs-urls.json`（可编辑）
   - `overrides[scene]`：该场景的直链；留空则回退到 `default_pattern`（`{scene}` 会被替换）
   - 官方已确认可用：bicycle / bonsai / counter / kitchen（其余场景的链接请自行补进 overrides）
 
 用法：
-    python gsplat.js/tools/fetch_reduced3dgs_assets.py                 # 拉取缺失的场景（已存在且体积相符则跳过）
-    python gsplat.js/tools/fetch_reduced3dgs_assets.py --check         # 只核对本地文件，不下载
-    python gsplat.js/tools/fetch_reduced3dgs_assets.py --scenes bicycle,truck
-    python gsplat.js/tools/fetch_reduced3dgs_assets.py --update-manifest   # 下载后把点数/体积写回 baseline-scenes.json
+    python rendering/tools/fetch_reduced3dgs_assets.py                 # 拉取缺失的场景（已存在且体积相符则跳过）
+    python rendering/tools/fetch_reduced3dgs_assets.py --check         # 只核对本地文件，不下载
+    python rendering/tools/fetch_reduced3dgs_assets.py --scenes bicycle,truck
+    python rendering/tools/fetch_reduced3dgs_assets.py --update-manifest   # 下载后把点数/体积写回 baseline-scenes.json
 
 说明：浏览器测帧要求"页面与模型同源"，所以**不要**在清单里直接写外链；
 本脚本负责把文件拉到本地，`vite.site.config.js` 在构建时把 `reduced-3dgs/` 复制进 site-dist，

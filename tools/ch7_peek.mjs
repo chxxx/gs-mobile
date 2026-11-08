@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
-const dir = path.resolve(here, "../../thesis_project/data/ch7_measurements/raw");
+const dir = path.resolve(here, "../../thesis/data/ch7_measurements/raw");
 const prefix = process.argv[2] || "rerun_";
 const n = parseInt(process.argv[3] || "4", 10);
 

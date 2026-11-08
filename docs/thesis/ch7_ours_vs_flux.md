@@ -5,7 +5,7 @@
 
 > 生成：2026-10-01。左边=`gsplat.js`（本文，`src/renderers/webgl/programs/RenderProgram.ts` 等），
 > 右边=`flux-gs-project-gh-pages/render_shared/main.js`（Flux-GS 官方 WebGL 渲染器，108 KB；13 个场景页共用）。
-> 同会话实测取自 `thesis_project/data/ch7_measurements/raw/`：
+> 同会话实测取自 `thesis/data/ch7_measurements/raw/`：
 > `g3_20261001_162706.txt`（本文 `arm=lr-frozen`）与 `g3_20261001_163043.txt`（`engine=fluxgs`）——
 > 同一台 **Snapdragon 8 Gen 3 / Adreno 750（微信 XWEB）**、同一 `pose_src=flux`、同 `res=1600x1063`、garden 610k vs 739k 点。
 

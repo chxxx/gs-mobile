@@ -1,4 +1,4 @@
-"""从 Flux-GS 官方渲染器源码里抽出它的相机，生成 `gsplat.js/bench-flux-camera.json`。
+"""从 Flux-GS 官方渲染器源码里抽出它的相机，生成 `rendering/bench-flux-camera.json`。
 
 用途：让本文方法 / reduced-3DGS **用 Flux-GS 原来代码里的相机**测帧（三方完全同角度）。
 抽出两类：
@@ -6,7 +6,7 @@
   2. `default_view`：`defaultViewMatrix`（未交互时的原始视角，13 个场景共用），由视图矩阵反解出 (位置, 旋转)。
 
 用法：
-    python gsplat.js/tools/extract_flux_camera.py
+    python rendering/tools/extract_flux_camera.py
 """
 import io
 import json

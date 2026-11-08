@@ -1,7 +1,7 @@
 """[O1 2026-10-02] Color-gate comparator for ALL arms (ASCII-only, safe on GBK consoles).
 
 Reads the reports dumped by `?framedump=1` (lossless PNG, base pose) from
-thesis_project/data/ch7_measurements/raw/<CG_NAME>_*.txt, keeps the NEWEST report per `u=` key,
+thesis/data/ch7_measurements/raw/<CG_NAME>_*.txt, keeps the NEWEST report per `u=` key,
 and diffs every non-base arm against BASE pixel by pixel:
   mean/max error (8-bit levels), counts of pixels whose max-channel diff > 0/1/2/4/8/16,
   PSNR[RGB], SSIM (if scikit-image is installed).
@@ -30,7 +30,7 @@ import numpy as np
 from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RAW = os.path.abspath(os.path.join(HERE, "..", "..", "thesis_project", "data", "ch7_measurements", "raw"))
+RAW = os.path.abspath(os.path.join(HERE, "..", "..", "thesis", "data", "ch7_measurements", "raw"))
 PREFIX = os.environ.get("CG_NAME", "colorgate")
 
 

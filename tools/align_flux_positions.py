@@ -7,15 +7,15 @@
 
 输入：
   1) Flux-GS 解码出来的世界坐标：bench-flux.html?dump=1 下载的 `xyz-<scene>.bin`（Float32 LE, N×3）
-  2) 本文同场景的 r7 低秩 QPLY（gsplat.js/scenes/point_cloud_quantised_half_r7-<scene>.ply）
+  2) 本文同场景的 r7 低秩 QPLY（rendering/scenes/point_cloud_quantised_half_r7-<scene>.ply）
 输出：
-  gsplat.js/bench-flux-camera-aligned.json —— 与 bench-flux-camera.json 同结构，但所有视图矩阵
+  rendering/bench-flux-camera-aligned.json —— 与 bench-flux-camera.json 同结构，但所有视图矩阵
   已换算到本文坐标系。bench 页会优先加载它，于是 `cam=flux` / `cam=fluxcam:N` 三方同机位立刻成立。
 
 做法：稳健分位盒估计缩放+平移，PCA 估主轴并搜索 8 种符号组合，用最近邻距离选最优；再代入 V' = V·S。
 
 用法：
-    python gsplat.js/tools/align_flux_positions.py --scene garden --flux-bin D:/tmp/xyz-garden.bin
+    python rendering/tools/align_flux_positions.py --scene garden --flux-bin D:/tmp/xyz-garden.bin
 """
 import argparse
 import io

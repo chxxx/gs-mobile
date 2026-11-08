@@ -10,7 +10,7 @@
 
 | 表 | 数据来源 |
 | --- | --- |
-| 表 7-A（性能） | `thesis_project/data/ch7_measurements/raw/helper01c1/c2/c3(224140)`（本文臂）与 `helper01f1/f2/f3`（Flux 臂） |
+| 表 7-A（性能） | `thesis/data/ch7_measurements/raw/helper01c1/c2/c3(224140)`（本文臂）与 `helper01f1/f2/f3`（Flux 臂） |
 | 表 7-B（质量，mip360） | `D:\study\output\ch7_system\_aggregated_results\table7_1.txt`（完整方法块） |
 | 表 7-B（质量，T&T） | `D:\study\output\benchmark_tanks_temples_ours\_aggregated_results\all_metrics_latest.txt` |
 | 表 7-B（质量，DB） | `D:\study\output\benchmark_deep_blending_ours\_aggregated_results\all_metrics_latest.txt` |

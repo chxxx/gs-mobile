@@ -4,7 +4,7 @@
 # 第 7 章 · 消融：`u_colorTransforms` / `u_colorTransformIndices` 是否值得删除
 
 > 生成：2026-10-10。代码：`src/renderers/webgl/programs/RenderProgram.ts` / `ShaderProgram.ts`（本轮新增，默认关）。
-> 证据：`thesis_project/data/ch7_measurements/raw/stripct_20261010_*.txt`（真机 Adreno 740）。
+> 证据：`thesis/data/ch7_measurements/raw/stripct_20261010_*.txt`（真机 Adreno 740）。
 
 ---
 
@@ -255,8 +255,8 @@
 | `tools/ch7_strip_ct_analyze.mjs` | 抽取**真实**模板 + 复用 `sliceShaderSource` 语义 + 宏展开后统计"声明/采样" |
 | `_tmp_ch7probe/strip_ct_links_min.mjs` | 生成最少一组 A/B/C 链接（`rounds=3`） |
 | `_tmp_ch7probe/parse_stripct.mjs` / `parse_stripct_detail.mjs` / `parse_stripct_band.mjs` | 解析回传 txt → 表格/逐轮细节/频段标签 |
-| `thesis_project/data/ch7_measurements/raw/stripct_20261010_1410*.txt`（4 个） | 真机原始证据（A/B/C/deploy-C） |
-| `gsplat.js/_strip_ct_analyze.out` | 静态矩阵输出 |
+| `thesis/data/ch7_measurements/raw/stripct_20261010_1410*.txt`（4 个） | 真机原始证据（A/B/C/deploy-C） |
+| `rendering/_strip_ct_analyze.out` | 静态矩阵输出 |
 | `_tmp_ch7probe/out/strip_ct_links_min.txt` | 本轮链接清单 |
 
 ---
@@ -264,8 +264,8 @@
 ## 附录 A. 对账：P0 批次 2「本文臂 FINAL vs Flux 臂」这一对是否公平
 
 证据文件（同一台 Gen3、同会话，相隔 3 分 45 秒）：
-`thesis_project/data/ch7_measurements/raw/helper01c2_20261007_130358.txt`（本文臂）
-`thesis_project/data/ch7_measurements/raw/helper01f2_20261007_130743.txt`（Flux 臂）
+`thesis/data/ch7_measurements/raw/helper01c2_20261007_130358.txt`（本文臂）
+`thesis/data/ch7_measurements/raw/helper01f2_20261007_130743.txt`（Flux 臂）
 
 | # | 维度 | 本文臂（`bench.html`） | Flux 臂（`bench-flux.html`） | 判定 |
 |---|---|---|---|---|

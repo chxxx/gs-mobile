@@ -18,7 +18,7 @@
 
 **一条命令**：
 ```cmd
-cd /d D:\study\project\Plasticity-Pruning-GS\gsplat.js
+cd /d D:\study\project\Plasticity-Pruning-GS\rendering
 node tools\ch7_gate_records.mjs 30
 ```
 输出分三档：`合格` / `legacy`（2026-10-11 前，字段未引入，只保证输出与黑名单检查）/ `不合格`（**必须重跑或标注**）。
@@ -86,9 +86,9 @@ node tools\ch7_gate_records.mjs 30
 
 
 ```cmd
-cd /d D:\study\project\Plasticity-Pruning-GS\gsplat.js\_tmp_ch7probe
+cd /d D:\study\project\Plasticity-Pruning-GS\rendering\_tmp_ch7probe
 node sideflux_latest.mjs 10     & rem 关键字段速览（ink/TW/cpu/b64/fps）
-cd /d D:\study\project\Plasticity-Pruning-GS\gsplat.js
+cd /d D:\study\project\Plasticity-Pruning-GS\rendering
 node tools\ch7_gate_records.mjs 30   & rem 门禁判定：合格 / legacy / 不合格
 ```
 **判读**：出现 `❌` 的那几条**当场重跑**（不要等到出表时才发现）；`legacy` 只说明字段未引入，不代表无效。

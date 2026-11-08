@@ -6,10 +6,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
-const raw = path.resolve(here, "../../thesis_project/data/ch7_measurements/raw");
+const raw = path.resolve(here, "../../thesis/data/ch7_measurements/raw");
 const prefix = process.argv[2] || "full-";
 const outName = process.argv[3] || "archive_20261011";
-const dest = path.resolve(here, `../../thesis_project/data/ch7_measurements/${outName}/stripped`);
+const dest = path.resolve(here, `../../thesis/data/ch7_measurements/${outName}/stripped`);
 
 fs.mkdirSync(dest, { recursive: true });
 const files = fs.readdirSync(raw).filter((f) => f.startsWith(prefix) && f.endsWith(".txt"));

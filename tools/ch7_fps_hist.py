@@ -14,7 +14,7 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RAW = os.path.abspath(os.path.join(HERE, "..", "..", "thesis_project", "data", "ch7_measurements", "raw"))
+RAW = os.path.abspath(os.path.join(HERE, "..", "..", "thesis", "data", "ch7_measurements", "raw"))
 OUT = os.path.join(os.path.dirname(HERE), "_tmp_ch7probe", "out", "fps_hist.csv")
 
 

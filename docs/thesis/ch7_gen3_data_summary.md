@@ -3,7 +3,7 @@
 
 # 第 7 章 · Gen3（Snapdragon 8 Gen 3 / Adreno 750）实验数据总结
 
-> 本文件由 `_tmp_ch7probe/gen_report.mjs` 从 `thesis_project/data/ch7_measurements/raw/` 的**原始回传记录**直接生成（数字不手抄）。
+> 本文件由 `_tmp_ch7probe/gen_report.mjs` 从 `thesis/data/ch7_measurements/raw/` 的**原始回传记录**直接生成（数字不手抄）。
 > 生成时间：2026-10-07T10:15:55.662Z
 
 ## 0. 口径摘要（本表所有数据同口径）

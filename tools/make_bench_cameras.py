@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""生成第7章测帧用的固定机位表 `gsplat.js/bench-cameras.json`。
+"""生成第7章测帧用的固定机位表 `rendering/bench-cameras.json`。
 
 为什么要固定机位：bench.ts 原先按"模型包围盒"自动取景（dist = span × 1.6）。同一场景下，
 本文 r7 模型与对比方法模型的包围盒差异极大（被离群点主导），实测 truck 的 span 为 605.9 vs 165.5、
@@ -10,8 +10,8 @@
 只要三档下方法排序不变，FPS 结论就不依赖某一具体机位。
 
 用法：
-    python gsplat.js/tools/make_bench_cameras.py            # 用 gsplat.js/bench-scenes.json 的全部场景
-    python gsplat.js/tools/make_bench_cameras.py --q 0.5    # 更紧的分位（默认 0.5%~99.5%）
+    python rendering/tools/make_bench_cameras.py            # 用 rendering/bench-scenes.json 的全部场景
+    python rendering/tools/make_bench_cameras.py --q 0.5    # 更紧的分位（默认 0.5%~99.5%）
 """
 import argparse
 import io

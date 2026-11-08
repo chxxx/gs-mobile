@@ -2,16 +2,16 @@
 """第 7 章统一测量协议（docs/ch7_measurement_protocol.md）的共享常量与解析工具。
 
 约定（与协议 §2/§4 一一对应）：
-- 场景清单唯一来源：`gsplat.js/bench-scenes.json`（13 项，带 dataset 分组）；
-- 原始数据落盘：`thesis_project/data/ch7_measurements/raw/{platform}/{scene_key}/round{n}.json`；
+- 场景清单唯一来源：`rendering/bench-scenes.json`（13 项，带 dataset 分组）；
+- 原始数据落盘：`thesis/data/ch7_measurements/raw/{platform}/{scene_key}/round{n}.json`；
 - 四个批次组（协议 §4.2/§5.5）：
     main = 13 场景 × 4 平台 × 3 轮 = 156（表 7-2/7-3/7-4/7-7；手机端全部走微信 XWEB）
     load = 3 场景 × 2 臂 × 5 轮 = 30（表 7-5，platform=gen3-xweb，scene_key={scene}-r7 / {scene}-std45）
     res  = 4 档分辨率 × 3 轮 = 12（表 7-8，platform=rtx4060，scene_key=garden-{WxH}）
     flux = 13 场景 × 4 平台 × 3 轮 = 156（Flux-GS 基线）
   核心合计 354 份；`gen2-chrome` 等可选对照平台默认不跑、不计入核心（见 §4.2/§5.5）；
-- 资产登记：`thesis_project/data/ch7_measurements/scenes_manifest.csv`（本地工作副本）
-  与 `docs/ch7_assets_manifest.csv`（入库镜像，因 `thesis_project/` 被主仓 .gitignore 忽略）。
+- 资产登记：`thesis/data/ch7_measurements/scenes_manifest.csv`（本地工作副本）
+  与 `docs/ch7_assets_manifest.csv`（入库镜像，因 `thesis/` 被主仓 .gitignore 忽略）。
 """
 
 import csv
@@ -21,10 +21,10 @@ import json
 import os
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
-GS_REPO = os.path.dirname(TOOLS_DIR)                       # .../gsplat.js
+GS_REPO = os.path.dirname(TOOLS_DIR)                       # .../rendering（原 gsplat.js）
 PROJECT_ROOT = os.path.dirname(GS_REPO)                    # .../Plasticity-Pruning-GS
 
-CH7_DIR = os.path.join(PROJECT_ROOT, "thesis_project", "data", "ch7_measurements")
+CH7_DIR = os.path.join(PROJECT_ROOT, "thesis", "data", "ch7_measurements")
 RAW_ROOT = os.path.join(CH7_DIR, "raw")
 MANIFEST = os.path.join(CH7_DIR, "scenes_manifest.csv")
 MANIFEST_MIRROR = os.path.join(PROJECT_ROOT, "docs", "ch7_assets_manifest.csv")

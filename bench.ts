@@ -19,7 +19,7 @@
  *   `&report=<url>&rtok=<口令>` → 测完自动把 [RESULT] 文本 POST 到 `<url>?token=<口令>`，
  *   测试者只需"打开链接 → 等 → 关页面"；`rtok` 由分发链接带入，不写死在代码里（换口令只换链接）。
  *   接收端 = vite dev server 的 /__ch7/report 中间件（见 vite.config.js），落盘到
- *   thesis_project/data/ch7_measurements/raw/。口令不符时提交失败，页面会退回"手动复制"按钮。
+ *   thesis/data/ch7_measurements/raw/。口令不符时提交失败，页面会退回"手动复制"按钮。
  *
  * 诊断/调试参数（都不进任何性能指标）：
  *   ?diag=1          每轮结果里附加 job=/retry=/ctxlost=/iframe_ms=/dispose_ms=/trace=

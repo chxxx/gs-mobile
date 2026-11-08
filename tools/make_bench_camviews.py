@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""【状态：可选】从本文臂结果里抽出逐场景视图矩阵 → `gsplat.js/bench-camviews.json`。
+"""【状态：可选】从本文臂结果里抽出逐场景视图矩阵 → `rendering/bench-camviews.json`。
 
 > 只有在走 `bench-flux.html?pose=ours`（把本文机位注入 Flux 渲染器）这种实验路径时才需要；
 > 正式流程用 `cam=flux`（三方共用 Flux 原视角），不需要本表。
@@ -8,8 +8,8 @@
 前提：本文臂运行时带了 `&exportPose=1`（结果 summary 行里才会有 `view=` 字段）。
 
 用法：
-    python gsplat.js/tools/make_bench_camviews.py
-    python gsplat.js/tools/make_bench_camviews.py --raw-dir <dir> --out gsplat.js/bench-camviews.json
+    python rendering/tools/make_bench_camviews.py
+    python rendering/tools/make_bench_camviews.py --raw-dir <dir> --out rendering/bench-camviews.json
 """
 import argparse
 import glob
@@ -71,8 +71,8 @@ def main():
     root = repo_root()
     parser = argparse.ArgumentParser()
     parser.add_argument("files", nargs="*")
-    parser.add_argument("--raw-dir", default=os.path.join(root, "thesis_project", "data", "ch7_measurements", "raw"))
-    parser.add_argument("--out", default=os.path.join(root, "gsplat.js", "bench-camviews.json"))
+    parser.add_argument("--raw-dir", default=os.path.join(root, "thesis", "data", "ch7_measurements", "raw"))
+    parser.add_argument("--out", default=os.path.join(root, "rendering", "bench-camviews.json"))
     args = parser.parse_args()
 
     paths = args.files or sorted(glob.glob(os.path.join(args.raw_dir, "*.txt")))

@@ -14,7 +14,7 @@ Flux-GS 论文（Du et al., 2026, §5.1）报的 147/151 FPS 是在**离屏基�
 
 ## 数据来源与字段
 
-- 输入：`thesis_project/data/ch7_measurements/raw/**.txt`（`[RESULT]`…`[END]` 纯文本，两臂同格式）；
+- 输入：`thesis/data/ch7_measurements/raw/**.txt`（`[RESULT]`…`[END]` 纯文本，两臂同格式）；
 - 结果头：`engine=` / `bench_mode=` / `res=` / `offscreen_runs=` / `offscreen_warmup_frames=` …；
 - 逐轮行：`scene=` / `round=` / `ok=` / `fps=` / `offscreen_fps=`（`mean±std`）/ `offscreen_run_fps=` …；
 - **老结果（2026-09-26 之前）没有 `bench_mode=`** → 一律按 `onscreen-realworld` 归类（那套口径就是当时的在屏严格协议）。
@@ -49,7 +49,7 @@ for _stream in (sys.stdout, sys.stderr):
 MODE_OFFSCREEN = "offscreen-paper-match"
 MODE_ONSCREEN = "onscreen-realworld"
 
-# 与 gsplat.js/bench-shared.ts 的 OFFSCREEN_DISCLAIMER_ZH / _EN **逐字一致**（改一处必须同时改两处）。
+# 与 rendering/bench-shared.ts 的 OFFSCREEN_DISCLAIMER_ZH / _EN **逐字一致**（改一处必须同时改两处）。
 DISCLAIMER_ZH = (
     "Offscreen-PaperMatch FPS 是复刻 Flux-GS 论文离屏基准协议（渲染到离屏帧缓冲、脱离屏幕 vsync、"
     "warm-up 后多轮平均）测得的数值，用于与论文报告数字做同协议对比，不代表用户在真实设备屏幕上"
@@ -214,13 +214,13 @@ def main():
     parser.add_argument("files", nargs="*", help="raw 结果文本；缺省则扫描 --raw-dir")
     parser.add_argument(
         "--raw-dir",
-        default=os.path.join(root, "thesis_project", "data", "ch7_measurements", "raw", "paper_protocol"),
+        default=os.path.join(root, "thesis", "data", "ch7_measurements", "raw", "paper_protocol"),
         help="原始结果文本/JSON 目录（递归扫描 *.txt 与子页面结果 *.json；"
              "**默认只扫本协议批次的子目录**，避免把标准协议的 raw 混进两张表）",
     )
     parser.add_argument(
         "--out-dir",
-        default=os.path.join(root, "thesis_project", "data", "ch7_measurements", "paper_protocol"),
+        default=os.path.join(root, "thesis", "data", "ch7_measurements", "paper_protocol"),
         help="输出目录",
     )
     args = parser.parse_args()

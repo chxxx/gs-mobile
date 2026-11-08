@@ -2,8 +2,8 @@
 """第7章对比方法（reduced-3DGS / Flux-GS）实测结果聚合 → 论文表 7-2/7-3/7-4 数据行。
 
 输入：bench.html / bench-flux.html 结果卡片里 copy 出来的 KEY=VALUE 文本
-      （默认读 thesis_project/data/ch7_measurements/raw/*.txt）。
-输出：thesis_project/data/ch7_measurements/out/ 下
+      （默认读 thesis/data/ch7_measurements/raw/*.txt）。
+输出：thesis/data/ch7_measurements/out/ 下
       - table7_2_7_4_baseline_rows.md  可直接粘进论文的对比方法数据行（含覆盖子集脚注）
       - per_scene_detail.csv           逐场景中位数明细（附录用）
       - aggregated.json                结构化结果（便于二次核对）
@@ -14,9 +14,9 @@
   3. 场景覆盖率不足时在脚注里显式写出覆盖子集，不允许拿部分场景冒充整行。
 
 用法：
-    python gsplat.js/tools/ch7_baseline_report.py
-    python gsplat.js/tools/ch7_baseline_report.py --raw-dir D:/tmp/raw --out-dir D:/tmp/out
-    python gsplat.js/tools/ch7_baseline_report.py raw/one.txt raw/two.txt
+    python rendering/tools/ch7_baseline_report.py
+    python rendering/tools/ch7_baseline_report.py --raw-dir D:/tmp/raw --out-dir D:/tmp/out
+    python rendering/tools/ch7_baseline_report.py raw/one.txt raw/two.txt
 """
 import argparse
 import csv
@@ -651,8 +651,8 @@ def main():
     root = repo_root()
     parser = argparse.ArgumentParser()
     parser.add_argument("files", nargs="*", help="raw 结果文本；缺省则扫描 --raw-dir")
-    parser.add_argument("--raw-dir", default=os.path.join(root, "thesis_project", "data", "ch7_measurements", "raw"))
-    parser.add_argument("--out-dir", default=os.path.join(root, "thesis_project", "data", "ch7_measurements", "out"))
+    parser.add_argument("--raw-dir", default=os.path.join(root, "thesis", "data", "ch7_measurements", "raw"))
+    parser.add_argument("--out-dir", default=os.path.join(root, "thesis", "data", "ch7_measurements", "out"))
     args = parser.parse_args()
 
     files = args.files or sorted(glob.glob(os.path.join(args.raw_dir, "*.txt")))
@@ -675,8 +675,8 @@ def main():
 
     per_scene = build_per_scene(
         scene_stats,
-        load_manifest(os.path.join(root, "gsplat.js", "baseline-scenes.json")),
-        load_manifest(os.path.join(root, "gsplat.js", "flux-baseline-scenes.json")),
+        load_manifest(os.path.join(root, "rendering", "baseline-scenes.json")),
+        load_manifest(os.path.join(root, "rendering", "flux-baseline-scenes.json")),
     )
     annotate_pose_cross_arm(per_scene)
     dataset_rows = aggregate_datasets(per_scene)

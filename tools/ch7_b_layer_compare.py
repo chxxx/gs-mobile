@@ -20,7 +20,7 @@ from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GS = os.path.abspath(os.path.join(HERE, ".."))
-RAW = os.path.abspath(os.path.join(GS, "..", "thesis_project", "data", "ch7_measurements", "raw"))
+RAW = os.path.abspath(os.path.join(GS, "..", "thesis", "data", "ch7_measurements", "raw"))
 OUT_MD = os.path.join(GS, "docs", "ch7_b_layer.md")
 
 try:

@@ -3,7 +3,7 @@
 > 生成：2026-10-02。工具：`tools/ch7_color_gate.ps1`（跑图）+ `tools/ch7_gate_all_arms.py`（逐像素比对）。
 > 口径：桌面 Edge/Chrome，`res=320x213&dpr=1&res_mode=forced`（**全幅、逐像素、无损 PNG**；SH 数学与分辨率无关），
 > `framedump=1` 回传基准位姿整幅，`rounds=1`、`runs=5`、`warmup=20`、`benchmode=offscreen-paper-match`、`profile=garden`、同会话。
-> 报告落盘：`thesis_project/data/ch7_measurements/raw/colorgate_*.txt`。
+> 报告落盘：`thesis/data/ch7_measurements/raw/colorgate_*.txt`。
 
 ## 0. 结论：**PASS**（全部臂 ≥ 60 dB、无 >8 级像素）
 

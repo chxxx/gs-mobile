@@ -19,7 +19,7 @@ import statistics
 import sys
 
 RAW = os.path.abspath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "thesis_project", "data", "ch7_measurements", "raw")
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "thesis", "data", "ch7_measurements", "raw")
 )
 PREFIX = os.environ.get("S0_NAME", "stage0")
 # [阶段0] **环境过滤**：同一前缀下可能同时存在桌面与真机的报告（桌面只用于验证 harness，不进真机表）。

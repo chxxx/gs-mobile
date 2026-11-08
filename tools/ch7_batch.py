@@ -13,9 +13,9 @@
   "提交失败 → 请手动复制发送"（见 bench.ts / bench-flux.ts 的失败分支）。
 
 落盘（协议 §4.1，唯一合法位置）
-  thesis_project/data/ch7_measurements/raw/{platform}/{scene_key}/round{n}.json
-  thesis_project/data/ch7_measurements/raw/{platform}/_page/{scene_key}-{ts}.txt   # 页面原始文本留档
-  thesis_project/data/ch7_measurements/protocol.json                              # 批次协议快照
+  thesis/data/ch7_measurements/raw/{platform}/{scene_key}/round{n}.json
+  thesis/data/ch7_measurements/raw/{platform}/_page/{scene_key}-{ts}.txt   # 页面原始文本留档
+  thesis/data/ch7_measurements/protocol.json                              # 批次协议快照
 
 每条逐轮 JSON 的结构（顶层平铺逐轮字段，便于校验脚本直接读取）：
   protocol_id / group / platform / scene_key / scene / dataset / round / source
@@ -308,7 +308,7 @@ def cmd_ingest(args):
                                           ", ".join("%s×%d" % (k, v) for k, v in sorted(counts.items()))))
         print("-" * 78)
         print("合计 %d 条 → %s/%s/" % (total, args.root, args.platform))
-        print("下一步：python gsplat.js\\tools\\ch7_batch.py status")
+        print("下一步：python rendering\\tools\\ch7_batch.py status")
         return 0 if total else 1
     if not args.text:
         print("✗ 要么给 --text <单份文件>，要么给 --pattern <通配符>（例如 helper-d9400-xweb_*.txt）")
@@ -325,7 +325,7 @@ def cmd_ingest(args):
           % (args.text, written, args.root, args.platform))
     for key in sorted(counts):
         print("   %-24s %d 轮" % (key, counts[key]))
-    print("下一步：python gsplat.js/tools/ch7_batch.py count --platforms %s --groups %s"
+    print("下一步：python rendering/tools/ch7_batch.py count --platforms %s --groups %s"
           % (args.platform, args.group))
     return 0
 
@@ -535,10 +535,10 @@ def cmd_status(args):
 
     print("-" * 92)
     print("下一步（照抄）：")
-    print("  1) 回传文本 → 逐轮 JSON：python gsplat.js\\tools\\ch7_batch.py ingest --platform <平台> --group auto --text %s\\<上面最新的那个.txt>" % root)
-    print("  2) 校验：python gsplat.js\\tools\\ch7_batch.py count --platforms <平台> [--rounds 1]   # 快速验证批加 --rounds 1")
-    print("  3) 入库索引：python gsplat.js\\tools\\ch7_verify.py verify --write-index docs\\ch7_raw_index.csv")
-    print("  4) 停服务（隧道 + dev server）：powershell -ExecutionPolicy Bypass -File gsplat.js\\tools\\ch7_serve.ps1 -Stop")
+    print("  1) 回传文本 → 逐轮 JSON：python rendering\\tools\\ch7_batch.py ingest --platform <平台> --group auto --text %s\\<上面最新的那个.txt>" % root)
+    print("  2) 校验：python rendering\\tools\\ch7_batch.py count --platforms <平台> [--rounds 1]   # 快速验证批加 --rounds 1")
+    print("  3) 入库索引：python rendering\\tools\\ch7_verify.py verify --write-index docs\\ch7_raw_index.csv")
+    print("  4) 停服务（隧道 + dev server）：powershell -ExecutionPolicy Bypass -File rendering\\tools\\ch7_serve.ps1 -Stop")
     return 0
 
 
