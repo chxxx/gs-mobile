@@ -1,0 +1,61 @@
+{
+    "version": 1,
+    "note": "第7章对比方法（reduced-3DGS）场景清单。文件与页面同源，路径相对站点根目录。reduced-3dgs 臂走 gsplat.js 自身的 PLY/QPLY 加载器与 bench.html 同一套离屏测帧协议，因此只需登记资产、由 profile=reduced3dgs 分组驱动。storageMB 为入库量化 PLY 的实测文件体积（可被 tools/inspect_ply_header.py 复核）。",
+    "scenes": [
+        {
+            "id": "r3dgs-bicycle",
+            "name": "reduced-3DGS · Bicycle (quantised PLY)",
+            "file": "reduced-3dgs/quantized_bicycle.ply",
+            "dataset": "mip360",
+            "demo": false,
+            "baseline": "reduced-3dgs",
+            "scene": "bicycle",
+            "points": 2410512,
+            "storageMB": 48.28
+        },
+        {
+            "id": "r3dgs-bonsai",
+            "name": "reduced-3DGS · Bonsai (quantised PLY)",
+            "file": "reduced-3dgs/quantized_bonsai.ply",
+            "dataset": "mip360",
+            "demo": false,
+            "baseline": "reduced-3dgs",
+            "scene": "bonsai",
+            "points": 517904,
+            "storageMB": 10.05
+        },
+        {
+            "id": "r3dgs-counter",
+            "name": "reduced-3DGS · Counter (quantised PLY)",
+            "file": "reduced-3dgs/quantized_counter.ply",
+            "dataset": "mip360",
+            "demo": false,
+            "baseline": "reduced-3dgs",
+            "scene": "counter",
+            "points": 499049,
+            "storageMB": 11.16
+        },
+        {
+            "id": "r3dgs-kitchen",
+            "name": "reduced-3DGS · Kitchen (quantised PLY)",
+            "file": "reduced-3dgs/quantized_kitchen.ply",
+            "dataset": "mip360",
+            "demo": false,
+            "baseline": "reduced-3dgs",
+            "scene": "kitchen",
+            "points": 838257,
+            "storageMB": 18.73
+        },
+        {
+            "id": "r3dgs-truck",
+            "name": "reduced-3DGS · Truck (quantised PLY)",
+            "file": "reduced-3dgs/quantized_truck.ply",
+            "dataset": "tnt",
+            "demo": false,
+            "baseline": "reduced-3dgs",
+            "scene": "truck",
+            "points": 854249,
+            "storageMB": 16.53
+        }
+    ]
+}
