@@ -534,7 +534,9 @@ async function loadManifest(): Promise<void> {
     // [NETREGIME 2026-10-06] `?fluxsrc=official` ⇒ 用**官方网络路径**清单（model = HuggingFace 绝对 URL）；
     //   缺省（不传）⇒ 用现有本地副本清单 ⇒ **既有行为逐字不变**（口径 A 仍是默认）。
     //   两份清单除 `model` 外完全一致（同一批 id/page/dataset），保证 A/B 只差"数据来源"这一个变量。
-    const file = FLUXSRC_OFFICIAL ? "./bench/data/flux-baseline-scenes-official.json" : "./bench/data/flux-baseline-scenes.json";
+    const file = FLUXSRC_OFFICIAL
+        ? "./bench/data/flux-baseline-scenes-official.json"
+        : "./bench/data/flux-baseline-scenes.json";
     const res = await fetch(file);
     if (!res.ok) throw new Error(`${file} 加载失败：HTTP ${res.status}`);
     const json = (await res.json()) as { scenes?: FluxSceneMeta[] };
