@@ -54,7 +54,7 @@
 | `docs/ch7_gen3_data_summary.md` | Gen3 全量数据、可用/弃用会话清单、D 层阶梯 | ✅ |
 | `docs/ch7_dataset_averages.md` | 协议 A/B 数据集平均值、质量指标现状核查 | ✅ |
 | `docs/ch7_session_summary.md` | 本文件（交接总结） | ✅ |
-| `tools/ch7_analyze.py`、`tools/ch7_stage0_normalize.py`、`tools/ch7_c_links_final.py` | 第 7 章数据分析/归一化/链接生成脚本 | ✅ |
+| `tools/ch7/ch7_analyze.py`、`tools/ch7/ch7_stage0_normalize.py`、`tools/ch7/ch7_c_links_final.py` | 第 7 章数据分析/归一化/链接生成脚本 | ✅ |
 | `flux-baseline-scenes-official.json` | Flux 基线官方场景清单 | ✅ |
 | `_tmp_ch7probe/`（10 个产物 + 2 脚本） | 论文摘录（`fp_*.txt`）、抽取结果（`latest_ab.csv` 等）、可复现脚本 | gitignored，本机保留 |
 | `thesis/data/ch7_measurements/**` | **原始手机记录**（`helper01c*` / `helper01f*`）、`out/` 汇总 | 根仓库 gitignored，**证据请勿删** |

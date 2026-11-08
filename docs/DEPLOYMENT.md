@@ -37,7 +37,7 @@
 
 ## 2. 验证证据（2026-09-24，本机 Edge headless + RTX 4060 Laptop）
 
-全部由 `tools/verify_demo.mjs` 自动完成（真实浏览器打开真实 URL、模拟用户操作、截图后按像素统计）：
+全部由 `tools/eval/verify_demo.mjs` 自动完成（真实浏览器打开真实 URL、模拟用户操作、截图后按像素统计）：
 
 | # | 运行 | 场景 | 首帧 | `.ply` 下载耗时 | 画面非黑 / 高亮占比 | 拖动前后画面差异 |
 | - | ---- | ---- | ---- | --------------- | ------------------- | ---------------- |
@@ -52,7 +52,7 @@
 `_verify/local-scene-param.json`、`_verify/local-dropdown.json`、`_verify/live-scene-param.json`
 及对应 `*-after-drag.png`（`_verify/` 目录不入库）。
 
-> 运行 #5 是给 `tools/verify_demo.mjs` 新增 `--serve` / `--no-select` 之后，对"下拉框选场景"这条原路径的回归验证：
+> 运行 #5 是给 `tools/eval/verify_demo.mjs` 新增 `--serve` / `--no-select` 之后，对"下拉框选场景"这条原路径的回归验证：
 > 数字与 #3 完全一致（同一场景、同一机位），说明本次改动没有影响原有行为。
 > 运行 #6 是**部署完成后**对线上直达链接的复验：`autoSelectedFromUrl: true`、控制台
 > `[scene] ?scene= 预选：Truck (r7 QPLY)`、`resourceTimings` 里已是新包 `index-DNw9vmHu.js`。
@@ -73,7 +73,7 @@
 
 ---
 
-## 3. 复验工具：`tools/verify_demo.mjs`
+## 3. 复验工具：`tools/eval/verify_demo.mjs`
 
 无 npm 依赖：只用 Node 内置模块（`node:http` / `node:fs` / `node:zlib`）+ 全局 `fetch`/`WebSocket`
 （需 **Node ≥ 21**，本机 v22.16），用本机已装的 Edge/Chrome 无头模式，通过 Chrome DevTools Protocol 遥控页面。
@@ -135,13 +135,13 @@ https://chxxx.github.io/gs-mobile/?scene=truck
 ```bash
 # 0) 本地按生产方式构建并冒烟（脚本自带静态服务器，进程退出即关，不留后台服务）
 npm run site:build
-node tools/verify_demo.mjs --serve=site-dist --no-select --url="http://127.0.0.1:4173/?scene=truck"
+node tools/eval/verify_demo.mjs --serve=site-dist --no-select --url="http://127.0.0.1:4173/?scene=truck"
 
 # 1) 线上桌面复验（默认选第一个场景 = DrJohnson）
-node tools/verify_demo.mjs --url=https://chxxx.github.io/gs-mobile/ --scene=truck
+node tools/eval/verify_demo.mjs --url=https://chxxx.github.io/gs-mobile/ --scene=truck
 
 # 2) 线上手机模拟复验（触摸拖动 + 390x844 / DPR 3）
-node tools/verify_demo.mjs --url=https://chxxx.github.io/gs-mobile/ --scene=truck --mobile
+node tools/eval/verify_demo.mjs --url=https://chxxx.github.io/gs-mobile/ --scene=truck --mobile
 
 # 3) 只看部署是否成功（不跑浏览器）
 curl -sI https://chxxx.github.io/gs-mobile/ | findstr /i "HTTP"
@@ -172,6 +172,6 @@ curl -sI https://chxxx.github.io/gs-mobile/ | findstr /i "HTTP"
 | `.github/workflows/deploy-pages.yml` | 部署流水线（构建 → 强推 `pages`） |
 | `vite.site.config.js` | 站点构建配置（产物 `site-dist/`） |
 | `scenes.json` / `scenes/` | 演示场景清单与模型 |
-| `tools/verify_demo.mjs` | 本文所有验证数据的产生工具 |
+| `tools/eval/verify_demo.mjs` | 本文所有验证数据的产生工具 |
 | `_verify/` | 验证产物（截图 + JSON 报告，不入库） |
 | [部署使用说明.md](../部署使用说明.md) | 部署链路原理、remote 约定、手工触发方式 |

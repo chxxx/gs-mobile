@@ -69,7 +69,7 @@
 
 ## 5. 待跑：部署配置（`arm=lr+notx+nocolortx`）
 
-链接由 `tools/ch7_batch.py link --protocol offscreen-paper-match --rounds 3` 生成，
+链接由 `tools/ch7/ch7_batch.py link --protocol offscreen-paper-match --rounds 3` 生成，
 末尾手工追加 `&shcache=frag&lr=1&notx=1&nocolortx=1`（与 `helper01c*` 主批次逐字同构）。
 
 | 编号 | 用途 | `u=` |
@@ -284,7 +284,7 @@ Flux-GS 官方渲染器用 `znear=0.2 / zfar=200`（`flux-gs-project-gh-pages/re
   **页面跑完却没有任何文件落地**；唯一线索在服务端日志 `_tmp_ch7probe/out/dev_host.log`：
   `[ch7-report] 拒收（413）：body too large (>4194304 bytes)`。
 - **机制**：`vite.config.js:32` 的 `CH7_MAX_BODY = 4 MiB`（原注释假设"结果文本只有几十 KB"——在 framedump 口径下不成立）
-  与 `tools/ch7_report_middleware.mjs:51` 的 `CH7_MAX_BODY_DEFAULT`。5 场景 × 1 轮 ≈ **6.3 MB** > 4 MiB
+  与 `tools/ch7/ch7_report_middleware.mjs:51` 的 `CH7_MAX_BODY_DEFAULT`。5 场景 × 1 轮 ≈ **6.3 MB** > 4 MiB
   ⇒ 中间件 `req.destroy()` + 413 ⇒ **记录整份丢失**（页面端只表现为"提交失败"，不报错码）。
 - **修复（2026-10-09）**：两处上限 4 MiB → **64 MiB**，并把理由与实测证据写进原注释。
   端到端验证：`curl --data-binary @6291469 字节` → `OK …raw/probe_big_20261009_123102.txt` ✓（小体量记录不受影响）。

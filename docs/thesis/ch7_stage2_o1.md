@@ -122,6 +122,6 @@
 ## 4. 桌面自证（本机）
 
 - `npx tsc --noEmit` = **0 错**；`npx vitest run` 绿。
-- 零回归 + 新开关冒烟：`tools/ch7_desktop_shader_verify.ps1`（base/frag/fragfrz）+ 直接 Chrome 跑
+- 零回归 + 新开关冒烟：`tools/ch7/ch7_desktop_shader_verify.ps1`（base/frag/fragfrz）+ 直接 Chrome 跑
   `frag&notx=1&nocolortx=1`、`frag&notx=1`、`frag&nocolortx=1`、`lr&notx=1&nocolortx=1`；
   判据：`ERROR:` 0、`GL_INVALID_OPERATION` 0、`Mismatch` 0、`[result] ok=1`。

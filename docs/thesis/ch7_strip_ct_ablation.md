@@ -23,7 +23,7 @@
 `#if (!defined(SHPASS_PRE) && !defined(SHCACHE_FRAG)) || defined(SHPASS_TF)` 块**之外**
 （所以 `SHPASS_PRE` / `SHCACHE_FRAG` 编译里照样"声明"，但主 pass 的活跃分支不采样）。
 
-静态矩阵（`tools/ch7_strip_ct_analyze.mjs`，宏展开 + 剔注释后统计"声明数/采样数"）：
+静态矩阵（`tools/ch7/ch7_strip_ct_analyze.mjs`，宏展开 + 剔注释后统计"声明数/采样数"）：
 
 | 主 pass 变体 | u_colorTransforms | u_colorTransformIndices | 判定 |
 |---|---|---|---|
@@ -82,7 +82,7 @@
 | `proto` | `flux` | 口径标识：FPS 定义/计时边界与 Flux-GS 臂同名同义 | `bench.ts:384-386` |
 | `profile` | `garden` | 场景清单（可逗号多场景） | `bench-scenes.json` |
 | `u` | `ct-A` 等 | **臂标签**，只影响回传文本标识 | `bench.ts` |
-| `report`/`rtok` | `/__ch7/report?name=stripct` / `ch7-2026-phase4` | 自动回传端点与口令；落盘 `raw/<name>_<时间戳>.txt` | `tools/ch7_report_middleware.mjs` |
+| `report`/`rtok` | `/__ch7/report?name=stripct` / `ch7-2026-phase4` | 自动回传端点与口令；落盘 `raw/<name>_<时间戳>.txt` | `tools/ch7/ch7_report_middleware.mjs` |
 
 ### 3.2 机位（决定"看的是不是同一个视角"）
 
@@ -241,7 +241,7 @@
    （如 truck/train），确认不是场景特异。
 3. **未做颜色正确性闸门（PSNR/SSIM）**：本轮只看了 `ok=1` / `covered=99.8%`（几何口径）。
    由于被测改动只删"未被引用的声明"、不触碰采样逻辑，编译产物应完全一致；若要写进论文，仍建议用
-   `?framedump=1` + `tools/compare_images.py` 出一次 PSNR/SSIM（期望 ∞ / 位级一致）。
+   `?framedump=1` + `tools/eval/compare_images.py` 出一次 PSNR/SSIM（期望 ∞ / 位级一致）。
 4. **`sync` 口径**：真机 `gputimer` 不可用 ⇒ 实际是 `batch`；实验报告里应写实际生效的口径（结果头已自证）。
 
 ---
@@ -252,7 +252,7 @@
 |---|---|
 | `src/renderers/webgl/programs/RenderProgram.ts` | 新增 `?strip_ct=1` / `?add_ct_positive=1` / `?debug_shader=1` 与断言；模板未动 |
 | `src/renderers/webgl/programs/ShaderProgram.ts` | `strip_ct=1` 时把编译/链接失败升级为抛错（`undeclared identifier` 兜底） |
-| `tools/ch7_strip_ct_analyze.mjs` | 抽取**真实**模板 + 复用 `sliceShaderSource` 语义 + 宏展开后统计"声明/采样" |
+| `tools/ch7/ch7_strip_ct_analyze.mjs` | 抽取**真实**模板 + 复用 `sliceShaderSource` 语义 + 宏展开后统计"声明/采样" |
 | `_tmp_ch7probe/strip_ct_links_min.mjs` | 生成最少一组 A/B/C 链接（`rounds=3`） |
 | `_tmp_ch7probe/parse_stripct.mjs` / `parse_stripct_detail.mjs` / `parse_stripct_band.mjs` | 解析回传 txt → 表格/逐轮细节/频段标签 |
 | `thesis/data/ch7_measurements/raw/stripct_20261010_1410*.txt`（4 个） | 真机原始证据（A/B/C/deploy-C） |

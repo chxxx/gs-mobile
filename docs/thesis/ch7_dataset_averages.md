@@ -51,7 +51,7 @@
 
 | 类别 | 内容 | 来源 |
 | --- | --- | --- |
-| **真机等价性闸门**（FINAL vs BASE） | PSNR 55.75–62.27 dB、SSIM 0.9978–0.9999、最大级差 ≤9、>8 级像素 = 0 | `docs/ch7_b_layer.md`、`tools/ch7_b_layer_gate.ps1`、真机 `raw/g3png_f|b_*`（320×213 无损 PNG） |
+| **真机等价性闸门**（FINAL vs BASE） | PSNR 55.75–62.27 dB、SSIM 0.9978–0.9999、最大级差 ≤9、>8 级像素 = 0 | `docs/ch7_b_layer.md`、`tools/ch7/ch7_b_layer_gate.ps1`、真机 `raw/g3png_f|b_*`（320×213 无损 PNG） |
 | **桌面颜色闸门**（`notx=1` 路径等价性） | PSNR 60.03 dB、SSIM 0.999863、最大级差 5、>8 级 = 0 | `raw/colorgate_20261004_151300/151327.txt`（见 `docs/ch7_b_layer.md`） |
 | **训练侧质量**（第 4 章体系） | 去掉预算剪枝 ⇒ 点数 0.411M→1.806M、体积 9.9→15.3 MB、**PSNR −0.18 dB** | `docs/ch7_project_status.md` §7.3 |
 

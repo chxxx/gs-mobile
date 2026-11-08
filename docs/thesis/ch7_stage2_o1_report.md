@@ -79,7 +79,7 @@
 |---|---|
 | `npx tsc --noEmit` | **0 错** ✓ |
 | `npx vitest run` | 全绿（5 文件；`QPLYLoaderUtils.lowrank` 3 例 skip） |
-| 零回归（约束 1：`tools/ch7_desktop_shader_verify.ps1`） | **base / frag 双通过**：`ok=1`、`mismatchCount=0`、`glErrCount=0`、`shaderErrCount=2`（=Edge 自带 importer 的 `ERROR:` 噪声，非 GLSL） |
+| 零回归（约束 1：`tools/ch7/ch7_desktop_shader_verify.ps1`） | **base / frag 双通过**：`ok=1`、`mismatchCount=0`、`glErrCount=0`、`shaderErrCount=2`（=Edge 自带 importer 的 `ERROR:` 噪声，非 GLSL） |
 | 新开关桌面冒烟 | `frag&notx=1&nocolortx=1`：`glslErr=0`、`glErr=0`、`ok=1`、`covered=99.83%`（与 `frag` 相同） |
 | **真机** | **9 条 Gen2 全部 `ok=3/3`，`arm=` 与预期逐条一致，无 `+notx-rejected`** ✓✓ |
 | 桌面颜色闸门（PSNR） | **未跑**（下一步第 1 项） |

@@ -69,7 +69,7 @@
 
 ### 1b-实测 · Flux 页面运行时请求清单（2026-10-04；无头 Edge + CDP `Network` **实测**，非推断）
 
-口径：`tools/ch7_flux_runtime_net.mjs`（`Network.enable` + `setCacheDisabled(true)` + `Page.navigate`，load 后静默 6 s 收尾），
+口径：`tools/ch7/ch7_flux_runtime_net.mjs`（`Network.enable` + `setCacheDisabled(true)` + `Page.navigate`，load 后静默 6 s 收尾），
 页面 = `flux-gs-project-gh-pages/render_garden/index.html`，由本机 vite dev server 托管该静态站。
 
 | # | 请求 | 类型 | 传输字节 | Body 字节 | Content-Encoding | 来源 |
@@ -152,4 +152,4 @@
 |---|---|---|
 | `?lrload=0|1` | 加载期（PLYLoader/worker 的 URL 读取） | 缺省关闭、逐字不变、零回归自证（T5 用） |
 | gzip / `DecompressionStream` 体积与解压计时 | **独立测量页/脚本** | 不改默认加载路径（T4 用） |
-| 桌面图像闸门（三数据集各一次 FINAL vs BASE） | `tools/ch7_color_gate*.ps1` 复用 | 无损全幅逐像素，PSNR≥45 dB、无 >8 级像素（T3；真机抓帧不做） |
+| 桌面图像闸门（三数据集各一次 FINAL vs BASE） | `tools/ch7/ch7_color_gate*.ps1` 复用 | 无损全幅逐像素，PSNR≥45 dB、无 >8 级像素（T3；真机抓帧不做） |

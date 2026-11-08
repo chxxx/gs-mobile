@@ -76,7 +76,7 @@ float a[LR_RANK];   // LR_RANK = 7，由 TS 侧注入 #define（编译期常量 
 
 ## 6. 正确性闸门（桌面，无损 PNG 全幅逐像素；方法同 2.3 节）
 
-`tools/ch7_color_gate.ps1` + `tools/ch7_color_gate_compare.py`（`?framedump=1&res=320x213`，body 0.26 MB，安全）：
+`tools/ch7/ch7_color_gate.ps1` + `tools/ch7/ch7_color_gate_compare.py`（`?framedump=1&res=320x213`，body 0.26 MB，安全）：
 **LR_FULL vs FRAG_FULL**、**LR_FULL vs BASE**：PSNR / SSIM / 最大误差 / 误差直方图；**要求 ≥ 45 dB**（SSIM ≥ 0.999、无结构化差异）⇒ 否则**停止**并排查。
 
 ## 7. 预期（待实测修正）
@@ -132,7 +132,7 @@ float a[LR_RANK];   // LR_RANK = 7，由 TS 侧注入 #define（编译期常量 
 | `base` | （见 `raw/mali_20260930_192605.txt`） | — | Mali-G925-Immortalis MC12 |
 | `frag` | **82.6 ± 1.2** | 11.93 | 同上 |
 
-`LR_FULL` 落地后再补第三臂；分析用 `S0_NAME=mali python tools\ch7_stage0_report.py`（**注意**：本次该工具在
+`LR_FULL` 落地后再补第三臂；分析用 `S0_NAME=mali python tools\ch7\ch7_stage0_report.py`（**注意**：本次该工具在
 `S0_GL=Mali` 下滤空了 —— 过滤是按 `gl_renderer` 子串，实测 Mali 报告里该字段值形如 `Mali-G925-Immortalis MC12`，
 下次直接不传 `S0_GL` 或先用 `dir` 抽样确认字段值再过滤）。
 

@@ -1,7 +1,7 @@
 # 第 7 章 · 真机/桌面测试**预检与验收清单**（2026-10-11）
 
 > 目的：**把"这轮数据无效"从"几天后分析时才发现"前移成"跑之前能查、跑完立刻能判"**。
-> 本文件是 checklist；判据的代码实现见 `tools/ch7_gate_records.mjs`（一条命令给结论）。
+> 本文件是 checklist；判据的代码实现见 `tools/ch7/ch7_gate_records.mjs`（一条命令给结论）。
 
 ## 1. 已装上的**自动判据**（跑完一条命令即可筛）
 
@@ -19,7 +19,7 @@
 **一条命令**：
 ```cmd
 cd /d D:\study\project\Plasticity-Pruning-GS\rendering
-node tools\ch7_gate_records.mjs 30
+node tools\ch7\ch7_gate_records.mjs 30
 ```
 输出分三档：`合格` / `legacy`（2026-10-11 前，字段未引入，只保证输出与黑名单检查）/ `不合格`（**必须重跑或标注**）。
 
@@ -69,7 +69,7 @@ node tools\ch7_gate_records.mjs 30
 
 ## 4.5 运行次数与可复现性（**硬要求，2026-10-11 实测后追加**）
 
-**事实**（`tools/ch7_gate_records.mjs` 的组内判定给出）：同一 URL、同一协议、同一臂重复跑，fps 并不复现：
+**事实**（`tools/ch7/ch7_gate_records.mjs` 的组内判定给出）：同一 URL、同一协议、同一臂重复跑，fps 并不复现：
 
 | 组 | 协议 | 次数 | fps 极差 |
 |---|---|---|---|
@@ -89,7 +89,7 @@ node tools\ch7_gate_records.mjs 30
 cd /d D:\study\project\Plasticity-Pruning-GS\rendering\_tmp_ch7probe
 node sideflux_latest.mjs 10     & rem 关键字段速览（ink/TW/cpu/b64/fps）
 cd /d D:\study\project\Plasticity-Pruning-GS\rendering
-node tools\ch7_gate_records.mjs 30   & rem 门禁判定：合格 / legacy / 不合格
+node tools\ch7\ch7_gate_records.mjs 30   & rem 门禁判定：合格 / legacy / 不合格
 ```
 **判读**：出现 `❌` 的那几条**当场重跑**（不要等到出表时才发现）；`legacy` 只说明字段未引入，不代表无效。
 

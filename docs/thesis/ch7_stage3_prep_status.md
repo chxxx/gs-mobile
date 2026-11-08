@@ -25,7 +25,7 @@
 | 项 | 结果 |
 |---|---|
 | `npx tsc --noEmit` | **0 错** ✓ |
-| 零回归（约束 1 的规定脚本 `tools/ch7_desktop_shader_verify.ps1 -Tags base,frag`） | **base ✓ frag ✓**：`mismatchCount=0`、`glErrCount=0`、`ok=1`（`shaderErrCount=2` = Edge 自带 importer 噪声） |
+| 零回归（约束 1 的规定脚本 `tools/ch7/ch7_desktop_shader_verify.ps1 -Tags base,frag`） | **base ✓ frag ✓**：`mismatchCount=0`、`glErrCount=0`、`ok=1`（`shaderErrCount=2` = Edge 自带 importer 噪声） |
 | `?shcache=frag&notx=1&nocolortx=1&prep=1`（**槽位=0，MRT**） | **`ok=1`、`glslErr=0`、`glErr=0`、`covered=99.8345864661654`（与 `frag` 逐值相同）** ✓✓ |
 | `&slot=1`（mrt=1）/ `&slot=1&mrt=0` | 编译/链接成功（`[prep=1] 就绪` + 0 GLSL/GL 报错），但**画面全空**（`ok=0`，`kept=1`）✗ — 待查 |
 | `&slot=1&lr=1` | 同上待查（程序已建，无报错） |

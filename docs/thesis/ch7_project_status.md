@@ -20,7 +20,7 @@
 | **4** | **面向目标点数的预算感知剪枝** | 可微掩码；**温度化预算调度**；剪枝冲击缓解（目标比例对齐 / 动量趋势保护 / 恢复感知触发）；感知细节保持（低点数平滑偏置 / **LPIPS 感知重要性** / 小尺度细节保护 / 多源重要性+全局 Top-K / 周期性感知恢复 / 剪前保护-剪后恢复）；4.7 实验（综合对比、低点数分析、消融）、4.8 小结 | 训练侧脚本（`scripts/`、`gaussian_renderer/`、`utils/`）；论文表见 4.7 |
 | **5** | **共享基低秩分解与属性量化** | SH rest 谱分析前提；错峰插入；共享基优化配置；SVD 初始化 + **对称平方根重参数化**；满秩重参数化对照；**分组标量量化** + **低秩系数按列码本**；朴素 45 维量化基线；量化导出与存储组织（单高斯结构、文件级组织、与端侧渲染衔接）；5.7 实验（满秩检验、坐标旋转、率失真、对称/非对称消融、联合微调阶段分解、跨数据集汇总与边界） | 导出脚本 + `scenes/point_cloud_quantised_half_r7-*.ply`（r7）与 `…std45-*.ply` |
 | **6** | **QPLY 格式与 WebGL 渲染系统** | 6.2 文件格式设计；6.3 **整数纹理化存储与 shader 实时求值**；6.4 **低秩重建 CPU 并行解码**；6.5 解析器与格式兼容性；6.6 系统集成与部署；6.7 小结 | `src/loaders/*`、`src/renderers/webgl/**`、`docs/ch6_code_facts.md` |
-| **7** | **系统集成与端到端实验** | 7.2 实验设置（数据集 / 硬件与测帧协议 / 指标 / 组合配置 / 对比方法）；**7.3 系统级消融**；**7.4 跨数据集端到端对比与移动端实机部署**；7.5 低秩重建端侧开销验证；7.6 目标点数×低秩秩组合分析；7.7 跨设备兼容性与定性；7.8 不同平台实机渲染效果；**7.9 测帧口径的局限与可比性边界**；**7.10 基线帧耗时差异的根因定位**（五轮复核 + 根因判定 + 机理与桌面控制）；7.11 小结 | `bench*.html/ts`、`tools/ch7_*`、`thesis/data/ch7_measurements/**` |
+| **7** | **系统集成与端到端实验** | 7.2 实验设置（数据集 / 硬件与测帧协议 / 指标 / 组合配置 / 对比方法）；**7.3 系统级消融**；**7.4 跨数据集端到端对比与移动端实机部署**；7.5 低秩重建端侧开销验证；7.6 目标点数×低秩秩组合分析；7.7 跨设备兼容性与定性；7.8 不同平台实机渲染效果；**7.9 测帧口径的局限与可比性边界**；**7.10 基线帧耗时差异的根因定位**（五轮复核 + 根因判定 + 机理与桌面控制）；7.11 小结 | `bench*.html/ts`、`tools/ch7/ch7_*`、`thesis/data/ch7_measurements/**` |
 | 8 | 总结与局限性 | 全文总结、创新点、未解决局限、未来工作 | — |
 | 附录 A/B | 超参数与实现配置 / 术语表与代码约定 | A.1–A.5、B.1–B.2 | — |
 
@@ -33,8 +33,8 @@
 * **测帧与闸门（第 7 章对应物）**
   * `bench.html` + `bench.ts` / `bench-measure.ts` / `bench-case.ts` / `bench-shared.ts` / `bench-offscreen.ts` / `bench-view.ts` / `bench-chip.ts`：逐场景 iframe + `msgchannel` 驱动 + `offscreen-paper-match` + `?framedump=1` 无损抓帧。
   * `bench-flux.html` / `bench-flux.ts`：Flux-GS 基线臂（自带实现）。
-  * `tools/ch7_*`（30 个）：跑批/链接分发/真机 ingest/校验/报表/**颜色闸门**/桌面 shader 校验/B 层无损闸门/Flux 运行时抓包/Flux 真机审计/链路加工。
-  * `tools/ch7_report_middleware.mjs` + `vite.config.js`：`/__ch7/report` 回传端点（**只存在于 dev/preview server**）。
+  * `tools/ch7/ch7_*`（30 个）：跑批/链接分发/真机 ingest/校验/报表/**颜色闸门**/桌面 shader 校验/B 层无损闸门/Flux 运行时抓包/Flux 真机审计/链路加工。
+  * `tools/ch7/ch7_report_middleware.mjs` + `vite.config.js`：`/__ch7/report` 回传端点（**只存在于 dev/preview server**）。
 * **官方 Flux 站点副本**：`flux-gs-project-gh-pages/`（13 个 `render_<scene>/`；`scene/<scene>.json` 与 HF 字节等价；页面默认**从 HF 拉**，见 `docs/ch7_flux_network_ab.md`）。
 * **数据**：`scenes/*.ply`（r7×13 + std45×3）；基线 `thesis/data/ch7_measurements/raw/**`（记录正文 + `protocol.json`）。
 
@@ -51,8 +51,8 @@
 | `shfmt=f16` / `shpass=produce\|consume\|pre`(TF) / `prep=1`(O2) / `slot=1`(O3) / 自动调参 / QPLY2 | 已弃路线 | ❌ 缺省关闭 |
 | `shfreeze=N` | 冻结颜色缓存（静态机位逐位等价） | ❌ 仅作**性能上限参照** |
 
-* **⚠ 生成链接的坑**：`tools/ch7_batch.py link` 产出的 URL **不含**这 4 个开关（跑的是 BASE）。
-  必须先 `ch7_batch.py link` 再用 **`tools/ch7_c_links_final.py`** 追加（或在链接上手写追加）。
+* **⚠ 生成链接的坑**：`tools/ch7/ch7_batch.py link` 产出的 URL **不含**这 4 个开关（跑的是 BASE）。
+  必须先 `ch7_batch.py link` 再用 **`tools/ch7/ch7_c_links_final.py`** 追加（或在链接上手写追加）。
 * **真机测帧协议**：`proto=flux`（`driver=timer&warmup=0&frames=300`）+ `rounds=3` **同会话 ABAB**，
   两臂（本文 / 基线）同 `cold`、同分辨率、同 Wi-Fi。
 * **桌面闸门协议**（B 层 / 颜色正确性）：`res=320x213&res_mode=forced&dpr=1&frames=20&cold=1&rounds=1`
@@ -69,8 +69,8 @@
 
 ### 4.2 桌面无损闸门（B 层，2026-10-04，13/13 全过）
 FINAL vs BASE 逐像素：**PSNR 55.75–62.27 dB**、SSIM 0.9978–0.9999、最大级差 ≤8、**>8 级像素 = 0**
-（判据红线：PSNR ≥ 50 dB 且 >8 级 = 0）⇒ 产物 `docs/ch7_b_layer.md`；脚本 `tools/ch7_b_layer_gate.ps1`
-（含 rAF 冻结 / profile 冲突修复）与 `tools/ch7_b_layer_compare.py`。
+（判据红线：PSNR ≥ 50 dB 且 >8 级 = 0）⇒ 产物 `docs/ch7_b_layer.md`；脚本 `tools/ch7/ch7_b_layer_gate.ps1`
+（含 rAF 冻结 / profile 冲突修复）与 `tools/ch7/ch7_b_layer_compare.py`。
 * 副产物：`notx=1` 与逐 splat 取样路径在 garden 上**逐像素等价** ⇒ 这也是 garden transform 问题的**等价性证据**（矩阵直印仍未做）。
 
 ### 4.3 Gen3 真机（Adreno 750 / 微信 XWEB；rounds=3 同会话 ABAB；garden）
@@ -111,7 +111,7 @@ FINAL vs BASE 逐像素：**PSNR 55.75–62.27 dB**、SSIM 0.9978–0.9999、最
 
 | # | 事项 | 状态 | 备注 |
 |---|---|---|---|
-| C | **Gen3 真机全量 13 场景 × (FINAL, flux)** | **链接已就绪（FINAL 部分）** | 3 批（mip360 9 / T&T 2 / DB 2）× 冷热；生成见 `tools/ch7_c_links_final.py`；Flux 链接等 §三 A/B 决策 |
+| C | **Gen3 真机全量 13 场景 × (FINAL, flux)** | **链接已就绪（FINAL 部分）** | 3 批（mip360 9 / T&T 2 / DB 2）× 冷热；生成见 `tools/ch7/ch7_c_links_final.py`；Flux 链接等 §三 A/B 决策 |
 | C' | Flux 网络口径 A/B | **待你选** | A=默认 HF（零改动）/ B=链接追加 `&url=<本地副本绝对URL>`（零文件改动）；见 `docs/ch7_flux_network_ab.md` |
 | D | 消融实验（garden） | 待跑 | base/frag/frag+notx+nocolortx/FINAL，rounds=3 |
 | E | 附表（Gen2-xweb / Mali-xweb） | 待跑 | 同上四臂 |
@@ -140,20 +140,20 @@ FINAL vs BASE 逐像素：**PSNR 55.75–62.27 dB**、SSIM 0.9978–0.9999、最
 
 ```bash
 # 1) 起服务（dev server + 可选隧道）；B 层/真机链接都依赖它
-powershell -ExecutionPolicy Bypass -File rendering\tools\ch7_serve.ps1 -Platform gen3-xweb -Name helper01 -Group main -Rounds 3
+powershell -ExecutionPolicy Bypass -File rendering\tools\ch7\ch7_serve.ps1 -Platform gen3-xweb -Name helper01 -Group main -Rounds 3
 
 # 2) 桌面无损闸门（13 场景 FINAL vs BASE）
-powershell -ExecutionPolicy Bypass -File rendering\tools\ch7_b_layer_gate.ps1
-python rendering\tools\ch7_b_layer_compare.py            # → docs/ch7_b_layer.md
+powershell -ExecutionPolicy Bypass -File rendering\tools\ch7\ch7_b_layer_gate.ps1
+python rendering\tools\ch7\ch7_b_layer_compare.py            # → docs/ch7_b_layer.md
 
 # 3) Flux 运行时抓包（13 场景）与汇总
-node   rendering\tools\ch7_flux_runtime_net.mjs --url=http://127.0.0.1:5173/flux-gs-project-gh-pages/render_garden/index.html --out=rendering\_tmp_ch7probe\out\flux_net_garden.json
-python rendering\tools\ch7_flux_runtime_summary.py --md rendering\docs\ch7_flux_runtime.md
+node   rendering\tools\ch7\ch7_flux_runtime_net.mjs --url=http://127.0.0.1:5173/flux-gs-project-gh-pages/render_garden/index.html --out=rendering\_tmp_ch7probe\out\flux_net_garden.json
+python rendering\tools\ch7\ch7_flux_runtime_summary.py --md rendering\docs\ch7_flux_runtime.md
 
 # 4) Flux 真机记录只读审计
-python rendering\tools\ch7_flux_device_audit.py --md rendering\docs\ch7_flux_device_records.md
+python rendering\tools\ch7\ch7_flux_device_audit.py --md rendering\docs\ch7_flux_device_records.md
 
 # 5) 生成 FINAL 链接（3 批 × 冷热）——先生成后加工，否则跑成 BASE
-python rendering\tools\ch7_batch.py link --base <隧道或本机> --group main --platform gen3-xweb --name helper01c1 --rounds 3 --subset bicycle,flowers,garden,stump,treehill,room,counter,kitchen,bonsai
-python rendering\tools\ch7_c_links_final.py
+python rendering\tools\ch7\ch7_batch.py link --base <隧道或本机> --group main --platform gen3-xweb --name helper01c1 --rounds 3 --subset bicycle,flowers,garden,stump,treehill,room,counter,kitchen,bonsai
+python rendering\tools\ch7\ch7_c_links_final.py
 ```

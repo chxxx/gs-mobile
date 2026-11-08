@@ -62,7 +62,7 @@
 3. **解析层（最关键）**：报表/绘图脚本读记录前先跑两道门槛：
    - **窗口门槛**：离屏 fps 必须带 `TWdrain|TWframe` 标记（新记录自动带），并**按口径分组**；
    - **输出门槛**：Flux 离屏行必须 `ink_pct ≥ 50`；无 `ink_pct` 且日期 ≥2026-09-29 的行**直接丢弃**（等价于黑名单）。
-   实现建议：把 §1 的规则做成 `tools/ch7_gate_records.mjs`（本仓库已有 `tools/ch7_baseline_report.py` 等，可挂同一层）。
+   实现建议：把 §1 的规则做成 `tools/ch7/ch7_gate_records.mjs`（本仓库已有 `tools/ch7/ch7_baseline_report.py` 等，可挂同一层）。
 4. **重跑**：用 `_tmp_ch7probe/out/rerun_links.txt`（`rounds=3&frames=20&warmup=10`，`twindow=drain|frame` 两套）
    在 Gen3 与 Gen2 各跑一遍；新记录自然带 `TW` 与 `ink_pct`，直接进 C 档。
 

@@ -1,6 +1,6 @@
 # 阶段 2 · O1 颜色正确性闸门（桌面，8-bit 无损 PNG 逐像素）
 
-> 生成：2026-10-02。工具：`tools/ch7_color_gate.ps1`（跑图）+ `tools/ch7_gate_all_arms.py`（逐像素比对）。
+> 生成：2026-10-02。工具：`tools/ch7/ch7_color_gate.ps1`（跑图）+ `tools/ch7/ch7_gate_all_arms.py`（逐像素比对）。
 > 口径：桌面 Edge/Chrome，`res=320x213&dpr=1&res_mode=forced`（**全幅、逐像素、无损 PNG**；SH 数学与分辨率无关），
 > `framedump=1` 回传基准位姿整幅，`rounds=1`、`runs=5`、`warmup=20`、`benchmode=offscreen-paper-match`、`profile=garden`、同会话。
 > 报告落盘：`thesis/data/ch7_measurements/raw/colorgate_*.txt`。
@@ -32,8 +32,8 @@
 
 | 文件 | 改动 | 默认行为 |
 |---|---|---|
-| `tools/ch7_color_gate.ps1` | 新增 `-Cases <名字列表>` 与 `-SleepSec`；已知 case：`base/frag/fragntx/fragctx/fragboth/lrboth/lrfrzzboth`（`param()` 必须紧跟头注释、放在其它语句之前，否则 `ParserError: InvalidLeftHandSide`——已踩并修） | **缺省 `base,frag` ⇒ 与改动前逐字等价** ✓ |
-| `tools/ch7_gate_all_arms.py` | **新增**：解析 `raw/<CG_NAME>_*.txt`（按 `u=` 取**最新**一份），把**除 base 外的所有臂**与 BASE 逐像素比，输出 PSNR/SSIM/各阈值像素数，并按 "≥45 dB 且无 >8 级" 给出 FAIL/PASS 退出码（纯 ASCII 输出，GBK 控制台安全） | 旧工具 `ch7_color_gate_compare.py` **未改**（它是 GBK 编码，改动有乱码风险） |
+| `tools/ch7/ch7_color_gate.ps1` | 新增 `-Cases <名字列表>` 与 `-SleepSec`；已知 case：`base/frag/fragntx/fragctx/fragboth/lrboth/lrfrzzboth`（`param()` 必须紧跟头注释、放在其它语句之前，否则 `ParserError: InvalidLeftHandSide`——已踩并修） | **缺省 `base,frag` ⇒ 与改动前逐字等价** ✓ |
+| `tools/ch7/ch7_gate_all_arms.py` | **新增**：解析 `raw/<CG_NAME>_*.txt`（按 `u=` 取**最新**一份），把**除 base 外的所有臂**与 BASE 逐像素比，输出 PSNR/SSIM/各阈值像素数，并按 "≥45 dB 且无 >8 级" 给出 FAIL/PASS 退出码（纯 ASCII 输出，GBK 控制台安全） | 旧工具 `ch7_color_gate_compare.py` **未改**（它是 GBK 编码，改动有乱码风险） |
 
 ## 3. 由此可以往下一步推进
 

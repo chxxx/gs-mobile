@@ -31,7 +31,7 @@ P（生产成本 = FRAG_FULL − FRAG_FROZEN）     = 16.129 − 13.423 = +2.706
 R（读取成本 = FRAG_FROZEN − CONSUME_ONLY） = 13.423 − 10.460 = +2.963 ms/帧
 合计（FRAG_FULL − CONSUME_ONLY）           = +5.669 ms/帧
 ```
-复算命令：`python tools\ch7_stage0_report.py`（用 `S0_GL=Adreno` 只取真机批；桌面验证批已移到 `raw/_probe/desktop_stage0/`，不参与）。
+复算命令：`python tools\ch7\ch7_stage0_report.py`（用 `S0_GL=Adreno` 只取真机批；桌面验证批已移到 `raw/_probe/desktop_stage0/`，不参与）。
 
 ## 3. 判读（阶段 1 的直接依据）
 
@@ -59,7 +59,7 @@ R（读取成本 = FRAG_FROZEN − CONSUME_ONLY） = 13.423 − 10.460 = +2.963 
 | C · 只对可见/重要点生产 | P | 生产遍当前无条件覆盖全部 610k 点 | 需预计算筛选表；收益取决于可见比例（`sweep_seen` 实测 64.7–68.3%） |
 | D · 天花板参照 | — | FRAG_FROZEN 74.5 fps = "零生产成本"时的上界 | A+B 全做完 ⇒ 16.13 → ≈13.4 ms（≈74 fps，1.7× vs base 23.04 ms） |
 
-**验收口径（沿用已建工具）**：任一优化都必须过 ① 颜色闸门（`?framedump=1` + `tools/ch7_color_gate_compare.py`，PSNR ≥ 45 dB、SSIM ≥ 0.999）② 本阶段 0 的 4 臂协议（同会话背靠背、`rounds=3`、`arm=` 自证）③ 缺省路径逐字不变。
+**验收口径（沿用已建工具）**：任一优化都必须过 ① 颜色闸门（`?framedump=1` + `tools/ch7/ch7_color_gate_compare.py`，PSNR ≥ 45 dB、SSIM ≥ 0.999）② 本阶段 0 的 4 臂协议（同会话背靠背、`rounds=3`、`arm=` 自证）③ 缺省路径逐字不变。
 
 ## 5. 低秩导出格式核查（只读，字节级闭合）
 
@@ -77,5 +77,5 @@ R（读取成本 = FRAG_FROZEN − CONSUME_ONLY） = 13.423 − 10.460 = +2.963 
 
 | commit | 内容 |
 |---|---|
-| `2b0f1f1` | 标签自动化 + `shfreeze=N` + `arm=`/`sw=` 字段与登记 + `docs/ch7_excluded_reports.md` + `tools/ch7_stage0_report.py` |
+| `2b0f1f1` | 标签自动化 + `shfreeze=N` + `arm=`/`sw=` 字段与登记 + `docs/ch7_excluded_reports.md` + `tools/ch7/ch7_stage0_report.py` |
 | `aeb870f` | P/R 工具加 `S0_GL` 环境过滤；桌面验证批归档 `raw/_probe/desktop_stage0/` |

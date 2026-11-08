@@ -5,7 +5,7 @@ import dts from 'vite-plugin-dts';
 import compression from 'vite-plugin-compression';
 import { viteStaticCopy } from 'vite-plugin-static-copy';
 import compressionMiddleware from 'compression';
-import { ch7ReportPlugin as ch7ReportPluginImpl } from './tools/ch7_report_middleware.mjs';
+import { ch7ReportPlugin as ch7ReportPluginImpl } from './tools/ch7/ch7_report_middleware.mjs';
 
 const throttleSpeedMbps = process.env.THROTTLE_SPEED ? parseFloat(process.env.THROTTLE_SPEED) : 0;
 

@@ -40,7 +40,7 @@ jobs:
               # 从而保证线上页面与模型同源（repo-sam.inria.fr 不返回 CORS 头，跨域 fetch 必被浏览器拦）。
               # 拉取失败不阻塞部署：对应臂在站点上会标记为资产缺失，其余分组不受影响。
               continue-on-error: true
-              run: python3 tools/fetch_reduced3dgs_assets.py
+              run: python3 tools/eval/fetch_reduced3dgs_assets.py
 
             - name: Build static site (site-dist/)
               # 仅做站点构建；WASM 预编译产物已入库（src/wasm），无需 Emscripten。

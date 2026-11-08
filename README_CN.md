@@ -48,7 +48,7 @@
 
 `?scene=` 支持文件路径、显示名子串、1 起序号或完整 URL（`0` / `off` 表示关闭）；**不带该参数时行为与以前完全一致**（仍需手动选择）。
 
-线上实测（**2026-09-24**，由 [`tools/verify_demo.mjs`](tools/verify_demo.mjs) 自动完成：真实浏览器打开线上页面、模拟用户操作、抓取全部网络请求、截图后做像素统计）：
+线上实测（**2026-09-24**，由 [`tools/eval/verify_demo.mjs`](tools/eval/verify_demo.mjs) 自动完成：真实浏览器打开线上页面、模拟用户操作、抓取全部网络请求、截图后做像素统计）：
 
 | 环境 | 场景 | 首帧 | `.ply` 下载 | 交互证据 |
 | ---- | ---- | ---: | ----------: | -------: |
@@ -208,7 +208,7 @@ npm run format
 │   └── wasm/                    # WASM 工具（compile_wasm.sh 构建）
 ├── examples/                    # 9 个示例工程（vanilla-js / file-loader / ...）
 ├── scenes/  scenes.json         # 演示场景（r7 低秩 QPLY）
-├── tools/verify_demo.mjs        # 无依赖 headless 浏览器部署验证脚本
+├── tools/eval/verify_demo.mjs        # 无依赖 headless 浏览器部署验证脚本
 ├── docs/DEPLOYMENT.md           # 线上状态与验证证据
 ├── vite.site.config.js          # 站点构建（site-dist/ → GitHub Pages）
 ├── dist/                        # 构建产物

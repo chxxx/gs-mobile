@@ -39,8 +39,8 @@
 
 ## 3. 颜色正确性（桌面图像级闸门；真机未做，见 §6）
 
-方法：`?framedump=1` 在**基准位姿**抓整幅、**无损 PNG** 回传（`tools/ch7_color_gate.ps1`）→ 逐像素比对
-（`tools/ch7_color_gate_compare.py`，PSNR 口径与 `tools/compare_images.py` 一致）。两臂 `covered` 均 100%（全幅 320×213）。
+方法：`?framedump=1` 在**基准位姿**抓整幅、**无损 PNG** 回传（`tools/ch7/ch7_color_gate.ps1`）→ 逐像素比对
+（`tools/ch7/ch7_color_gate_compare.py`，PSNR 口径与 `tools/eval/compare_images.py` 一致）。两臂 `covered` 均 100%（全幅 320×213）。
 
 | 指标 | 值 | 判据 |
 |---|---|---|
@@ -103,10 +103,10 @@
 ::   ...&u=fr-XX-base                          （BASE）
 ::   ...&u=fr-XX-frag&shcache=frag             （FRAG）
 :: 桌面三臂冒烟（base / frag / fragfrz，验证着色器+GL 无错、covered 一致）
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\ch7_desktop_shader_verify.ps1 -SleepSec 40
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\ch7\ch7_desktop_shader_verify.ps1 -SleepSec 40
 :: 桌面颜色闸门（无损 PNG 逐像素比对）
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\ch7_color_gate.ps1
-python tools\ch7_color_gate_compare.py
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\ch7\ch7_color_gate.ps1
+python tools\ch7\ch7_color_gate_compare.py
 ```
 
 - 原始报告：`thesis/data/ch7_measurements/raw/fr_*.txt`（真机）、`colorgate_*.txt`（颜色闸门）。
@@ -123,5 +123,5 @@ python tools\ch7_color_gate_compare.py
 | `78b6586` | §30 排版 |
 | `1e32152` | §31 真机验证（FRAG 1.43× + 机制 4.1ms vs 30.5ms + 环境/标签纪律） |
 | `a26dd32` | `?framedump=1` 抓帧 + 回传链路两缺陷（keepalive 64KB；超限静默失败）修复 |
-| `7861423` | §32 颜色闸门通过 + `tools/ch7_color_gate*.{ps1,py}` 入库 |
+| `7861423` | §32 颜色闸门通过 + `tools/ch7/ch7_color_gate*.{ps1,py}` 入库 |
 | `6c61aa0` | 闸门脚本输出路径鲁棒化 |

@@ -1,6 +1,6 @@
 # B 层 · 桌面无损闸门（FINAL vs BASE，逐场景）
 
-> 口径：`tools/ch7_b_layer_gate.ps1`（桌面 Edge；`res=320x213&res_mode=forced&dpr=1&rounds=1&cold=1`，
+> 口径：`tools/ch7/ch7_b_layer_gate.ps1`（桌面 Edge；`res=320x213&res_mode=forced&dpr=1&rounds=1&cold=1`，
 > `proto=flux&benchmode=offscreen-paper-match&sync=batch&driver=msgchannel&runs=5&warmup=20&tickevery=16&fences=3`，
 > `framedump=1` 整幅**无损 PNG** 回传）；BASE = 全部开关缺省，FINAL = `shcache=frag&lr=1&notx=1&nocolortx=1`。
 > 逐像素判据：对 BASE 的 PSNR / 最大级差 / >4、>8、>16 级像素计数；**交付红线 = PSNR ≥ 50 dB 且 >8 级 = 0**。

@@ -44,16 +44,16 @@
 | 类别 | 位置 |
 |---|---|
 | 结果数据 | `thesis/data/ch7_measurements/raw/`（+ `raw/paper_protocol/` 存档副本） |
-| 分析工具 | `rendering/tools/ch7_*.py`（`ch7_band_timeline.py`、`ch7_clearprobe_fit.py`、`ch7_anchor_report.py`、`ch7_paper_protocol_run.py` …） |
+| 分析工具 | `rendering/tools/ch7/ch7_*.py`（`ch7_band_timeline.py`、`ch7_clearprobe_fit.py`、`ch7_anchor_report.py`、`ch7_paper_protocol_run.py` …） |
 | 协议/文档 | `rendering/docs/ch7_external_protocol_validation.md`（§8.10.4–§8.10.16）、`docs/ch7_offscreen_paper_protocol.md` |
 | 链接清单（可复跑） | `rendering/_cfgscan2_links.txt`、`_foot_sweep_links.txt`、`_cull_res_links.txt`、`_clr_links.txt`、`_clr_rep_links.txt`、`_dvfs_links.txt`、`_pair_links.txt` |
 | **本轮临时文件** | `rendering/_tmp_scratch/20260929_desktop/`（297 件：本轮所有诊断脚本/日志） |
 | 更早临时文件 | `rendering/_tmp_scratch/older/` |
-| **保留（工具链引用，勿动）** | `rendering/_tmp_ch7probe/`（`cdp.mjs` 等被 `tools/ch7_paper_protocol_run.py` 调用） |
+| **保留（工具链引用，勿动）** | `rendering/_tmp_ch7probe/`（`cdp.mjs` 等被 `tools/ch7/ch7_paper_protocol_run.py` 调用） |
 
 ## 6. 代码改动清单（本轮，均通过 `tsc` / `vitest` / `vite build`）
 
-`bench-offscreen.ts`（`G` 跨 run 归零）· `bench-flux.ts`（对账/`CLR`/`BAND` 标记；**注入块现为禁用** `injBytes=0`）· `bench-measure.ts`（ours 的 `|lab` 分解 + 对账字段）· `bench-shared.ts`/`bench.ts`（结果字段与打印）· `RenderProgram.ts`（`?foot=` 足迹倍率旋钮）· `OffscreenBenchTarget.ts`（`runClearProbe`/`?clearprobe`/`?clearreps`/`bandTag`）· `tools/ch7_common.py`（`CH7_FRAMES/RUNS/WARMUP/RES/DPR` 环境变量覆盖）· `_tmp_ch7probe/cdp.mjs`（`eval` 硬超时 + 连续失败自退出 + `CH7_GPU`）。
+`bench-offscreen.ts`（`G` 跨 run 归零）· `bench-flux.ts`（对账/`CLR`/`BAND` 标记；**注入块现为禁用** `injBytes=0`）· `bench-measure.ts`（ours 的 `|lab` 分解 + 对账字段）· `bench-shared.ts`/`bench.ts`（结果字段与打印）· `RenderProgram.ts`（`?foot=` 足迹倍率旋钮）· `OffscreenBenchTarget.ts`（`runClearProbe`/`?clearprobe`/`?clearreps`/`bandTag`）· `tools/ch7/ch7_common.py`（`CH7_FRAMES/RUNS/WARMUP/RES/DPR` 环境变量覆盖）· `_tmp_ch7probe/cdp.mjs`（`eval` 硬超时 + 连续失败自退出 + `CH7_GPU`）。
 
 ## 7. 我犯过的错误（留档，供审计）
 
@@ -732,7 +732,7 @@ Mismatch between texture format and sampler type (signed/unsigned/float/shadow).
 
 **方法论教训（写入纪律）**：
 - 任何**编译期**开关的判据都必须是**模块作用域**的（不依赖实例状态/初始化顺序）；
-- "GL 类型不匹配"这类错误**只在 draw 时**以 `INVALID_OPERATION` 丢弃整帧，症状=画面全空 + 报告无错误文本 ⇒ 必须靠**桌面端复现 + `--enable-logging=stderr` 抓 console**（脚本：`tools/ch7_desktop_shader_verify.ps1`），不要再让移动端做二分。
+- "GL 类型不匹配"这类错误**只在 draw 时**以 `INVALID_OPERATION` 丢弃整帧，症状=画面全空 + 报告无错误文本 ⇒ 必须靠**桌面端复现 + `--enable-logging=stderr` 抓 console**（脚本：`tools/ch7/ch7_desktop_shader_verify.ps1`），不要再让移动端做二分。
 
 ### §28（2026-09-30）`?shpass=pre`（Transform Feedback 去重）真机实测：**可用且图像正确，但净负 −44%** ⇒ 否证"4× 冗余是主因"
 
@@ -837,7 +837,7 @@ Mismatch between texture format and sampler type (signed/unsigned/float/shadow).
 **判据本身的漏洞（本轮最重要的方法论收获）**：缺陷 D 期间，`[result]` 仍报 `ok=1`、`covered=99.8346%`、`ff_covered=99.80597%`，**与 BASE 逐位相同**。原因：`covered` 来自 `readCoveragePct()`，判据是 `alpha > 0`，而**颜色（RGB）与 alpha 都来自主 pass 的几何/属性路径**，颜色缓存写坏（第一遍全废）**不影响** `covered`，甚至冻结成空缓存时也只影响 alpha 而不影响"几何是否覆盖"的统计口径。
 ⇒ 纪律：**`covered` 一致只能表述为"几何/alpha 一致"，不得当作颜色正确性证据**；方案 B 的颜色正确性必须用逐像素比对（见下）。
 
-**修复后桌面自证**（Edge/D3D11 · RTX 4060 Laptop · 离屏 1600×1063 · 5×20 帧 · 三臂同会话，`tools/ch7_desktop_shader_verify.ps1 -SleepSec 40`）：
+**修复后桌面自证**（Edge/D3D11 · RTX 4060 Laptop · 离屏 1600×1063 · 5×20 帧 · 三臂同会话，`tools/ch7/ch7_desktop_shader_verify.ps1 -SleepSec 40`）：
 
 | 臂 | 结果 | fps | covered / ff_covered | mismatch / GL 错误 / `[shcache=frag]` 错误 |
 |---|---|---|---|---|
@@ -849,7 +849,7 @@ Mismatch between texture format and sampler type (signed/unsigned/float/shadow).
 - **FRAG_FROZEN 仍不可用**（已定位、未修）：`shcachefreeze` 在**首帧**就固化缓存，而首帧可能尚无有效绑定（`u_texture` 未绑 ⇒ `cov=0` ⇒ alpha=0）⇒ 这份**空缓存被永久冻结** ⇒ 画面全空、存活探针失败。修法：**延迟到"数据与 SH 都就绪"后再固化**。该臂只是"隔离主 pass 读取成本"的诊断臂，不影响 FRAG_FULL 结论。
 - 组合冲突一律硬失败（避免静默画错）：`shcache=frag` × `shfmt=f16`（两遍对同一批 SH 纹理声明类型不一致）、`shcache=frag` × `shpass=*`（会出现两套第一遍）⇒ 直接抛错并给出原因。
 
-**仍未完成的正确性闸门（下一步第一件事）**：逐像素比对 BASE vs FRAG_FULL（平均/最大误差、PSNR/SSIM）。现成资产：`tools/compare_images.py`（已有 PSNR + 可选 SSIM）· `bench-measure.ts` 的 `captureRGBA()`/`RgbaFrame`/`encodeCrop()+toDataURL()`（已在 sortlag 实验里跑通）。两条可行路径：
+**仍未完成的正确性闸门（下一步第一件事）**：逐像素比对 BASE vs FRAG_FULL（平均/最大误差、PSNR/SSIM）。现成资产：`tools/eval/compare_images.py`（已有 PSNR + 可选 SSIM）· `bench-measure.ts` 的 `captureRGBA()`/`RgbaFrame`/`encodeCrop()+toDataURL()`（已在 sortlag 实验里跑通）。两条可行路径：
 1. **抓帧回传**：加一个 `?framedump=1`（在 run 末渲染一帧、`captureRGBA()`、按固定裁剪框编码 JPEG/PNG 回传）⇒ 用 `compare_images.py` 出 PSNR/SSIM；
 2. **在屏截图**：bench 本身有在屏模式 ⇒ 无头浏览器 `--screenshot` 两臂各截一张 ⇒ 同一脚本出 PSNR/SSIM。
 另外必须专测的四点（与动态相机/精度相关）：① 排序后颜色与**原始 splat 索引**的对应（本实现按 `idx = y·W + x`，主 pass 用 `ivec2(index % W, index / W)` ⇒ 已核对互逆）；② SH 求值的 >1 / 负值截断是否与 BASE 一致；③ 颜色缓存是 **RGBA16F** ⇒ 相对 BASE 的 `float32` varying 有半精度量化（能否接受由 PSNR 判定）；④ 混合顺序/`u_colorTransformEnabled` 语义（已与 L858 对齐）。
@@ -889,10 +889,10 @@ Mismatch between texture format and sampler type (signed/unsigned/float/shadow).
   **覆盖率探针之后**——那一刻相机已被还原到基准位姿（既是 `covered=` 口径的前提，也是两臂画面逐像素可比的前提）；
   经 `frameDumpTags()` 以单独字段 `framedump_png=data:image/png;base64,…` 进逐轮结果行；字段已登记进
   `ROUND_RESULT_STR_KEYS`（仓库有**编译期闸门** `assertResultKeysRegistered`，漏登记会被 `tsc` 点名）。
-- 为什么必须**无损**：判据沿用 `tools/compare_images.py` 的 "PSNR ≥ 45 dB = 视觉不可分辨"。JPEG 的共同损失会把两臂
+- 为什么必须**无损**：判据沿用 `tools/eval/compare_images.py` 的 "PSNR ≥ 45 dB = 视觉不可分辨"。JPEG 的共同损失会把两臂
   PSNR 压到 35–40 dB ⇒ 拿它做闸门会**假阴性**。
-- 复现：`powershell -NoProfile -ExecutionPolicy Bypass -File tools\ch7_color_gate.ps1`（两臂各一次，`res=320x213`）
-  → `python tools\ch7_color_gate_compare.py`。
+- 复现：`powershell -NoProfile -ExecutionPolicy Bypass -File tools\ch7\ch7_color_gate.ps1`（两臂各一次，`res=320x213`）
+  → `python tools\ch7\ch7_color_gate_compare.py`。
 
 #### 32.2 结果（桌面 Edge/D3D11，同机位，全幅 320×213，两臂 `covered` 均 100%）
 

@@ -72,7 +72,7 @@
 
 ## 7. 约束提醒（设计时必须遵守）
 
-* 零回归（缺省关关闭 + 逐字不变 + 每次提交前跑 `tools/ch7_desktop_shader_verify.ps1`）；
+* 零回归（缺省关关闭 + 逐字不变 + 每次提交前跑 `tools/ch7/ch7_desktop_shader_verify.ps1`）；
 * 主表禁跨帧复用（`shfreeze` 仅上限参照且名称含 frozen）；
 * 三阶 SH 完整保留、禁运行时按设备选内核；
 * 正确性闸门：无损 PNG 全幅逐像素，对 BASE PSNR ≥ 45 dB 且无 >8 级像素；

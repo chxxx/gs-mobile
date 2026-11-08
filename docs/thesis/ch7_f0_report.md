@@ -65,8 +65,8 @@
 ## 5. 下一步（给方案的输入）
 
 1. **入库**：确认平台 id 后执行
-   `python tools/ch7_batch.py ingest --platform <id> --group auto --pattern "o2-*.txt"`，
-   再对 `o3-*.txt` / `f0-*-r3.txt` 同样处理；`python tools/ch7_verify.py verify --write-index docs/ch7_raw_index.csv`。
+   `python tools/ch7/ch7_batch.py ingest --platform <id> --group auto --pattern "o2-*.txt"`，
+   再对 `o3-*.txt` / `f0-*-r3.txt` 同样处理；`python tools/ch7/ch7_verify.py verify --write-index docs/ch7_raw_index.csv`。
    *待确认*：Mali-925（MediaTek）入库到 `d9400-xweb` 还是新建 `mali925-*`？（现有枚举无 mali）
 2. **F0.2/F0.3 真机跑批**：Gen3（Adreno 750，微信 XWEB）优先，A1~A6 按 ABAB；随后 Gen2、Mali。
 3. **F0.4 v 统计（不改渲染）**：在 `RenderProgram` 里加 `?viscull=1` 的**CPU 侧**统计（复用 worker 已有的 CPU 位置 +

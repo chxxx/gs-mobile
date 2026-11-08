@@ -34,7 +34,7 @@ The renderer ships as a public static site on GitHub Pages (built from this repo
 
 `?scene=` accepts a file path, a display-name substring, a 1-based index, or a full URL (`0` / `off` disables it). Without the parameter the page behaves exactly as before (manual selection only).
 
-Re-verified on **2026-09-24** with [`tools/verify_demo.mjs`](tools/verify_demo.mjs) — a dependency-free Chrome DevTools Protocol verifier that drives a real headless browser, selects/loads a scene, tracks every request, screenshots the canvas and analyses the pixels:
+Re-verified on **2026-09-24** with [`tools/eval/verify_demo.mjs`](tools/eval/verify_demo.mjs) — a dependency-free Chrome DevTools Protocol verifier that drives a real headless browser, selects/loads a scene, tracks every request, screenshots the canvas and analyses the pixels:
 
 | Environment | Scene | First frame | `.ply` download | Interaction proof |
 | ----------- | ----- | ----------: | --------------: | ----------------: |
@@ -58,7 +58,7 @@ Re-verified on **2026-09-24** with [`tools/verify_demo.mjs`](tools/verify_demo.m
 - **Single WebGL2 shader pipeline** that handles both standard SH and adaptive-degree QPLY
 - **Half-float packing utilities** for compact SH texture storage
 - **Zero neural inference** on the load or render path — no MLP, no WebGPU
-- **A live deployment** plus a no-dependency verifier ([`tools/verify_demo.mjs`](tools/verify_demo.mjs)) and a public static site for this demo page
+- **A live deployment** plus a no-dependency verifier ([`tools/eval/verify_demo.mjs`](tools/eval/verify_demo.mjs)) and a public static site for this demo page
 
 ## Quick Start
 
@@ -186,7 +186,7 @@ Both standard PLY and QPLY share the same SH texture format:
 │   └── wasm/                     # WASM utilities (compile_wasm.sh)
 ├── examples/                     # 9 standalone example projects
 ├── scenes/ scenes.json           # demo scenes (r7 low-rank QPLY)
-├── tools/verify_demo.mjs         # headless-browser deployment verifier
+├── tools/eval/verify_demo.mjs         # headless-browser deployment verifier
 ├── docs/DEPLOYMENT.md            # live-site status + verification evidence
 ├── vite.site.config.js           # static-site build (site-dist/ → GitHub Pages)
 └── package.json

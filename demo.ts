@@ -462,7 +462,7 @@ async function applyFluxCameraDefault(): Promise<void> {
     if (mode === "auto" || mode === "off" || mode === "ours") return;
     const want = /^fluxcam:(\d+)$/.exec(mode);
     try {
-        const res = await fetch("./bench-flux-camera.json");
+        const res = await fetch("./bench/data/bench-flux-camera.json");
         if (!res.ok) return;
         const asset = (await res.json()) as {
             focal_px?: number;

@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { viteStaticCopy } from "vite-plugin-static-copy";
 import { resolve as resolvePath } from "node:path";
-import { ch7ReportPlugin } from "./tools/ch7_report_middleware.mjs";
+import { ch7ReportPlugin } from "./tools/ch7/ch7_report_middleware.mjs";
 
 const dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -47,26 +47,26 @@ export default defineConfig(() => ({
                 { src: "scenes", dest: "." },
                 { src: "scenes.json", dest: "." },
                 // 测试页专用场景清单（bench.html 读取，与演示页 scenes.json 相互独立）
-                { src: "bench-scenes.json", dest: "." },
+                { src: "bench/data/bench-scenes.json", dest: "bench/data" },
                 // 第7章对比方法清单（bench.html 的 reduced3dgs 分组 + bench-flux.html）
-                { src: "baseline-scenes.json", dest: "." },
-                { src: "flux-baseline-scenes.json", dest: "." },
-                { src: "bench-cameras.json", dest: "." },
-                { src: "bench-flux-camera.json", dest: "." },
-                { src: "bench-resolutions.json", dest: "." },
+                { src: "bench/data/baseline-scenes.json", dest: "bench/data" },
+                { src: "bench/data/flux-baseline-scenes.json", dest: "bench/data" },
+                { src: "bench/data/bench-cameras.json", dest: "bench/data" },
+                { src: "bench/data/bench-flux-camera.json", dest: "bench/data" },
+                { src: "bench/data/bench-resolutions.json", dest: "bench/data" },
                 // 机位注入表（`pose=ours` / `pose=aligned` 用）；本地没生成时自动跳过
-                ...optionalAsset("bench-camviews.json", "."),
-                ...optionalAsset("bench-camviews-flux.json", "."),
+                ...optionalAsset("bench/data/bench-camviews.json", "bench/data"),
+                ...optionalAsset("bench/data/bench-camviews-flux.json", "bench/data"),
                 // [2026-10-11 修复] 第7章「对齐机位」资产（`?pose_src=aligned` 用，子页面 fetch 它）。
                 //   不复制进 site-dist 时的失败是**静默**的：`vite preview` 对未知路径回退 index.html
                 //   ⇒ fetch 拿到 200 但 body 是 HTML ⇒ `res.json()` 抛错被 catch 吞掉 ⇒ 对齐机位悄悄不生效
                 //   （实测把 5 条 reduced 记录全部污染：`pose_src=flux`、缺 `sim3_ver/aligned_pose_ok`）。
                 //   所以这里用**非 optional** 条目：文件缺失直接让构建失败，而不是静默降级。
-                { src: "bench-aligned-poses.json", dest: "." },
+                { src: "bench/data/bench-aligned-poses.json", dest: "bench/data" },
                 // ---- 第7章对比方法实测所需的"同源资产"（互联网实测必须同源，不能跨域直链）----
                 // Flux-GS：渲染器页面 + 压缩模型 + tmc3 解码器（约 50MB，已入库）
                 { src: "flux-gs-project-gh-pages", dest: "." },
-                // reduced-3DGS：量化 PLY（约 105MB，仓库里不入库，构建前用 tools/fetch_reduced3dgs_assets.py 拉取到本地）
+                // reduced-3DGS：量化 PLY（约 105MB，仓库里不入库，构建前用 tools/eval/fetch_reduced3dgs_assets.py 拉取到本地）
                 //   若嫌 site-dist 太大，可先用 --scenes 只拉当前要测的数据集，或注释掉本行分批轮换。
                 ...optionalAsset("reduced-3dgs", "."),
             ],

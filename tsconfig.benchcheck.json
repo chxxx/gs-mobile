@@ -11,14 +11,14 @@
     "forceConsistentCasingInFileNames": true
   },
   "include": [
-    "bench.ts",
-    "bench-case.ts",
-    "bench-measure.ts",
-    "bench-view.ts",
-    "bench-shared.ts",
-    "bench-chip.ts",
-    "bench-flux.ts",
-    "bench-offscreen.ts",
+    "bench/bench.ts",
+    "bench/bench-case.ts",
+    "bench/bench-measure.ts",
+    "bench/bench-view.ts",
+    "bench/bench-shared.ts",
+    "bench/bench-chip.ts",
+    "bench/bench-flux.ts",
+    "bench/bench-offscreen.ts",
     "src/**/*"
   ],
   "exclude": ["src/wasm/*"]
