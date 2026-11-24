@@ -27,12 +27,14 @@ The renderer ships as a public static site on GitHub Pages (built from this repo
 
 | Link | What it opens |
 | ---- | ------------- |
-| <https://chxxx.github.io/gs-mobile/> | Scene picker — **nothing is downloaded until you pick a scene** |
-| <https://chxxx.github.io/gs-mobile/?scene=truck> | Direct link: auto-loads **Truck** (smallest scene, 6.3 MB) |
+| <https://chxxx.github.io/gs-mobile/> | **Opens Truck by default** (smallest scene, 6.3 MB) — append `?scene=off` to go back to the manual picker |
+| <https://chxxx.github.io/gs-mobile/?scene=truck> | Direct link: auto-loads **Truck** (same scene as the default) |
 | <https://chxxx.github.io/gs-mobile/?scene=garden> | Direct link: auto-loads **Garden** |
 | <https://chxxx.github.io/gs-mobile/?scene=2> | Direct link by index (1-based, placeholder row excluded) |
 
-`?scene=` accepts a file path, a display-name substring, a 1-based index, or a full URL (`0` / `off` disables it). Without the parameter the page behaves exactly as before (manual selection only).
+`?scene=` accepts a file path, a display-name substring, a 1-based index, or a full URL. Without the parameter the page
+auto-loads the default scene (**Truck**, set by `DEFAULT_SCENE` in `demo.ts`); `?scene=0` / `?scene=off` / `?scene=` (empty)
+disables the preset and shows the manual picker, which downloads nothing until a scene is chosen.
 
 Re-verified on **2026-09-24** with [`tools/eval/verify_demo.mjs`](tools/eval/verify_demo.mjs) — a dependency-free Chrome DevTools Protocol verifier that drives a real headless browser, selects/loads a scene, tracks every request, screenshots the canvas and analyses the pixels:
 

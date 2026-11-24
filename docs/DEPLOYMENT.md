@@ -107,26 +107,31 @@
 
 ## 4. `?scene=` 直达链接（已上线）
 
-`demo.ts` 的 `resolvePresetScene()` 支持用 URL 参数直接打开某个场景；**不带参数时行为完全不变**
-（访客仍需自己在下拉框选场景，页面不会预先下载任何模型）。
+`demo.ts` 的 `resolvePresetScene()` 支持用 URL 参数直接打开某个场景；**不带该参数时自动加载默认场景
+`DEFAULT_SCENE = "truck"`**（访问 `https://chxxx.github.io/gs-mobile/` 即直接进 Truck，不再停在选择页）。
+想回到"手动选择、不选就不下载模型"的落地页，用 `?scene=off`（或 `?scene=0` / `?scene=` 空串）显式关闭预选。
+换默认场景只需改 `demo.ts` 里的一行常量。
 
 | 写法 | 行为 |
 | ---- | ---- |
+| （不带 `scene` 参数） | 自动加载默认场景 `DEFAULT_SCENE = "truck"` → `Truck (r7 QPLY)` |
 | `?scene=truck` | 按文件名 / 显示名子串匹配（大小写不敏感），命中 `Truck (r7 QPLY)` |
 | `?scene=2` | 下拉框第 2 个可选场景（1 起算，不含占位项） |
 | `?scene=scenes/point_cloud_quantised_half_r7-truck.ply` | 直接给相对路径 |
 | `?scene=https://…/xxx.ply` | 直接给完整 URL（目标站需允许跨域） |
-| `?scene=0` / `?scene=off` | 显式关闭预选 |
+| `?scene=0` / `?scene=off` / `?scene=` | 显式关闭预选（手动选择页） |
 
-例子（把体积最小的 Truck 作为 README 里"点开即看"的链接）：
+例子（现在首页与下面的直达链接等价，都直接进 Truck）：
 
 ```text
+https://chxxx.github.io/gs-mobile/
 https://chxxx.github.io/gs-mobile/?scene=truck
 ```
 
-> 该参数**已随 commit `ea3e4f1` 部署到线上**，并在部署完成后用运行 #6 复验通过
+> `?scene=` 参数**已随 commit `ea3e4f1` 部署到线上**，并在部署完成后用运行 #6 复验通过
 > （`autoSelectedFromUrl: true` + 控制台 `[scene] ?scene= 预选：Truck (r7 QPLY)`）。
-> 匹配失败时不会报错，只是回退成"不预选"（缺省行为与加参数前完全一致）。
+> 默认场景改动后前端日志变为 `[scene] Truck (r7 QPLY)（默认场景 / ?scene= 预选）`。
+> 匹配失败时不会报错，只是回退成"不预选"（与加默认场景前的手动选择行为一致）。
 
 ---
 

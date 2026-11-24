@@ -41,12 +41,14 @@
 
 | 链接 | 打开后是什么 |
 | ---- | ------------ |
-| <https://chxxx.github.io/gs-mobile/> | 场景选择页 —— **不选场景就不会下载任何模型** |
-| <https://chxxx.github.io/gs-mobile/?scene=truck> | 直达链接：自动加载 **Truck**（最小场景，6.3 MB） |
+| <https://chxxx.github.io/gs-mobile/> | **默认直接加载 Truck**（最小场景，6.3 MB）；加 `?scene=off` 回到手动选择页 |
+| <https://chxxx.github.io/gs-mobile/?scene=truck> | 直达链接：自动加载 **Truck**（与默认场景相同） |
 | <https://chxxx.github.io/gs-mobile/?scene=garden> | 直达链接：自动加载 **Garden** |
 | <https://chxxx.github.io/gs-mobile/?scene=2> | 按序号直达（1 起算，不含占位项） |
 
-`?scene=` 支持文件路径、显示名子串、1 起序号或完整 URL（`0` / `off` 表示关闭）；**不带该参数时行为与以前完全一致**（仍需手动选择）。
+`?scene=` 支持文件路径、显示名子串、1 起序号或完整 URL。**不带该参数时页面自动加载默认场景**
+（**Truck**，由 `demo.ts` 里的 `DEFAULT_SCENE` 指定）；`?scene=0` / `?scene=off` / `?scene=`（空串）会关闭预选，
+回到"不选场景就不下载任何模型"的手动选择页。
 
 线上实测（**2026-09-24**，由 [`tools/eval/verify_demo.mjs`](tools/eval/verify_demo.mjs) 自动完成：真实浏览器打开线上页面、模拟用户操作、抓取全部网络请求、截图后做像素统计）：
 

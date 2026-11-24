@@ -574,21 +574,34 @@ async function loadFile(file: File) {
 }
 
 /**
- * 解析 `?scene=` 直达参数（给"在线 Demo 直达链接"用；**不带参数时行为完全不变**，
- * 访客仍然需要手动在下拉框里选择场景）。
+ * [2026-11-24] 首页默认场景：**不带 `?scene=` 参数时自动加载它**（访问
+ * `https://chxxx.github.io/gs-mobile/` 即直接进 Truck，不再停在"请选择场景"）。
+ *
+ *   · 取值规则与 `?scene=` 完全相同（文件名/显示名子串、1 起序号、相对路径、完整 URL 均可）；
+ *   · 想恢复"手动选择"的落地页：`?scene=off`（等价 `?scene=0`，也支持 `?scene=` 空串）；
+ *   · 想换别的默认场景，只改这一行（Truck 是 13 个场景里体积最小的，6.3 MB，首屏最快）。
+ */
+const DEFAULT_SCENE = "truck";
+
+/**
+ * 解析 `?scene=` 直达参数；**不带该参数时回退到 `DEFAULT_SCENE`**（首页点开即看）。
  *
  *   ?scene=truck                     按文件名/显示名的子串匹配（大小写不敏感）
  *   ?scene=2                         1 起算的下拉序号
  *   ?scene=scenes/xxx.ply            直接给相对路径
  *   ?scene=https://.../xxx.ply       直接给完整 URL（需目标站允许跨域）
- *   ?scene=0 / ?scene=off            显式关闭预选
+ *   ?scene=0 / ?scene=off            显式关闭预选（回到"手动选择"的落地页）
+ *   ?scene=（空串）                   同样视为显式关闭预选
  */
 function resolvePresetScene(options: { value: string; text: string }[]): { index: number; directUrl: string } {
     let raw = "";
     try {
-        raw = (new URLSearchParams(location.search).get("scene") || "").trim();
+        const q = new URLSearchParams(location.search);
+        // 【关键】区分"根本没给 scene 参数"（→ 用默认场景）与"?scene="（空串 → 显式关闭）：
+        //   用 q.has() 而不是直接取值，否则 `?scene=off` 之外的显式空串也会被当成"没给"。
+        raw = q.has("scene") ? (q.get("scene") || "").trim() : DEFAULT_SCENE;
     } catch {
-        /* ignore */
+        raw = DEFAULT_SCENE;
     }
     if (!raw || raw === "0" || raw.toLowerCase() === "off") return { index: -1, directUrl: "" };
 
@@ -627,13 +640,14 @@ async function populateSceneSelector() {
         sceneSelect.appendChild(option);
     }
 
-    // ?scene= 预选（缺省无参数 → 保持"手动选择后才渲染"的既有行为，不额外下载模型）
+    // ?scene= 预选；**缺省无参数时用 DEFAULT_SCENE**（访问首页即自动加载 Truck）。
+    //   显式 `?scene=off` / `?scene=0` / `?scene=`（空串）⇒ 不预选，回到"手动选择"。
     const preset = resolvePresetScene(scenes.map((s) => ({ value: s.file, text: s.name })));
     if (preset.index >= 0) {
         const option = sceneSelect.options[preset.index + 1]; // +1: 第 0 项是占位 "-- Select a scene --"
         if (option) {
             sceneSelect.value = option.value;
-            console.info(`[scene] ?scene= 预选：${option.textContent}`);
+            console.info(`[scene] ${option.textContent}（默认场景 / ?scene= 预选）`);
             void loadFromUrl(option.value);
         }
     } else if (preset.directUrl) {
