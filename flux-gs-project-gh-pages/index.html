@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="description"
+        content="Monte Carlo Energy Aggregation for Mobile 3D
+Gaussian Splatting">
+  <meta name="keywords" content="Nerfies, D-NeRF, NeRF">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mobile-GS2</title>
+
+  <!-- Global site tag (gtag.js) - Google Analytics -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-PYVRSFMDRL"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+
+    function gtag() {
+      dataLayer.push(arguments);
+    }
+
+    gtag('js', new Date());
+
+    gtag('config', 'G-PYVRSFMDRL');
+  </script>
+
+  <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro"
+        rel="stylesheet">
+
+  <link rel="stylesheet" href="./static/css/bulma.min.css">
+  <link rel="stylesheet" href="./static/css/bulma-carousel.min.css">
+  <link rel="stylesheet" href="./static/css/bulma-slider.min.css">
+  <link rel="stylesheet" href="./static/css/fontawesome.all.min.css">
+  <link rel="stylesheet"
+        href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
+  <link rel="stylesheet" href="./static/css/index.css">
+<!--  <link rel="icon" href="static/images/favicon.svg">-->
+
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+  <script defer src="./static/js/fontawesome.all.min.js"></script>
+  <script src="./static/js/bulma-carousel.min.js"></script>
+  <script src="./static/js/bulma-slider.min.js"></script>
+  <script src="./static/js/index.js"></script>
+</head>
+<body>
+
+<nav class="navbar" role="navigation" aria-label="main navigation">
+  <div class="navbar-brand">
+    <a role="button" class="navbar-burger" aria-label="menu" aria-expanded="false">
+      <span aria-hidden="true"></span>
+      <span aria-hidden="true"></span>
+      <span aria-hidden="true"></span>
+    </a>
+  </div>
+  <div class="navbar-menu">
+    <div class="navbar-start" style="flex-grow: 1; justify-content: center;">
+<!--      <a class="navbar-item" href="https://keunhong.com">-->
+      <a class="navbar-item">
+      <span class="icon">
+          <i class="fas fa-home"></i>
+      </span>
+      </a>
+
+      <div class="navbar-item has-dropdown is-hoverable">
+        <a class="navbar-link">
+          More Research
+        </a>
+       <div class="navbar-dropdown">
+         <a class="navbar-item" href="https://xiaobiaodu.github.io/dreamcar-project/">
+           DreamCar
+         </a>
+        <a class="navbar-item" href="https://xiaobiaodu.github.io/3drealcar/">
+                  3DRealCar
+         </a>
+         
+             <a class="navbar-item" href="https://xiaobiaodu.github.io/mvgs-project/">
+                  MVGS
+         </a>
+               <a class="navbar-item" href="https://xiaobiaodu.github.io/reflectivegs/">
+                  RGS
+         </a>
+      </div>
+    </div>
+
+  </div>
+</nav>
+
+
+<section class="hero">
+  <div class="hero-body">
+    <div class="container is-max-desktop">
+      <div class="columns is-centered">
+        <div class="column has-text-centered">
+          <h1 class="title is-1 publication-title">Monte Carlo Energy Aggregation for Mobile 3D
+Gaussian Splatting</h1>
+                                  <h1 class="title is-3 publication-title">ECCV 2026</h1>
+
+          <div class="is-size-5 publication-authors">
+             <span class="author-block">
+          </div>
+
+        <div class="is-size-5 publication-authors">
+
+
+
+            <span class="author-block">
+              <a href="https://xiaobiaodu.github.io/">Xiaobiao Du</a><sup></sup></span>&nbsp;&nbsp;&nbsp;&nbsp;
+            <span class="author-block">
+              <a href="">YuAn Wang</a><sup></sup>
+            </span>&nbsp;&nbsp;&nbsp;&nbsp;
+            <span class="author-block">
+              <a >Hao Li</a><sup></sup> &nbsp;&nbsp;&nbsp;&nbsp;
+            </span>
+             <span class="author-block">
+              <a >Bosheng Wang</a><sup></sup> &nbsp;&nbsp;&nbsp;&nbsp;
+            </span>
+            <span class="author-block">
+              <a >Xun Sun</a><sup></sup> &nbsp;&nbsp;&nbsp;&nbsp;
+            </span>
+            <span class="author-block">
+              <a href="https://xinyu-au.github.io/">Xin Yu</a><sup></sup>
+            </span>
+          </div>
+
+          <div class="column has-text-centered">
+            <div class="publication-links">
+              <!-- PDF Link. -->
+              <span class="link-block">
+               <a href="https://arxiv.org/pdf/2606.30017"
+                   class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon">
+                      <i class="fas fa-file-pdf"></i>
+                  </span>
+                  <span>Paper</span>
+                </a>
+              </span>
+              <span class="link-block">
+              
+<!--                <a href="https://arxiv.org/abs/2011.12948"-->
+<!--                   class="external-link button is-normal is-rounded is-dark">-->
+<!--                  <span class="icon">-->
+<!--                      <i class="ai ai-arxiv"></i>-->
+<!--                  </span>-->
+<!--                  <span>arXiv</span>-->
+<!--                </a>-->
+              </span>
+              <!-- Video Link. -->
+              <span class="link-block">
+<!--                <a href="https://www.youtube.com/watch?v=MrKrnHhk8IA"-->
+<!--                   class="external-link button is-normal is-rounded is-dark">-->
+<!--                  <span class="icon">-->
+<!--                      <i class="fab fa-youtube"></i>-->
+<!--                  </span>-->
+<!--                  <span>Video</span>-->
+<!--                </a>-->
+              </span>
+              <!-- Code Link. -->
+              <span class="link-block">
+               <a href="https://github.com/xiaobiaodu/Flux-GS" 
+                   class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon">
+                      <i class="fab fa-github"></i>
+                  </span>
+                  <span>Code</span>
+                  </a>
+              </span>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+
+<section >
+  <div class="container is-max-desktop">
+    <div class="hero-body">
+      <video id="teaser" autoplay muted loop playsinline >
+        <source src="static/videos/teaser.mp4"
+                type="video/mp4">
+      </video>
+      <h2 class="subtitle has-text-centered">
+        <span class="highlight" >Flux-GS</span> break through the 120 display FPS limit for real-time rendering on Mobile with the perfect first-order Spherical Harmonics</span>
+      </h2>
+    </div>
+  </div>
+</section>
+
+
+
+<section class="section">
+  <div class="container is-max-desktop">
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3">Try Mobile Rendering on Your Phone!</h2>
+       <b>make sure you can access huggingface</b> 
+        
+        <div class="content has-text-centered">
+          <div class="publication-links">
+
+          
+
+            <span class="link-block">
+              <a href="render_garden/index.html" class="external-link button is-normal is-rounded is-dark">
+                <span>Garden</span>
+              </a>
+            </span>
+            <span class="link-block">
+              <a href="render_bicycle/index.html" class="external-link button is-normal is-rounded is-dark">
+                <span>Bicycle</span>
+              </a>
+            </span>
+            <span class="link-block">
+              <a href="render_counter/index.html" class="external-link button is-normal is-rounded is-dark">
+                <span>Counter</span>
+              </a>
+            </span>
+             <span class="link-block">
+              <a href="render_treehill/index.html" class="external-link button is-normal is-rounded is-dark">
+                <span>Treehill</span>
+              </a>
+            </span>
+            <span class="link-block">
+                        <a href="render_kitchen/index.html" class="external-link button is-normal is-rounded is-dark">
+                          <span>Kitchen</span>
+                        </a>
+                      </span>
+          <span class="link-block">
+                        <a href="render_room/index.html" class="external-link button is-normal is-rounded is-dark">
+                          <span>Room</span>
+                        </a>
+                      </span>
+
+
+            <span class="link-block">
+              <a href="render_truck/index.html" class="external-link button is-normal is-rounded is-dark">
+                <span>Truck</span>
+              </a>
+            </span>
+
+        <span class="link-block">
+              <a href="render_train/index.html" class="external-link button is-normal is-rounded is-dark">
+                <span>Train</span>
+              </a>
+            </span>
+    <span class="link-block">
+              <a href="render_flowers/index.html" class="external-link button is-normal is-rounded is-dark">
+                <span>Flowers</span>
+              </a>
+            </span>
+            
+
+               <span class="link-block">
+              <a href="render_playroom/index.html" class="external-link button is-normal is-rounded is-dark">
+                <span>Playroom</span>
+              </a>
+            </span>
+    <!-- <span class="link-block">
+              <a href="render_drjohnson/index.html" class="external-link button is-normal is-rounded is-dark">
+                <span>DrJohnson</span>
+              </a>
+            </span> -->
+
+
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+
+<section class="section">
+  <div class="container is-max-desktop">
+    <!-- Abstract. -->
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3">Abstract</h2>
+        <div class="content has-text-justified">
+          <p>
+Recent advances in 3D Gaussian Splatting have demonstrated unprecedented success in novel view synthesis.
+However, the substantial inference and storage overhead driven by high-order Spherical Harmonics (SH) are primary bottlenecks for mobile platforms. 
+In this paper, we present Flux-GS, a real-time Gaussian Splatting method designed to achieve high-fidelity rendering with significantly reduced overhead for resource-constrained mobile platforms. 
+We first propose a Monte Carlo Specular Energy Aggregator, sampling third-order radiance residuals and aggregating specular energy into a compact latent space.
+In this way, our method effectively preserves visually salient lighting features in lower-order bands without expensive distillation or pre-training. 
+To mitigate the high-frequency details lost during compression, we introduce an Attribute-Conditioned SH Enhancement module. 
+This module predicts Gaussian-aware offsets based on intrinsic Gaussian attributes, which enhance the first-order SH representation prior to inference, without extra inference costs.
+Furthermore, the original single-view gradient-based densification is prone to producing excessive Gaussians and overfitting to a certain view.
+We address these limitations by proposing a Multi-view Alpha-based Densification and Pruning strategy.
+By leveraging multi-view guidance, we ensure multi-view structure consistency and the precise removal of redundant primitives.
+Extensive experiments demonstrate that Flux-GS achieves substantial parameter reduction while maintaining competitive visual quality, offering a robust and scalable solution for real-time mobile rendering.
+ <p> 
+
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<hr>
+
+</section class="section">
+  <div class="container is-max-desktop">
+        <h2 class="title is-3">Introduction</h2>
+
+      <img src="static/images/teaser.png" alt="">
+<p>
+   <b>ab.</b>  Flux-GS achieves rendering quality comparable to both 3DGS [31] and
+the Mobile-GS, while reducing the number of Gaussian primitives and facilitating
+significantly higher FPS on the mobile with Snapdragon 8 Gen 3 GPU.   <b>c.</b>  The proposed
+Flux-GS utilizes WebGL to enable seamless cross-platform rendering.
+</p>
+
+  </div>
+</section>
+
+<hr>
+
+</section class="section">
+  <div class="container is-max-desktop">
+        <h2 class="title is-3">Motivation</h2>
+
+      <img src="static/images/motivation.png" alt="">
+<p>
+    <span class="highlight" > Gaussian parameter distribution and Spherical Harmonic fidelity
+analysis. </span>
+
+  <span class="highlight" >Left:</span > Per Gaussian memory footprint across 3DGS variants. Flux-GS achieves
+significant compression (61% and 26% reductions) by optimizing Spherical Harmonics
+(SH) coefficients and decoupling SH into the base and view-independent components.
+  <span class="highlight" >Right:</span> Qualitative comparison demonstrates that Flux-GS with only first-order SH can
+render high-fidelity high-frequency details comparable to 3DGS.
+</p>
+
+  </div>
+</section>
+
+<hr>
+
+</section class="section">
+  <div class="container is-max-desktop">
+        <h2 class="title is-3">Rendering Pipeline</h2>
+
+      <img class="content-figure" src="static/images/method.png" alt="">
+<p>
+
+  Overview of the Flux-GS framework. Our method optimizes third-order
+SH for the initial 3k iterations, then transitions via Monte Carlo Specular Energy
+Aggregator for high-frequency representation. With the first-order direction moments
+inherited from the original third-order SH, we leverage a neural network to aggregate
+these latents into first-order SH for rendering. During inference, the model requires
+only once decoding to obtain first-order SH, significantly reducing storage.
+</p>
+
+  </div>
+</section>
+
+
+<hr>
+
+<!-- </section class="section">
+  <div class="container is-max-desktop">
+        <h2 class="title is-3">High-valued Opacity</h2>
+
+      <img src="static/images/opacity.png" alt="">
+<p>
+
+Illustration of our proposed Multi-view Alpha-based Densification.
+and Pruning strategy. a. Traditional 3DGS leverages the single-view Gaussian position gradient determinist. b. We propose to employ a multi-view loss-driven mechanism,
+coupled with alpha-based Gaussian evaluation to densify more Gaussians in the badreconstructed regions and moderately prune Gaussians for well-reconstructed areas.
+</p>
+
+  </div>
+</section> -->
+
+<!-- <hr> -->
+
+<!-- </section class="section">
+  <div class="container is-max-desktop">
+        <h2 class="title is-3">Runtime Analysis</h2>
+
+      <img src="static/images/runtime.png" alt="">
+<p>
+
+We further provide a detailed runtime analysis of our proposed Mobile-GS evaluated on four representative scenes, covering both indoor and 
+outdoor environments from the Mip-NeRF 360 dataset. The reported runtime accounts for all essential components involved in the rendering pipeline, 
+including the lightweight MLPs used for view-dependent effects.
+ Despite the inclusion of MLPs, which are often regarded as computationally demanding, our design introduces minimal overhead.
+  This demonstrates that Mobile-GS maintains a favorable balance between computational efficiency and model expressiveness, 
+  ensuring real-time performance without compromising visual fidelity.
+
+</p>
+
+  </div>
+</section> -->
+
+<!-- <hr> -->
+
+ </section class="section">
+  <div class="container is-max-desktop">
+
+        <h2 class="title is-3">Rendering
+        </h2>
+
+      <video autoplay muted loop playsinline controls>
+        <source src="./static/videos/bicycle.mp4"
+                type="video/mp4">
+      </video>
+ 
+</section> 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<footer class="footer">
+  <div class="container">
+    <div class="content has-text-centered">
+    </div>
+    <div class="columns is-centered">
+      <div class="column is-8">
+        <div class="content">
+          <p>
+            This website is licensed under a <a rel="license"
+                                                href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+            Commons Attribution-ShareAlike 4.0 International License</a>.
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

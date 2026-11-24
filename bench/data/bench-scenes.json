@@ -1,0 +1,124 @@
+{
+    "version": 1,
+    "note": "Bench page scene manifest. 'demo:true' entries appear in the viewer dropdown. File paths must stay same-origin under ./scenes/. `*-std45` 为表 7-5 标准臂（朴素 45 维量化），仅用于两臂对照，不进 demo 下拉。",
+    "scenes": [
+        {
+            "id": "garden",
+            "name": "Garden (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-garden.ply",
+            "dataset": "mip360",
+            "demo": true,
+            "points": 610000
+        },
+        {
+            "id": "bicycle",
+            "name": "Bicycle (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-bicycle.ply",
+            "dataset": "mip360",
+            "demo": false
+        },
+        {
+            "id": "flowers",
+            "name": "Flowers (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-flowers.ply",
+            "dataset": "mip360",
+            "demo": false
+        },
+        {
+            "id": "stump",
+            "name": "Stump (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-stump.ply",
+            "dataset": "mip360",
+            "demo": false
+        },
+        {
+            "id": "treehill",
+            "name": "Treehill (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-treehill.ply",
+            "dataset": "mip360",
+            "demo": false
+        },
+        {
+            "id": "room",
+            "name": "Room (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-room.ply",
+            "dataset": "mip360",
+            "demo": false
+        },
+        {
+            "id": "counter",
+            "name": "Counter (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-counter.ply",
+            "dataset": "mip360",
+            "demo": false
+        },
+        {
+            "id": "kitchen",
+            "name": "Kitchen (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-kitchen.ply",
+            "dataset": "mip360",
+            "demo": false
+        },
+        {
+            "id": "bonsai",
+            "name": "Bonsai (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-bonsai.ply",
+            "dataset": "mip360",
+            "demo": false
+        },
+        {
+            "id": "truck",
+            "name": "Truck (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-truck.ply",
+            "dataset": "tnt",
+            "demo": true,
+            "points": 273169
+        },
+        {
+            "id": "train",
+            "name": "Train (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-train.ply",
+            "dataset": "tnt",
+            "demo": false
+        },
+        {
+            "id": "drjohnson",
+            "name": "DrJohnson (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-drjohnson.ply",
+            "dataset": "db",
+            "demo": true,
+            "points": 432000
+        },
+        {
+            "id": "playroom",
+            "name": "Playroom (r7 QPLY)",
+            "file": "scenes/point_cloud_quantised_half_r7-playroom.ply",
+            "dataset": "db",
+            "demo": false
+        },
+        {
+            "id": "garden-std45",
+            "name": "Garden (r45 std QPLY)",
+            "file": "scenes/point_cloud_quantised_half_std45-garden.ply",
+            "dataset": "mip360",
+            "demo": false,
+            "points": 610000
+        },
+        {
+            "id": "truck-std45",
+            "name": "Truck (r45 std QPLY)",
+            "file": "scenes/point_cloud_quantised_half_std45-truck.ply",
+            "dataset": "tnt",
+            "demo": false,
+            "points": 273169
+        },
+        {
+            "id": "drjohnson-std45",
+            "name": "DrJohnson (r45 std QPLY)",
+            "file": "scenes/point_cloud_quantised_half_std45-drjohnson.ply",
+            "dataset": "db",
+            "demo": false,
+            "points": 432000
+        }
+    ]
+}

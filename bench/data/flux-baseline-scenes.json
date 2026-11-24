@@ -1,0 +1,19 @@
+{
+    "version": 1,
+    "note": "第7章对比方法（Flux-GS）场景清单。Flux-GS 使用其自带 WebGL 渲染器（flux-gs-project-gh-pages/render_<scene>/index.html），因此本清单登记的是渲染页面与本地模型文件，由 bench-flux.html 以 iframe 桥接方式驱动。model 为本地镜像的压缩模型（等价于其默认 HuggingFace 下载源的同名文件），storageMB 为实测文件体积，用于和论文报告值交叉核对。dataset 取值与 thesis 第7章分组一致：mip360 / tnt / db。",
+    "scenes": [
+        { "id": "bicycle", "name": "Flux-GS · Bicycle", "dataset": "mip360", "page": "flux-gs-project-gh-pages/render_bicycle/index.html", "model": "flux-gs-project-gh-pages/scene/bicycle.json", "storageMB": 4.76 },
+        { "id": "flowers", "name": "Flux-GS · Flowers", "dataset": "mip360", "page": "flux-gs-project-gh-pages/render_flowers/index.html", "model": "flux-gs-project-gh-pages/scene/flowers.json", "storageMB": 4.71 },
+        { "id": "garden", "name": "Flux-GS · Garden", "dataset": "mip360", "page": "flux-gs-project-gh-pages/render_garden/index.html", "model": "flux-gs-project-gh-pages/scene/garden.json", "storageMB": 6.95 },
+        { "id": "stump", "name": "Flux-GS · Stump", "dataset": "mip360", "page": "flux-gs-project-gh-pages/render_stump/index.html", "model": "flux-gs-project-gh-pages/scene/stump.json", "storageMB": 3.76 },
+        { "id": "treehill", "name": "Flux-GS · Treehill", "dataset": "mip360", "page": "flux-gs-project-gh-pages/render_treehill/index.html", "model": "flux-gs-project-gh-pages/scene/treehill.json", "storageMB": 4.19 },
+        { "id": "room", "name": "Flux-GS · Room", "dataset": "mip360", "page": "flux-gs-project-gh-pages/render_room/index.html", "model": "flux-gs-project-gh-pages/scene/room.json", "storageMB": 2.43 },
+        { "id": "counter", "name": "Flux-GS · Counter", "dataset": "mip360", "page": "flux-gs-project-gh-pages/render_counter/index.html", "model": "flux-gs-project-gh-pages/scene/counter.json", "storageMB": 2.32 },
+        { "id": "kitchen", "name": "Flux-GS · Kitchen", "dataset": "mip360", "page": "flux-gs-project-gh-pages/render_kitchen/index.html", "model": "flux-gs-project-gh-pages/scene/kitchen.json", "storageMB": 3.41 },
+        { "id": "bonsai", "name": "Flux-GS · Bonsai", "dataset": "mip360", "page": "flux-gs-project-gh-pages/render_bonsai/index.html", "model": "flux-gs-project-gh-pages/scene/bonsai.json", "storageMB": 3.09 },
+        { "id": "truck", "name": "Flux-GS · Truck", "dataset": "tnt", "page": "flux-gs-project-gh-pages/render_truck/index.html", "model": "flux-gs-project-gh-pages/scene/truck.json", "storageMB": 2.77 },
+        { "id": "train", "name": "Flux-GS · Train", "dataset": "tnt", "page": "flux-gs-project-gh-pages/render_train/index.html", "model": "flux-gs-project-gh-pages/scene/train.json", "storageMB": 2.91 },
+        { "id": "drjohnson", "name": "Flux-GS · DrJohnson", "dataset": "db", "page": "flux-gs-project-gh-pages/render_drjohnson/index.html", "model": "flux-gs-project-gh-pages/scene/drjohnson.json", "storageMB": 2.62 },
+        { "id": "playroom", "name": "Flux-GS · Playroom", "dataset": "db", "page": "flux-gs-project-gh-pages/render_playroom/index.html", "model": "flux-gs-project-gh-pages/scene/playroom.json", "storageMB": 1.90 }
+    ]
+}

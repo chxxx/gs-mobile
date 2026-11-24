@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <title>测试完成</title>
+    <style>
+        :root { --bg:#0d1117; --panel:#161b22; --line:#2b3340; --text:#e6edf3; --muted:#8b98a8; --accent:#e3b341; --ok:#3fb950; --warn:#d29922; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { min-height: 100%; }
+        body { background: var(--bg); color: var(--text); font: 15px/1.6 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; display: flex; align-items: center; justify-content: center; padding: 20px; }
+        .box { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; max-width: 620px; width: 100%; }
+        h1 { font-size: 18px; margin-bottom: 10px; }
+        h1.ok { color: var(--ok); }
+        h1.warn { color: var(--warn); }
+        p { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+        code { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+        textarea { width: 100%; height: 180px; margin-top: 8px; background: #0b0f14; color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 10px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; resize: vertical; }
+        button { margin-top: 10px; background: #21262d; color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 9px 14px; font-size: 14px; }
+        details { margin-top: 12px; }
+        summary { color: var(--accent); font-size: 13px; cursor: pointer; }
+        .kv { margin-top: 10px; font-size: 13px; color: var(--text); }
+    </style>
+</head>
+<body>
+    <!--
+      完成页（benchmark 收尾用）：本页**不创建任何 WebGL 上下文、不建 Worker、不发场景请求**。
+      为什么要它：手机端（微信 XWEB / Adreno）同一进程内"同时活着的 bench 页"会吃掉 WebGL 上下文与显存配额，
+      跑到第 8~9 个任务后 `canvas.getContext('webgl2')` 就开始返回 null（不是 context lost，清理也救不回来）。
+      离屏论文档跑完回传成功后，由 bench.ts / bench-flux.ts 自动 `location.replace` 到本页：
+      整页替换 ⇒ 本页文档里所有 GL 上下文/显存/Worker 确定性释放；测试者忘记关页面也不再占名额。
+      本页不参与任何计时，也不影响任何已回传的数据。
+      URL：bench-done.html?u=<任务名>&ok=1|0    结果原文另存 sessionStorage 的 ch7_done_text。
+    -->
+    <div class="box">
+        <h1 id="title">测试完成</h1>
+        <p id="hint">…</p>
+        <div class="kv" id="kv"></div>
+        <div id="wrap" style="display:none">
+            <textarea id="txt" readonly></textarea>
+            <button id="btn">复制结果文本</button>
+        </div>
+        <details id="det" style="display:none">
+            <summary>查看原始结果文本</summary>
+            <textarea id="txt2" readonly></textarea>
+            <button id="btn2">复制结果文本</button>
+        </details>
+    </div>
+    <script>
+        (function () {
+            var q = new URLSearchParams(location.search);
+            var ok = q.get("ok") === "1";
+            var u = q.get("u") || "";
+            var text = "";
+            try { text = sessionStorage.getItem("ch7_done_text") || ""; } catch (e) { text = ""; }
+
+            var title = document.getElementById("title");
+            var hint = document.getElementById("hint");
+            var kv = document.getElementById("kv");
+            var det = document.getElementById("det");
+            var wrap = document.getElementById("wrap");
+            var txt = document.getElementById("txt");
+            var txt2 = document.getElementById("txt2");
+
+            var oneFps = "";
+            if (text) {
+                var m = text.match(/offscreen_fps_mean=([0-9.]+)/);
+                if (m) oneFps = m[1];
+            }
+
+            if (ok) {
+                title.className = "ok";
+                title.textContent = "\u2705 结果已自动回传，测试完成";
+                hint.textContent = "现在可以直接关闭本页（不关也不影响后面的测试：本页不再占用显卡资源）。";
+            } else {
+                title.className = "warn";
+                title.textContent = "\u26a0 结果未能自动回传";
+                hint.textContent = "请把下面的结果文本复制后发给测试发起人（长按文本框可全选）。";
+                wrap.style.display = "block";
+            }
+            kv.innerHTML =
+                "任务：<code>" + (u || "-") + "</code>" +
+                (oneFps ? "　离屏 FPS 均值：<code>" + oneFps + "</code>" : "");
+
+            if (text) {
+                txt.value = text;
+                txt2.value = text;
+                det.style.display = "block";
+            } else {
+                det.style.display = "none";
+            }
+
+            function fallback(v, done) {
+                try {
+                    var t = document.createElement("textarea");
+                    t.value = v;
+                    document.body.appendChild(t);
+                    t.select();
+                    document.execCommand("copy");
+                    document.body.removeChild(t);
+                    done();
+                } catch (e) { /* 忽略：提示用户长按手动复制 */ }
+            }
+            function copy(v, btn) {
+                var done = function () {
+                    var old = btn.textContent;
+                    btn.textContent = "已复制 \u2713";
+                    setTimeout(function () { btn.textContent = old; }, 1500);
+                };
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(v).then(done).catch(function () { fallback(v, done); });
+                } else {
+                    fallback(v, done);
+                }
+            }
+            document.getElementById("btn").addEventListener("click", function () { copy(txt.value, this); });
+            document.getElementById("btn2").addEventListener("click", function () { copy(txt2.value, this); });
+
+            // 诊断用：控制台出现这一行 = 完成页确实执行了（上一页的上下文/显存已随整页替换释放）
+            console.log("[done] 完成页已载入：u=" + (u || "-") + " ok=" + (ok ? 1 : 0) + " text=" + (text ? text.length + "B" : "无"));
+        })();
+    </script>
+</body>
+</html>
